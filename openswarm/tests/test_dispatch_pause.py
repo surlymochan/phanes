@@ -72,6 +72,12 @@ class ScopeKeyTests(unittest.TestCase):
         for scope in ("all", "mint", "lane_X", "host_worker-a", "backend.pi"):
             self.assertEqual(pause._scope_key(scope), scope)
 
+    def test_a_long_safe_scope_keeps_its_file_name(self):
+        for length in (201, 250):
+            with self.subTest(length=length):
+                scope = "lane_" + "x" * (length - len("lane_"))
+                self.assertEqual(pause._scope_key(scope), scope)
+
     def test_a_safe_scope_keeps_the_name_the_old_mapping_gave_it(self):
         # the records written before #1829 must stay where they are
         old = lambda scope: re.sub(r"[^A-Za-z0-9_.-]", "_", scope)
@@ -182,6 +188,47 @@ class ScopeCollisionTests(unittest.TestCase):
         self.assertTrue(self.store.resume("host:a:b"))
         self.assertFalse(self.store.is_paused(host="a:b", now=1))
         self.assertTrue(self.store.is_paused(host="a_b", now=1))
+
+    def test_host_colon_and_underscore_scopes_are_set_and_cleared_apart(self):
+        scopes = ("host:a:b", "host_a_b")
+        for order in (scopes, scopes[::-1]):
+            for cleared in scopes:
+                with self.subTest(order=order, cleared=cleared):
+                    for scope in order:
+                        self.store.pause(scope, reason=scope, now=1)
+
+                    self.assertEqual([row["scope"] for row in self.store.active(1)],
+                                     list(scopes))
+                    self.assertEqual(len(list(self.dir.glob("*.json"))), 2)
+                    self.store.pause(order[0], reason="updated", now=2)
+                    records = {row["scope"]: row for row in self.store.active(2)}
+                    self.assertEqual(records[order[0]]["reason"], "updated")
+                    self.assertEqual(records[order[1]]["reason"], order[1])
+
+                    survivor = next(scope for scope in scopes if scope != cleared)
+                    self.assertTrue(self.store.resume(cleared))
+                    self.assertFalse(self.store.resume(cleared))
+                    self.assertEqual([row["scope"] for row in self.store.active(2)],
+                                     [survivor])
+                    self.assertEqual(self.store.is_paused(host="a:b", now=2),
+                                     survivor == "host:a:b")
+                    self.assertTrue(self.store.resume(survivor))
+                    self.assertEqual(self.store.active(2), [])
+
+    def test_long_safe_scopes_keep_their_legacy_file_names_on_disk(self):
+        for length in (201, 250):
+            with self.subTest(length=length):
+                scope = "lane_" + "x" * (length - len("lane_"))
+                path = self.write_record(scope + ".json", scope)
+
+                self.assertEqual([row["scope"] for row in self.store.active(1)], [scope])
+                self.store.pause(scope, now=2, reason="updated")
+                self.assertEqual(list(self.dir.glob("*.json")), [path])
+                self.assertEqual(json.loads(path.read_text(encoding="utf-8"))["reason"],
+                                 "updated")
+                self.assertTrue(self.store.resume(scope))
+                self.assertFalse(path.exists())
+                self.assertEqual(self.store.active(2), [])
 
     def test_every_scope_lives_in_its_own_file(self):
         self.store.pause("lane:X", now=1)

@@ -87,8 +87,8 @@ def _scope(value: Any) -> str:
 _SAFE_NAME_BYTES = frozenset(
     b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_.-")
 
-# A file name holds 255 bytes at most; the stem keeps room for the ".json"
-# suffix and for the digest of the scope.
+# The escaped prefix keeps room for the ".json" suffix and the digest within
+# a 255-byte file name. Safe scopes keep their original names.
 _MAX_STEM_BYTES = 200
 
 # The length of the digest that ends the stem of an escaped scope: two scopes
@@ -125,11 +125,11 @@ def _scope_key(scope: str) -> str:
     other scope is escaped (``lane:C1`` becomes ``lane~3aC1``) and its stem
     ends in the digest of the scope: the digest keeps two scopes apart even
     when their stems differ in case only, which a case-insensitive file
-    system maps onto one file.  A stem too long for a file name is cut short;
-    the digest still tells the scopes apart.
+    system maps onto one file.  An escaped stem too long for a file name is
+    cut short; the digest still tells the scopes apart.
     """
     escaped = _escaped(scope)
-    if escaped == scope and len(scope.encode("utf-8")) <= _MAX_STEM_BYTES:
+    if escaped == scope:
         return scope
     stem = escaped[:_MAX_STEM_BYTES].rstrip("~")
     return "{}~{}".format(stem, _digest(scope))
