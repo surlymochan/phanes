@@ -23,6 +23,19 @@ class QuantileEdgeTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "p"):
             quantile([1, 2, 3], float("nan"))
 
+    def test_quantile_rejects_infinite_probabilities(self):
+        for probability in (float("-inf"), float("inf")):
+            with self.subTest(probability=probability):
+                with self.assertRaisesRegex(ValueError, "p.*finite.*0.*1"):
+                    quantile([1, 2, 3], probability)
+
+    def test_quantile_validates_probability_before_sample_shortcuts(self):
+        for values in ([], [2]):
+            for probability in (-0.1, 1.1, float("nan")):
+                with self.subTest(values=values, probability=probability):
+                    with self.assertRaisesRegex(ValueError, "p.*finite.*0.*1"):
+                        quantile(values, probability)
+
     def test_quantile_keeps_endpoints_and_empty_sample_behavior(self):
         self.assertEqual(quantile([1, 2, 3], 0), 1.0)
         self.assertEqual(quantile([1, 2, 3], 1), 3.0)
