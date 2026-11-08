@@ -15,7 +15,7 @@ contract of #1592 on that dispatcher.
 Everything runs on fixtures inside a temporary directory: the live state directory of the
 dispatcher and the live pause store are never read or written.
 
-验收：`python3 -m pytest -q openswarm/tests/test_dispatch_engine.py`
+验收：`python3 -m pytest -q tools/lane-autodispatch/test_dispatch_engine.py`
 """
 
 import importlib.util
@@ -27,6 +27,7 @@ import tempfile
 import time
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 AD = REPO_ROOT / "tools" / "lane-autodispatch" / "autodispatch.py"
@@ -169,6 +170,56 @@ class DispatchPauseTests(DispatchPauseHarness):
         self.assertEqual(reason["reason"], "operator hold")
         self.assertTrue(0 < reason["remaining_s"] <= 600, reason)
         self.assertIsNone(DISPATCH.pause_reason("CX2", self.LANES["CX2"]))
+
+
+class GlobalPauseStatusTests(DispatchPauseHarness):
+    """A globally paused tick refreshes status without doing dispatch work."""
+
+    def test_global_pauses_refresh_status_before_returning(self):
+        for source in ("marker", "store"):
+            with self.subTest(source=source):
+                status_path = self.state / "lanes-status.json"
+                status_path.write_text(json.dumps({"CX1": "idle", "_ready": 3,
+                                                   "_blocked": 1}), encoding="utf-8")
+                if source == "marker":
+                    self.marker("PAUSE", "operator hold")
+                else:
+                    self.store_pause("all", ttl=600, reason="maintenance")
+                with patch.object(DISPATCH, "audit_switches"), \
+                     patch.object(DISPATCH, "gh") as gh, \
+                     patch.object(DISPATCH, "remote") as remote, \
+                     patch.object(DISPATCH, "dispatch") as dispatch, \
+                     patch.object(DISPATCH, "replenish") as replenish:
+                    self.assertEqual(DISPATCH.tick(self.LANES, {}, 123), 123)
+                for action in (gh, remote, dispatch, replenish):
+                    action.assert_not_called()
+                status = json.loads(status_path.read_text(encoding="utf-8"))
+                self.assertEqual(status["_ready"], 3)
+                self.assertEqual(status["_blocked"], 1)
+                self.assertEqual(status["_busy"], 0)
+                for lane in self.LANES:
+                    self.assertEqual(status[lane], "paused")
+                    reason = status["_pauses"][lane]
+                    self.assertEqual(reason["scope"], "all")
+                    self.assertEqual(reason["source"], source)
+                    if source == "marker":
+                        self.assertIn("operator hold", reason["reason"])
+                        self.assertIsNone(reason["remaining_s"])
+                    else:
+                        self.assertEqual(reason["reason"], "maintenance")
+                        self.assertTrue(0 < reason["remaining_s"] <= 600)
+                if source == "marker":
+                    (self.state / "PAUSE").unlink()
+
+    def test_global_pause_creates_status_and_preserves_busy_lane(self):
+        self.marker("PAUSE")
+        with patch.object(DISPATCH, "audit_switches"):
+            DISPATCH.tick(self.LANES, {"CX1": {"issue": 12}}, 0)
+        status = json.loads((self.state / "lanes-status.json").read_text(encoding="utf-8"))
+        self.assertEqual(status["CX1"], "busy #12")
+        self.assertEqual(status["CX2"], "paused")
+        self.assertEqual(status["_busy"], 1)
+        self.assertEqual(set(status["_pauses"]), set(self.LANES))
 
 
 if __name__ == "__main__":

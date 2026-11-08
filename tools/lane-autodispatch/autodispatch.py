@@ -1292,7 +1292,18 @@ def tick(lanes, state, last_warn):
     audit_switches()  # the switch audit runs every tick, also when the loop itself is paused (Refs #1827)
     records = pause_records()  # the swrm pause store and the legacy PAUSE markers (Refs #1366, #1592)
     scopes = paused_scopes(records=records)
-    if "all" in scopes: return last_warn
+    if "all" in scopes:
+        # Keep the pause visible even though this tick does no remote or queue work.
+        # Queue counts remain the last observed values while dispatch is stopped.
+        path = f"{D}/lanes-status.json"
+        try:
+            with open(path) as stream: previous = json.load(stream)
+        except (OSError, ValueError): previous = {}
+        if not isinstance(previous, dict): previous = {}
+        res = {L: {"lane": "paused"} for L in lanes}
+        st = status_snapshot(lanes, state, res, previous.get("_ready", 0), previous.get("_blocked", 0), records)
+        with open(path, "w") as stream: json.dump(st, stream, ensure_ascii=False, indent=1)
+        return last_warn
     label_cache_reset()  # authoritative label reads are cached for one tick only
     state.setdefault("_done", [])
     live = [L for L in lanes if host_ok(lanes[L]["host"])]
