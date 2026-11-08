@@ -22,6 +22,8 @@ const starts: number[] = [];
 let persistDir: string | undefined;
 let stateLink: string | undefined;
 let cleaned = false;
+let persistentSessionRead = false;
+let accountReadable = false;
 let child: ReturnType<typeof spawn> | undefined;
 let error: string | undefined;
 
@@ -241,20 +243,44 @@ try {
     headers: { Cookie: `__Host-openbot-web=${sessionToken}` },
   });
   assert.equal(persistedSession.status, 200, "the redeemed account session must survive a workerd restart");
-  assert.equal(redeemedEmail(await persistedSession.json()), email);
+  persistentSessionRead = true;
+  const persistedAccount = await persistedSession.json();
+  assert.equal(redeemedEmail(persistedAccount), email, "the claimed account must remain readable after a workerd restart");
+  accountReadable = true;
+  assert.equal(starts.length, 2, "workerd must start twice against the same persistent state directory");
   passed = true;
 } catch (cause) {
   error = cause instanceof Error ? cause.message : String(cause);
 } finally {
   await stopWorker();
+  let cleanupFailed = false;
+  if (stateLink) {
+    try {
+      await unlink(stateLink);
+    } catch (cause) {
+      if (!(cause instanceof Error && "code" in cause && cause.code === "ENOENT")) {
+        const cleanupError = cause instanceof Error ? cause.message : String(cause);
+        error = error ? `${error}; state link cleanup failed: ${cleanupError}` : `state link cleanup failed: ${cleanupError}`;
+        passed = false;
+        cleanupFailed = true;
+      }
+    }
+  }
   if (persistDir) {
-    await rm(persistDir, { recursive: true, force: true });
-    cleaned = true;
+    try {
+      await rm(persistDir, { recursive: true, force: true });
+      cleaned = !cleanupFailed;
+    } catch (cause) {
+      const cleanupError = cause instanceof Error ? cause.message : String(cause);
+      error = error ? `${error}; cleanup failed: ${cleanupError}` : `cleanup failed: ${cleanupError}`;
+      passed = false;
+      cleanupFailed = true;
+    }
   }
   await mkdir(join(ROOT, ".volto-build/issue-9-local-workerd-e2e"), { recursive: true });
   await writeFile(
     REPORT,
-    `${JSON.stringify({ passed, starts: starts.length, persistentSessionRead: requests.some(({ path, status }) => path === "/api/browser/session" && status === 200), cleaned, requests, error, logs: logs.join("").slice(-8_000) }, null, 2)}\n`,
+    `${JSON.stringify({ passed, starts: starts.length, persistentSessionRead, accountReadable, cleaned, requests, error, logs: logs.join("").slice(-8_000) }, null, 2)}\n`,
   );
   process.stdout.write(`${passed ? "PASS" : "FAIL"}${error ? `: ${error}` : ""}: report in ${REPORT}\n`);
   if (!passed) process.exitCode = 1;
