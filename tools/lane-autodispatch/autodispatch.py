@@ -1126,59 +1126,116 @@ def block_pr_validation(lane, cfg, st, info, state, title, body, missing):
 # (.lane-review/PR-N.md).  The rules are a list constant: one more artifact kind is
 # one more pattern. This legacy AD owns its filtering rules.
 HARVEST_EXCLUDE_PATTERNS = [re.compile(r"(^|/)\.[^/]*\.so$"), re.compile(r"(^|/)\.lane-review/")]
+# The collapse guard of the fix/rebase harvest (Refs #1833).  A fix/rebase round that
+# does not continue on the head the PR had, but only produces an incremental patch,
+# replaces the whole PR when the AD pushes the harvest back (2026-11-03: #1807 8 files/
+# 1780 lines -> 1/11, #1804 6/1401 -> 3/39, #1715 8/868 -> 2/23, #1755 8/746 -> 1/19,
+# #1653 6/200 -> 2/19, #1824 9/835 -> 1/17).  Before such a push the AD checks:
+#   1. the new head contains the head the PR had before the round
+#      (`git merge-base --is-ancestor`), otherwise the harvest replaced the PR;
+#   2. the changed files and the changed lines relative to the base do not collapse:
+#      one of the two dimensions dropping by more than the threshold (50% by default)
+#      refuses the push (the dimensions are independent: "or", not "and");
+#   3. a failing git command refuses the push as well (fail closed);
+#   4. a card whose body cannot be read or parsed is not an empty card: without it the
+#      target PR of the round is unknown, so the harvest is refused.
+# A card that declares an overall rewrite is exempt.
 HARVEST_COLLAPSE_THRESHOLD = float(os.environ.get("AD_HARVEST_COLLAPSE_THRESHOLD", "0.5"))
+# The card of a fix/rebase round names the PR it works on ("重基PR：#1845 fleet/...").
+# Only such a card is compared with a PR head: an ordinary card that mentions a PR
+# must not be harvested against the head of a foreign PR.
+HARVEST_TARGET_PR = re.compile(
+    r"(?:重基\s*PR|(?:fix\s*/\s*rebase|rebase|fix)\s*(?:PR|pull\s+request))\s*[：:# ]+\s*#?(\d+)\b", re.I)
+HARVEST_REWRITE_MARKER = re.compile(r"整体重写\s*[:：]?\s*(?:是|true|yes|允许|豁免)", re.I)
 
-def harvest_collapse_guard(issue, run, ref):
-    """Return (allowed, detail) for a fix/rebase harvest; git/metadata errors fail closed."""
-    rc, out, err = gh(["issue", "view", str(issue), "--json", "body"])
+def harvest_card_body(issue):
+    """Read the card of an issue; returns (body, reason).
+
+    A reason means the card could not be read or parsed: that is not an empty card,
+    the caller must not treat it as one (Refs #1833)."""
+    try:
+        rc, out, err = gh(["issue", "view", str(issue), "--json", "body"])
+    except (OSError, subprocess.SubprocessError) as error:
+        return "", f"the card of #{issue} cannot be read: {error!r}"
     if rc:
-        return False, f"card body read failed: {err.strip()[-160:]}"
+        return "", f"the card of #{issue} cannot be read (gh rc={rc}): {err.strip()[-160:]}"
     try:
         payload = json.loads(out)
-        body = payload["body"]
-        if not isinstance(body, str): raise ValueError("body is not text")
-    except (ValueError, KeyError, TypeError) as error:
-        return False, f"card body parse failed: {error}"
-    if re.search(r"整体重写\s*[:：]?\s*(?:是|true|yes|允许|豁免)", body, re.I):
-        return True, "explicit overall rewrite waiver"
-    match = re.search(r"(?:重基\s*PR|fix\s*/\s*rebase\s*(?:PR)?|PR)\s*[：:# ]+\s*#?(\d+)\b", body, re.I)
+    except ValueError as error:
+        return "", f"the card of #{issue} cannot be parsed: {error}"
+    body = payload.get("body") if isinstance(payload, dict) else None
+    if not isinstance(body, str):
+        return "", f"the card of #{issue} carries no body"
+    return body, ""
+
+def harvest_collapse_guard(issue, ref, produced=None):
+    """Return (allowed, detail) for the harvest of a fix/rebase round (Refs #1833).
+
+    `ref` is the head that would be pushed, `produced` the branch the lane produced
+    (the artifact filter may rebuild the commits, so the two are not always the same
+    object).  Every doubt refuses the push."""
+    produced = produced or ref
+    body, reason = harvest_card_body(issue)
+    if reason: return False, reason
+    if HARVEST_REWRITE_MARKER.search(body):
+        return True, "the card declares an overall rewrite: the guard is waived"
+    match = HARVEST_TARGET_PR.search(body)
     if not match:
-        return True, "no target PR"
+        return True, "the card names no target PR: there is nothing to compare with"
     pr = match.group(1)
-    rc, out, err = gh(["pr", "view", pr, "--json", "headRefOid,baseRefOid"])
+    try:
+        rc, out, err = gh(["pr", "view", pr, "--json", "headRefOid,baseRefOid"])
+    except (OSError, subprocess.SubprocessError) as error:
+        return False, f"PR #{pr} cannot be read: {error!r}"
     if rc:
-        return False, f"PR #{pr} metadata read failed: {err.strip()[-160:]}"
+        return False, f"PR #{pr} cannot be read (gh rc={rc}): {err.strip()[-160:]}"
     try:
         pr_data = json.loads(out)
         old, base = pr_data["headRefOid"], pr_data["baseRefOid"]
         if not isinstance(old, str) or not isinstance(base, str) or not old or not base:
             raise ValueError("missing PR head/base SHA")
     except (ValueError, KeyError, TypeError) as error:
-        return False, f"PR #{pr} metadata parse failed: {error}"
+        return False, f"PR #{pr} metadata cannot be parsed: {error}"
 
     def git(*args):
         code, stdout, stderr = sh(["git", "-C", LOCAL, *args])
         if code: raise RuntimeError(stderr.strip()[-160:] or f"git {args[0]} failed")
         return stdout.strip()
-    before_size = after_size = "unknown"
     try:
+        new_sha = git("rev-parse", "--verify", f"{ref}^{{commit}}")
+        produced_sha = git("rev-parse", "--verify", f"{produced}^{{commit}}")
         before_size = diff_size(base, old)
         after_size = diff_size(base, ref)
-        rc, _, err = sh(["git", "-C", LOCAL, "merge-base", "--is-ancestor", old, ref])
-        if rc == 1:
-            return False, f"PR #{pr} {old[:12]}->{git('rev-parse', ref)[:12]} sizes {before_size}->{after_size}: new head does not contain fix-before head"
-        if rc:
-            raise RuntimeError(err.strip()[-160:] or "git merge-base --is-ancestor failed")
-        reasons = []
-        for name, before, after in (("files", before_size[0], after_size[0]),
-                                    ("lines", before_size[1], after_size[1])):
-            if before and after < before * (1 - HARVEST_COLLAPSE_THRESHOLD):
-                reasons.append(f"{name} collapsed {before}->{after}")
-        if reasons:
-            return False, f"PR #{pr} {old[:12]}->{git('rev-parse', ref)[:12]} sizes {before_size}->{after_size}: {'; '.join(reasons)}"
-        return True, f"PR #{pr} ancestor and size check passed ({before_size}->{after_size})"
     except (RuntimeError, OSError, subprocess.SubprocessError) as error:
-        return False, f"PR #{pr} {old[:12]}->{ref[:12]} sizes {before_size}->{after_size}: git guard failed: {error}"
+        return False, f"PR #{pr} cannot be checked: {error}"
+    rc, _, err = sh(["git", "-C", LOCAL, "merge-base", "--is-ancestor", old, produced])
+    if rc == 1:
+        return False, (f"PR #{pr}: the new head {new_sha[:12]} (harvest {produced_sha[:12]}) does not contain "
+                       f"the head the PR had {old[:12]} (sizes {before_size}->{after_size})")
+    if rc:
+        return False, f"PR #{pr}: the ancestry check failed, refusing the push: {err.strip()[-160:]}"
+    reasons = []
+    for name, index in (("files", 0), ("lines", 1)):
+        before, after = before_size[index], after_size[index]
+        if before and after < before * (1 - HARVEST_COLLAPSE_THRESHOLD):
+            reasons.append(f"{name} collapsed {before}->{after}")
+    if reasons:
+        return False, (f"PR #{pr}: the change collapsed ({'; '.join(reasons)}), sizes "
+                       f"{before_size}->{after_size} ({old[:12]}->{new_sha[:12]})")
+    return True, (f"PR #{pr}: the new head {new_sha[:12]} contains the head the PR had {old[:12]} "
+                  f"and the size holds ({before_size}->{after_size})")
+
+def harvest_guard_record(run, detail):
+    """Append the verdict of the guard to the run log: the failure trail of the AD.
+
+    The brain log carries the verdict for the operator, the run log keeps it next to
+    the run the lane produced (Refs #1833)."""
+    try:
+        os.makedirs(f"{D}/runs", exist_ok=True)
+        with open(f"{D}/runs/{run}.log", "a") as f:
+            f.write(f"{time.strftime('%F %T')} harvest-collapse-guard: {detail}\n")
+    except OSError as e:
+        log(f"run {run}: harvest guard record not written ({e!r})", brain=False)
 
 def diff_size(base, head):
     """Count changed paths and inserted+deleted lines relative to base."""
@@ -1270,12 +1327,14 @@ def finish(lane, cfg, st, info, state):
                                f"({len(removed)} excluded path(s)).\n\nLabel `lane-failed`; re-add `lane-ready` to retry.")
             mark_done(state, n)
             return {"done": True, "status": "lane-failed", "error": "empty after artifact filtering", "missing": []}
-        allowed, guard_detail = harvest_collapse_guard(n, run, head)
+        allowed, guard_detail = harvest_collapse_guard(n, head, f"refs/fleet/{lane}")
         if not allowed:
             log(f"{lane} #{n} run {run} harvest collapse guard rejected: {guard_detail}")
+            harvest_guard_record(run, guard_detail)
             label_lane_failed(n, f"Lane {lane} run `{run}` harvest refused by #1833 collapse guard: {guard_detail}\n\nLabel `lane-failed`; re-add `lane-ready` to retry.")
             mark_done(state, n)
             return {"done": True, "status": "harvest-collapse-rejected", "error": guard_detail, "missing": []}
+        log(f"{lane} #{n} run {run} harvest collapse guard: {guard_detail}", brain=False)
         rc, _, err = sh(["git", "-C", LOCAL, "push", "-q", "origin", f"{head}:refs/heads/{b}"], timeout=180)
         if rc: return {"done": False, "status": "push-failed", "error": f"push failed: {err.strip()[-200:]}", "missing": []}
         _, lj, _ = gh(["issue", "view", str(n), "--json", "labels"])

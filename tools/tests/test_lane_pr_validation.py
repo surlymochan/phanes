@@ -114,7 +114,7 @@ class FakeLaneHost:
         if args[:2] == ["pr", "create"]:
             self.prs.append(dict(zip(args[2::2], args[3::2])))
             return 0, "https://github.com/surlymochan/phanes/pull/1", ""
-        if args[:2] == ["issue", "view"]: return 0, json.dumps({"labels": []}), ""
+        if args[:2] == ["issue", "view"]: return 0, json.dumps({"labels": [], "body": "# card"}), ""
         if args[:2] == ["issue", "edit"]:
             self.label_edits.append(list(args)); return 0, "", ""
         if args[:2] == ["issue", "comment"]:

@@ -50,6 +50,8 @@ CARD = f"# AD fix 收割护栏\n\n重基PR：#{PR} {BRANCH}\n"
 REWRITE_CARD = CARD + "\n整体重写：是\n"
 # An ordinary implementation card: no target PR, nothing to compare against.
 PLAIN_CARD = "# 实现一个新功能\n\n按卡面实现并写测试。\n"
+# An ordinary card that quotes another PR: quoting a PR is no fix/rebase card.
+PLAIN_CARD_WITH_PR = "# 实现一个新功能\n\n参考 PR #999 的做法，按卡面实现并写测试。\n"
 # The six collapsed PRs of 2026-11-03 as recorded in issue #1833 ("files/lines" relative to
 # the base, before and after the harvest).
 RECORDED_INCIDENTS = (
@@ -61,6 +63,12 @@ RECORDED_INCIDENTS = (
     {"pr": 1824, "files_before": 9, "lines_before": 835, "files_after": 1, "lines_after": 17},
 )
 MANIFEST_NAME = "restore-collapsed-heads-20261103.json"
+# The repositories that may hold the real commits of the collapsed PRs: the AD harvests
+# from them, so the box has them.  The real before/after heads only prove something when
+# the objects are there.
+AD_LOCAL = ad.LOCAL
+REAL_REPOSITORIES = (AD_LOCAL, os.path.expanduser("~/work/phanes-repo"),
+                      os.path.expanduser("~/phanes-repo"))
 
 
 def manifest_paths():
@@ -271,6 +279,25 @@ class HarvestFixture:
         line = self.git("ls-remote", "origin", f"refs/heads/{branch}")
         return line.split()[0] if line else ""
 
+    def import_real_objects(self, entry):
+        """Bring the real commits of the AD's repository into the fixture repository.
+
+        The real before/after heads of the collapsed PRs only prove something when the
+        objects are there: the replay then runs the ancestry and the size check on the
+        real history.  Without them the guard fails closed, which the test accepts."""
+        for source in REAL_REPOSITORIES:
+            if not os.path.isdir(os.path.join(source, ".git")): continue
+            fetch = subprocess.run(["git", "-C", str(self.repo), "fetch", "-q", source,
+                                    "+refs/heads/*:refs/remotes/real/*"], capture_output=True, text=True)
+            if fetch.returncode: continue
+            if all(self.has_object(sha) for sha in (entry["before"], entry["after"])): return True
+        return False
+
+    def has_object(self, sha):
+        probe = subprocess.run(["git", "-C", str(self.repo), "cat-file", "-e", f"{sha}^{{commit}}"],
+                               capture_output=True, text=True)
+        return probe.returncode == 0
+
     def assert_refused(self, result, gh_calls, sh_calls, *, heads=True, sizes=()):
         """The harvest was refused: nothing was pushed, the PR is untouched, the issue is back."""
         self.assertEqual(self.pushes(sh_calls), [], "the refused harvest pushed something")
@@ -361,6 +388,23 @@ class HarvestCollapseGuardTest(HarvestFixture, unittest.TestCase):
                                                  lane_ref=False)
         self.assert_refused(result, gh_calls, sh_calls, heads=False)
 
+    def test_unreadable_card_with_a_missing_harvest_branch_is_refused(self):
+        # the card of the target PR cannot be read and the harvest branch does not exist
+        # either: neither of the two may let the push pass (the review finding of #1833)
+        self.build_repo()
+        old, new = self.scenario_grown()
+        result, gh_calls, sh_calls = self.harvest(old, new, body_error=(1, "", "body unavailable"),
+                                                 harvest_ref="refs/heads/missing-harvest", lane_ref=False)
+        self.assert_refused(result, gh_calls, sh_calls, heads=False)
+
+    def test_card_that_mentions_an_unrelated_pr_is_not_guarded(self):
+        # an ordinary card may quote another PR: it is no fix/rebase card, so there is no
+        # head of the AD to compare with and the harvest goes through
+        self.build_repo()
+        old, new = self.scenario_grown()
+        result, gh_calls, sh_calls = self.harvest(old, new, card=PLAIN_CARD_WITH_PR)
+        self.assert_allowed(result, gh_calls, sh_calls)
+
     def test_card_without_a_target_pr_is_allowed(self):
         # an ordinary implementation card names no PR: there is no head to compare with
         self.build_repo()
@@ -399,6 +443,8 @@ class HarvestCollapseReplayTest(HarvestFixture, unittest.TestCase):
                                             incident["files_after"], incident["lines_after"])
                 result, gh_calls, sh_calls = self.harvest(old, new)
                 self.assert_refused(result, gh_calls, sh_calls, heads=False)
+                # the size rule itself must have fired, not just any refusal
+                self.assertIn("collapsed", self.brain(), self.brain())
 
     def test_replay_of_the_restore_manifest_refuses_every_incident(self):
         """The real before/after heads of the six collapsed PRs (the box keeps the manifest)."""
@@ -409,11 +455,22 @@ class HarvestCollapseReplayTest(HarvestFixture, unittest.TestCase):
                           "AD_HARVEST_COLLAPSE_MANIFEST=<path> to replay the six real SHA pairs")
         entries = manifest_entries(paths[0])
         self.assertTrue(entries, f"the manifest {paths[0]} carries no before/after heads")
+        replayed = 0
         for entry in entries:
             with self.subTest(pr=entry["pr"]):
                 self.build_repo()
+                if not self.import_real_objects(entry):
+                    continue  # the real commits are not reachable: counted below
+                replayed += 1
                 result, gh_calls, sh_calls = self.harvest(entry["before"], entry["after"])
                 self.assert_refused(result, gh_calls, sh_calls, heads=False)
+                # the real history is there: the verdict is a real one (the harvest
+                # replaced the PR), not the fail closed answer for an unknown object
+                self.assertTrue(any(word in self.brain()
+                                    for word in ("does not contain", "collapsed")), self.brain())
+        if not replayed:
+            self.skipTest("the real commits of the collapsed PRs are not reachable from this workspace; "
+                          "run the replay on the box, where the manifest and the AD's repository are")
 
 
 if __name__ == "__main__":
