@@ -779,11 +779,10 @@ def pick_reviewer(lanes, loads, max_in_flight=None, log=None, pr=None, eligible=
     # the tied lane that had its turn the longest ago (a lane that never had one comes
     # first): that is the rotation over the review lanes
     chosen = min(tied, key=lambda lane: (turns["last"].get(lane, -1), order.index(lane)))
-    # the turn only moves when there is a tie to rotate: a single lane with the smallest
-    # backlog is no rotation and must not shift the next decision
-    if len(tied) > 1:
-        turns["count"] += 1
-        turns["last"][chosen] = turns["count"]
+    # Every selection consumes a turn, including a unique minimum. Otherwise that
+    # lane can immediately win the next tie after finishing the current round.
+    turns["count"] += 1
+    turns["last"][chosen] = turns["count"]
     if log:
         log(f"review plan: PR #{pr} → lane {chosen} (backlog: {backlog})")
     return chosen, snapshot
@@ -819,14 +818,23 @@ def plan_reviews(idle_review_ids, pending, running, max_in_flight=None, lane_cfg
         counts[lane] = counts.get(lane, 0) + 1
     return plan, snapshots
 
-def review_waiting_counts(review_ids, pending, running, max_in_flight=None):
+def review_waiting_counts(review_ids, pending, running, max_in_flight=None, head_eligible=None):
     """Spread the entire waiting queue for backlog accounting, without admitting it.
 
-    The execution cap limits admission, not visibility: even when every lane is at
+    The backlog cap limits admission, not visibility: even when every lane is at
     capacity, every waiting card must appear in the backlog. This forecast uses a
-    private cursor so counting cannot consume an actual assignment's turn.
+    private copy of the current cursor so counting cannot consume an actual
+    assignment's turn. During admission, reserve the queue head's prospective turn
+    before forecasting the other waiting cards; the head itself is not counted in
+    the returned queue. This keeps a fresh forecast from biasing every dispatch
+    against the first lane in the rotation.
     """
-    counts, current, rotation = {}, dict(running), {}
+    counts, current = {}, dict(running)
+    rotation = {key: {"count": turns["count"], "last": dict(turns["last"])}
+                for key, turns in REVIEW_ROTATION.items()}
+    if head_eligible is not None:
+        head, _ = pick_reviewer(review_ids, current, eligible=head_eligible, rotation=rotation)
+        if head is not None: current[head] = current.get(head, 0) + 1
     for card in pending:
         lane, _ = pick_reviewer(review_ids, current, rotation=rotation)
         if lane is None: break
@@ -1447,15 +1455,15 @@ def tick(lanes, state, last_warn):
         if pick.get("verify"):
             running = review_running(review_ids, state)
             waiting = [i for i in q if i is not pick and i.get("deps_ok", True) and i.get("verify")]
-            queued = review_waiting_counts(review_ids, waiting, running)
-            loads = {lane: running[lane] + queued.get(lane, 0) for lane in review_ids}
-            # Waiting cards have not been admitted. Servicing a queue head must
-            # remain possible even when the waiting queue exceeds execution capacity.
             eligible = [lane for lane in [L, *remaining] if lane in review_ids
                         and lane in idle_lane_names(lanes, state, res, scopes)
-                        and running[lane] < REVIEW_MAX_IN_FLIGHT
                         and can_take(lanes[lane]["backend"], pick, lane)]
+            queued = review_waiting_counts(review_ids, waiting, running, head_eligible=eligible)
+            # Admission and the decision log use the same backlog: running reviews
+            # plus the other cards waiting in this decision, excluding the queue head.
+            loads = {lane: running[lane] + queued.get(lane, 0) for lane in review_ids}
             chosen, snapshot = pick_reviewer(review_ids, loads, eligible=eligible,
+                                             max_in_flight=REVIEW_MAX_IN_FLIGHT,
                                              pr=review_target_pr(pick),
                                              log=lambda row: log(row, brain=False))
             if chosen is None: continue

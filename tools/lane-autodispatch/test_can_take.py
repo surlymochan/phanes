@@ -11,6 +11,7 @@ import unittest
 import warnings
 import importlib.util
 from pathlib import Path
+from unittest.mock import patch
 
 SPEC = importlib.util.spec_from_file_location("autodispatch", Path(__file__).with_name("autodispatch.py"))
 AUTODISPATCH = importlib.util.module_from_spec(SPEC)
@@ -243,7 +244,9 @@ class TickVerifyDispatchTest(TickHarness, unittest.TestCase):
             verify = [issue(n, VERIFY_BODY, ("lane-ready", "verify-intent")) for n in range(1, 6)]
             work = [issue(n, "普通工作卡", ("lane-ready",)) for n in range(10, 15)]
             for rows in (work + verify[:1], verify + work[:1]):
-                dispatched, logs = self.run_tick(rows)
+                # Exercise class sharing with enough review backlog capacity.
+                with patch.object(AUTODISPATCH, "REVIEW_MAX_IN_FLIGHT", 5):
+                    dispatched, logs = self.run_tick(rows)
                 self.assertEqual(dispatched, [("CX2", 1), ("CX10", 10)])
                 self.assertTrue(any("other class yields" in line for line in logs))
         finally:
@@ -260,7 +263,8 @@ class TickVerifyDispatchTest(TickHarness, unittest.TestCase):
         old = AUTODISPATCH.AD_VERIFY_SHARE_ENABLED
         AUTODISPATCH.AD_VERIFY_SHARE_ENABLED = True
         try:
-            dispatched, _ = self.run_tick(verify + work, lanes)
+            with patch.object(AUTODISPATCH, "REVIEW_MAX_IN_FLIGHT", 3):
+                dispatched, _ = self.run_tick(verify + work, lanes)
         finally:
             AUTODISPATCH.AD_VERIFY_SHARE_ENABLED = old
         self.assertEqual([lane for lane, _ in dispatched], ["CX2", "CX4", "CX10"])
@@ -424,7 +428,16 @@ class ReviewBacklogAssignmentTest(unittest.TestCase):
         rotation = copy.deepcopy(AUTODISPATCH.REVIEW_ROTATION)
         counts = AUTODISPATCH.review_waiting_counts(
             self.LANES, [{"n": n} for n in range(5)], dict.fromkeys(self.LANES, 1), 1)
-        self.assertEqual(counts, {"CX2": 2, "CX4": 1, "CX5": 2})
+        self.assertEqual(counts, {"CX2": 2, "CX4": 2, "CX5": 1})
+        self.assertEqual(AUTODISPATCH.REVIEW_ROTATION, rotation)
+
+    def test_waiting_forecast_reserves_the_next_turn_without_consuming_it(self):
+        AUTODISPATCH.pick_reviewer(self.LANES, dict.fromkeys(self.LANES, 0))
+        rotation = copy.deepcopy(AUTODISPATCH.REVIEW_ROTATION)
+        counts = AUTODISPATCH.review_waiting_counts(
+            self.LANES, [{"n": 2}, {"n": 3}], dict.fromkeys(self.LANES, 0),
+            head_eligible=self.LANES)
+        self.assertEqual(counts, {"CX5": 1, "CX2": 1})
         self.assertEqual(AUTODISPATCH.REVIEW_ROTATION, rotation)
 
     def test_the_plan_skips_the_lane_that_is_at_its_cap(self):
@@ -526,16 +539,49 @@ class ReviewBacklogTickTest(TickHarness, unittest.TestCase):
         rows = [issue(n, VERIFY_BODY, ("lane-ready", "verify-intent")) for n in range(1, 6)]
         dispatched, logs = self.run_tick(rows, self.LANES, state)
         self.assertEqual(dispatched, [])
-        self.assertEqual(self.last_state["_review_waiting"], {"CX2": 2, "CX4": 1, "CX5": 2})
-        self.assertTrue(any("CX2=3, CX4=2, CX5=3" in row for row in logs))
+        self.assertEqual(self.last_state["_review_waiting"], {"CX2": 2, "CX4": 2, "CX5": 1})
+        self.assertTrue(any("CX2=3, CX4=3, CX5=2" in row for row in logs))
 
-    def test_a_queue_larger_than_capacity_can_still_be_serviced(self):
+    def test_a_queue_below_the_configured_backlog_cap_can_be_serviced(self):
         rows = [issue(n, VERIFY_BODY, ("lane-ready", "verify-intent")) for n in range(1, 9)]
-        dispatched, logs = self.run_tick(rows, self.LANES)
+        with patch.object(AUTODISPATCH, "REVIEW_MAX_IN_FLIGHT", 4):
+            dispatched, logs = self.run_tick(rows, self.LANES)
         self.assertEqual(len(dispatched), 3)
         self.assertEqual(sum(self.last_state["_review_waiting"].values()), 5)
         assignment = next(row for row in logs if "review assignment" in row)
         self.assertIn("CX2=2, CX4=3, CX5=2", assignment)
+        self.assertIn("lane CX2", assignment)
+
+    def test_waiting_queue_counts_toward_the_admission_cap(self):
+        rows = [issue(n, VERIFY_BODY, ("lane-ready", "verify-intent")) for n in range(1, 9)]
+        with patch.object(AUTODISPATCH, "REVIEW_MAX_IN_FLIGHT", 1):
+            dispatched, logs = self.run_tick(rows, self.LANES)
+        self.assertEqual(dispatched, [])
+        self.assertEqual(sum(self.last_state["_review_waiting"].values()), 8)
+        plans = [row for row in logs if "review plan" in row]
+        self.assertTrue(plans)
+        self.assertTrue(all("lane none" in row and "cap (1)" in row for row in plans))
+        self.assertIn("CX2=2, CX4=3, CX5=2", plans[0])
+        for row in plans:
+            self.assertTrue(all(int(count) >= 1 for count in re.findall(r"CX[245]=(\d+)", row)))
+        self.assertFalse(any("review assignment" in row for row in logs))
+
+    def test_waiting_backlog_at_the_cap_skips_idle_review_lanes(self):
+        rows = [issue(n, VERIFY_BODY, ("lane-ready", "verify-intent")) for n in range(1, 5)]
+        with patch.object(AUTODISPATCH, "REVIEW_MAX_IN_FLIGHT", 1):
+            dispatched, logs = self.run_tick(rows, self.LANES)
+        self.assertEqual(dispatched, [])
+        plan = next(row for row in logs if "review plan" in row)
+        self.assertIn("lane none (backlog: CX2=1, CX4=1, CX5=1)", plan)
+        self.assertIn("cap (1)", plan)
+
+    def test_tick_rotation_records_the_unique_minimum_before_the_next_round(self):
+        rows = [issue(n, VERIFY_BODY, ("lane-ready", "verify-intent")) for n in range(1, 5)]
+        with patch.object(AUTODISPATCH, "REVIEW_MAX_IN_FLIGHT", 2):
+            first, _ = self.run_tick(rows, self.LANES, {})
+            second, _ = self.run_tick(rows, self.LANES, {})
+        self.assertEqual([lane for lane, _ in first], list(self.LANES))
+        self.assertEqual([lane for lane, _ in second], list(self.LANES))
 
     def test_the_reviews_rotate_over_the_review_lanes(self):
         # the reviews rotate over the review lanes: no lane reviews a second round while
@@ -575,7 +621,7 @@ class ReviewBacklogTickTest(TickHarness, unittest.TestCase):
         self.assertEqual(sum(waiting.values()), 1)
 
 
-class ReviewSequenceReplayTest(unittest.TestCase):
+class ReviewSequenceReplayTest(TickHarness, unittest.TestCase):
     """Replay of the review sequence of the night of 2026-11-02 (Refs #1701).
 
     The sequence is the review rounds the three review lanes published that night: one
@@ -585,7 +631,7 @@ class ReviewSequenceReplayTest(unittest.TestCase):
     the old one (the lane order decides: the first free lane) and the new one (the lane
     with the smallest backlog, the ties rotate)."""
 
-    LANES = ("CX2", "CX4", "CX5")
+    LANES = ReviewBacklogTickTest.LANES
     SERVICE = 12  # minutes: the median interval between two review rounds of that night
     # "<minutes since the first round>:<PR number>", the recorded sequence of that night.
     # It is the `Lane review` comments of `docs/evidence/architecture-review/snapshot.json.gz`
@@ -650,14 +696,39 @@ class ReviewSequenceReplayTest(unittest.TestCase):
             best = max(best, run)
         return best
 
-    def new_policy(self, loads):
-        """The rule of #1701: the lane with the smallest backlog, the ties rotate."""
-        lane, _ = AUTODISPATCH.pick_reviewer(self.LANES, loads, max_in_flight=1)
-        return lane
+    def replay_tick(self):
+        """Feed recorded arrivals through tick, including its waiting queue accounting."""
+        free = dict.fromkeys(self.LANES, 0)
+        pending, assignments, state = [], [], {}
+        index, minute, spread = 0, 0, 0
+        # The cap includes waiting reviews; allow room for the recorded bursts.
+        with patch.object(AUTODISPATCH, "REVIEW_MAX_IN_FLIGHT", 4):
+            while (index < len(self.SEQUENCE) or pending) and minute < 4000:
+                while index < len(self.SEQUENCE) and int(self.SEQUENCE[index].split(":")[0]) <= minute:
+                    pr = self.SEQUENCE[index].split(":")[1]
+                    pending.append(issue(index + 1, VERIFY_BODY.replace("#1785", f"#{pr}"),
+                                         ("lane-ready", "verify-intent")))
+                    index += 1
+                for lane in self.LANES:
+                    if free[lane] <= minute: state.pop(lane, None)
+                if pending:
+                    dispatched, _ = self.run_tick(pending, self.LANES, state)
+                    state = self.last_state
+                    for lane, n in dispatched:
+                        pending = [row for row in pending if row["number"] != n]
+                        free[lane] = minute + self.SERVICE
+                        assignments.append(lane)
+                    loads = AUTODISPATCH.review_backlog(self.LANES, state)
+                    spread = max(spread, max(loads.values()) - min(loads.values()))
+                minute += 1
+        self.assertEqual(index, len(self.SEQUENCE))
+        self.assertEqual(pending, [], "the replay must service every recorded review")
+        self.assertEqual(len(assignments), len(self.SEQUENCE))
+        return {lane: assignments.count(lane) for lane in self.LANES}, assignments, spread
 
     def test_the_backlog_difference_of_the_three_lanes_converges(self):
         old, _, _ = self.replay(self.old_policy)
-        new, _, _ = self.replay(self.new_policy)
+        new, _, _ = self.replay_tick()
         fair = math.ceil(len(self.SEQUENCE) / len(self.LANES))
         # the old rule piles the reviews on the first lane of the order (the symptom)
         self.assertGreater(max(old.values()) - min(old.values()), 1)
@@ -668,7 +739,7 @@ class ReviewSequenceReplayTest(unittest.TestCase):
 
     def test_no_lane_stacks_the_reviews_of_the_night(self):
         old, old_sequence, _ = self.replay(self.old_policy)
-        new, new_sequence, new_spread = self.replay(self.new_policy)
+        new, new_sequence, new_spread = self.replay_tick()
         # the busiest lane of the night takes no more than its share of the rounds
         self.assertLessEqual(max(new.values()), math.ceil(len(self.SEQUENCE) / len(self.LANES)))
         # the in-flight backlog of the three lanes never differs by more than one review
