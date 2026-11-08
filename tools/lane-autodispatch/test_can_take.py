@@ -259,7 +259,8 @@ class TickHarness:
                 AUTODISPATCH.host_fail = lambda h, why: None
                 AUTODISPATCH.host_good = lambda h: None
                 AUTODISPATCH.remote = lambda lane, cfg, run="": {
-                    "lane": "idle", **({"memory_available_mb": 900} if remote_info is None else remote_info)}
+                    "lane": "idle", **({"memory_available_mb": 900} if remote_info is None else
+                                       remote_info(lane) if callable(remote_info) else remote_info)}
                 AUTODISPATCH.deps_met = lambda item: True
                 AUTODISPATCH.dispatch = fake_dispatch
                 AUTODISPATCH.replenish = lambda k, state: replenish_calls.append(k) or []
@@ -547,6 +548,35 @@ class TickMemoryPrecheckTest(TickHarness, unittest.TestCase):
                          [("mac", 400, ["CX10", "CX12"]), ("mac", 512, ["CX11"])])
         for threshold in (400, 512):
             self.assertTrue(any("blocked #1712:" in line and f"threshold {threshold}MB" in line for line in logs))
+
+    def test_same_host_diagnostics_preserve_each_lane_memory_sample(self):
+        # B1: probes run per lane, so even the same host can report different readings.
+        for thresholds, readings in (((512, 400), (450, 135)),
+                                     ((400, 400), (135, 100)),
+                                     ((400, 400), (135, None))):
+            with self.subTest(thresholds=thresholds, readings=readings):
+                lanes = {L: {"host": "gores2", "backend": "codex", "memory_min_mb": threshold}
+                         for L, threshold in zip(("CX1", "CX2"), thresholds)}
+                samples = dict(zip(lanes, readings))
+                dispatched, logs = self.run_tick(
+                    [issue(1712, "plain card")], lanes=lanes,
+                    remote_info=lambda L: {"memory_available_mb": samples[L]})
+                self.assertEqual(dispatched, [])
+                self.assertEqual(self.edits, [])
+                snapshot = self.snapshots[-1]
+                self.assertEqual((snapshot["ready"], snapshot["blocked"]), (0, 1))
+                rows = AUTODISPATCH.blocked_memory_reasons(snapshot["blocked_memory"])
+                self.assertEqual(len(rows), 2)
+                for L, threshold in zip(lanes, thresholds):
+                    row = next(row for row in rows if L in row["lanes"])
+                    self.assertEqual(row, {"issue": 1712, "reason": "blocked-by-host-memory",
+                                           "host": "gores2", "available_mb": samples[L],
+                                           "threshold_mb": threshold, "lanes": [L]})
+                    detail = ("memory probe unavailable;" if samples[L] is None else
+                              f"available {samples[L]}MB <")
+                    self.assertTrue(any(f"blocked #1712: blocked-by-host-memory host gores2 "
+                                        f"{detail} threshold {threshold}MB lanes {L}" in line
+                                        for line in logs))
 
 
 class TickWorkClassCapTest(TickHarness, unittest.TestCase):

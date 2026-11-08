@@ -170,6 +170,12 @@ def memory_blocked_tasks(queue, lanes, usable, memory_blocked):
                                              {lane: host["threshold_mb"] for lane in host["lanes"]})
                 thresholds[L] = reason.get("threshold_mb")
                 host["threshold_mb"] = None
+            # Each lane is probed separately: readings may change between rejections.
+            if host["available_mb"] != reason.get("available_mb"):
+                readings = host.setdefault("lane_available_mb",
+                                           {lane: host["available_mb"] for lane in host["lanes"]})
+                readings[L] = reason.get("available_mb")
+                host["available_mb"] = None
             host["lanes"].append(L)
         blocked[item["n"]] = {"reason": MEMORY_REASON, "hosts": hosts}
     return blocked
@@ -177,19 +183,20 @@ def memory_blocked_tasks(queue, lanes, usable, memory_blocked):
 def blocked_memory_reasons(blocked_memory):
     """The blocked-diagnostics rows of the host-memory blocks (Refs #1712; input of #1687).
 
-    One row per blocked task, host and threshold: lanes with different budgets on the same
-    host must keep the threshold that actually rejected them."""
+    One row per blocked task, host, threshold and reading: lanes on the same host must
+    keep both the budget and the memory sample that actually rejected them."""
     rows = []
     for number, row in sorted((blocked_memory or {}).items()):
         for host, info in sorted(row.get("hosts", {}).items()):
-            budgets = {}
+            samples = {}
             for lane in info.get("lanes", []):
                 threshold = info.get("lane_thresholds_mb", {}).get(lane, info.get("threshold_mb"))
-                budgets.setdefault(threshold, []).append(lane)
-            for threshold, lane_names in sorted(budgets.items()):
+                available = info.get("lane_available_mb", {}).get(lane, info.get("available_mb"))
+                samples.setdefault((threshold, available), []).append(lane)
+            for threshold, available in sorted(samples, key=lambda pair: (pair[0], -1 if pair[1] is None else pair[1])):
                 rows.append({"issue": number, "reason": row.get("reason", MEMORY_REASON), "host": host,
-                             "available_mb": info.get("available_mb"), "threshold_mb": threshold,
-                             "lanes": lane_names})
+                             "available_mb": available, "threshold_mb": threshold,
+                             "lanes": samples[(threshold, available)]})
     return rows
 
 def memory_skip_detail(reason):
