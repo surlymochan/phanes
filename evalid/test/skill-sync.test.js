@@ -1,6 +1,6 @@
 import { describe, test } from 'node:test';
 import assert from 'node:assert/strict';
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
 import { spawnSync } from 'node:child_process';
@@ -274,6 +274,71 @@ describe('xflow skill sync wrapper', () => {
         otherSkillSource,
         'the original physical source marker should be preserved',
       );
+    } finally {
+      if (originalConfig === null) {
+        rmSync(configPath, { force: true });
+      } else {
+        writeFileSync(configPath, originalConfig, 'utf8');
+      }
+      rmSync(tempRoot, { recursive: true, force: true });
+    }
+  });
+
+  test('sync restores extra-source skills whose source entries are relative symlinks', () => {
+    const tempRoot = mkdtempSync(join(tmpdir(), 'openflow-skill-sync-relative-symlink-skill-'));
+    const configDir = resolve(REPO_ROOT, '.as-xflow');
+    const configPath = resolve(configDir, 'config.json');
+    const originalConfig = existsSync(configPath) ? readFileSync(configPath, 'utf8') : null;
+    try {
+      const targetRoot = resolve(tempRoot, 'installed-skills');
+      const sourcesRoot = resolve(tempRoot, 'sources');
+      const extraRootA = resolve(sourcesRoot, 'source-a');
+      const extraRootB = resolve(sourcesRoot, 'source-b');
+      const physicalSkillRoot = resolve(sourcesRoot, 'physical');
+      const fakeSyncScript = resolve(tempRoot, 'skills_sync.sh');
+
+      mkdirSync(extraRootA, { recursive: true });
+      const otherSkillSourceA = writeSkill(physicalSkillRoot, 'other-skill-a', 'Managed skill via relative symlink');
+      const linkedSkillSourceA = resolve(extraRootA, 'other-skill-a');
+      symlinkSync('../physical/other-skill-a', linkedSkillSourceA, 'dir');
+      const otherSkillSourceB = writeSkill(extraRootB, 'other-skill-b', 'Managed skill from extra source B');
+      const otherSkillTargetA = writeSkill(targetRoot, 'other-skill-a', 'Installed skill from extra source A');
+      const otherSkillTargetB = writeSkill(targetRoot, 'other-skill-b', 'Installed skill from extra source B');
+      writeFileSync(resolve(otherSkillTargetA, '.skillhub-source'), `${linkedSkillSourceA}\n`, 'utf8');
+      writeFileSync(resolve(otherSkillTargetB, '.skillhub-source'), `${otherSkillSourceB}\n`, 'utf8');
+      writeFakeSkillhubSync(fakeSyncScript);
+
+      mkdirSync(configDir, { recursive: true });
+      writeFileSync(configPath, JSON.stringify({
+        version: 1,
+        skills: {
+          sync_script: fakeSyncScript,
+          extra_source_dirs: [extraRootA, extraRootB],
+          installed_dir: targetRoot,
+        },
+      }, null, 2));
+
+      const result = spawnSync('sh', ['xflow/scripts/sync_installed_xflow_skill.sh'], {
+        cwd: REPO_ROOT,
+        env: {
+          ...process.env,
+          XFLOW_SKILL_SYNC_SCRIPT: '',
+          XFLOW_SKILL_SYNC_EXTRA_SOURCE_DIRS: '',
+          SKILL_SYNC_TARGET_DIRS: '',
+          SKILLHUB_SYNC_SCRIPT: '',
+          SKILL_SYNC_EXTRA_SOURCE_DIRS: '',
+        },
+        encoding: 'utf8',
+      });
+
+      const restoredSkillTargetA = resolve(targetRoot, 'other-skill-a');
+      assert.equal(result.status, 0, result.stderr || result.stdout);
+      assert.ok(existsSync(resolve(restoredSkillTargetA, 'SKILL.md')), 'relative symlink source skill should be restored with its contents');
+      assert.equal(lstatSync(restoredSkillTargetA).isSymbolicLink(), false, 'restored skill should not retain a relative link that points outside its source layout');
+      assert.equal(readFileSync(resolve(restoredSkillTargetA, '.skillhub-source'), 'utf8').trim(), linkedSkillSourceA);
+      assert.ok(existsSync(resolve(targetRoot, 'other-skill-b', 'SKILL.md')), 'managed skill from the second extra source dir should be restored');
+      assert.equal(readFileSync(resolve(targetRoot, 'other-skill-b', '.skillhub-source'), 'utf8').trim(), otherSkillSourceB);
+      assert.equal(readFileSync(resolve(restoredSkillTargetA, 'SKILL.md'), 'utf8'), readFileSync(resolve(otherSkillSourceA, 'SKILL.md'), 'utf8'));
     } finally {
       if (originalConfig === null) {
         rmSync(configPath, { force: true });

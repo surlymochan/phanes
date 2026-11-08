@@ -144,7 +144,7 @@ restore_extra_managed_skills() {
     if [ ! -d "$target_path" ]; then
       [ -d "$source_path" ] || continue
       rm -rf "$target_path"
-      cp -R "$source_path" "$target_path"
+      cp -RL "$source_path" "$target_path"
       printf 'restored extra-source managed skill: %s\n' "$target_path"
     fi
     marker_path=$target_path/.skillhub-source
