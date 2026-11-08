@@ -57,3 +57,37 @@ def test_receipt_ignores_trailing_log_with_result_field(result):
 
     assert extract_result_object(stdout) == receipt
     assert extract_result_object(json.dumps(telemetry)) is None
+
+
+@pytest.mark.parametrize(
+    "metadata",
+    [
+        {"attempts": []},
+        {"attempts": [], "status": "done"},
+        {"attempts": [{"retry": 1}]},
+        {"attempts": [None]},
+        {"workspace": {}},
+        {"run_dir": ""},
+        {"run_dir": "   "},
+        {"status": "usage", "run_dir": "/tmp/metrics"},
+    ],
+)
+def test_receipt_ignores_trailing_retry_metrics(metadata):
+    receipt = {
+        "id": "run-123",
+        "status": "done",
+        "workspace": {"mode": "worktree", "path": "/tmp/run-123"},
+    }
+    telemetry = {"id": "metrics-456", "event": "retry_metrics", **metadata}
+    stdout = json.dumps(receipt) + "\n" + json.dumps(telemetry)
+
+    assert extract_result_object(stdout) == receipt
+    assert extract_result_object(json.dumps(telemetry)) is None
+
+
+@pytest.mark.parametrize("status", ["done", "partial", "failed", "stopped", "budget_exceeded"])
+def test_receipt_returns_last_run_result(status):
+    receipt = {"id": "run-123", "status": status, "run_dir": "/tmp/swrm/runs/run-123"}
+    stdout = json.dumps({**receipt, "id": "previous-run"}) + "\n" + json.dumps(receipt)
+
+    assert extract_result_object(stdout) == receipt

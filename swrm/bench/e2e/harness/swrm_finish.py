@@ -68,15 +68,26 @@ def _is_result_receipt(obj: object) -> bool:
         return False
     if not isinstance(obj.get("id"), str) or not obj["id"].strip():
         return False
-    if "status" in obj and not isinstance(obj["status"], str):
+    terminal_statuses = ("done", "partial", "failed", "stopped", "budget_exceeded")
+    if "status" in obj and obj["status"] not in terminal_statuses:
         return False
-    # Require run metadata: a generic result field also appears on telemetry.
-    # run_dir and attempts cover early failures where workspace preparation
-    # did not complete.
-    return (
-        isinstance(obj.get("run_dir"), str)
-        or isinstance(obj.get("workspace"), dict)
-        or isinstance(obj.get("attempts"), list)
+    run_dir = obj.get("run_dir")
+    workspace = obj.get("workspace")
+    if obj.get("status") in terminal_statuses and (
+        (isinstance(run_dir, str) and bool(run_dir.strip()))
+        or (isinstance(workspace, dict) and workspace.get("mode") in ("worktree", "in-place", "github-issue"))
+    ):
+        return True
+    # Also support attempt-based receipts without a status. An empty
+    # attempts list alone is common in telemetry, so require executor metadata.
+    attempts = obj.get("attempts")
+    return isinstance(attempts, list) and bool(attempts) and all(
+        isinstance(attempt, dict)
+        and isinstance(attempt.get("backend"), str)
+        and bool(attempt["backend"].strip())
+        and "model" in attempt
+        and isinstance(attempt.get("meta"), dict)
+        for attempt in attempts
     )
 
 
