@@ -8572,8 +8572,8 @@ def lane_finalize_run(lane, spec, ws, final, usage, error_class, rc, event_file,
             ancestor_rc, _, _ = git(["merge-base", "--is-ancestor", ws["base"], head.strip()], ws["root"])
             changed = changed or ancestor_rc == 0
     read_only = spec.get("read_only") or spec.get("card_type") in READ_ONLY_CARD_TYPES
-    # Failures before resuming execution must leave interrupted progress (including the index) intact.
-    preserve_workspace = preserve_workspace or (spec.get("_recovered") and error_class == "prepare_failed")
+    # Prepare/session failures must leave interrupted progress (including the index) intact.
+    preserve_workspace = preserve_workspace or (spec.get("_recovered") and error_class in ("prepare_failed", "exec_error"))
     evidence_error = None
     collected_artifacts = []
     if spec.get("evalid_role"):

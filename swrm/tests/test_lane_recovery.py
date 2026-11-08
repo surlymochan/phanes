@@ -109,6 +109,76 @@ class LaneRecoveryTests(unittest.TestCase):
         self.assertEqual((self.wt / "partial.txt").read_text(), "unfinished work\n")
         self.assertEqual((self.wt / "ignored.txt").read_text(), "ignored progress\n")
 
+    def check_failed_session_recovery_preserves_workspace(self, read_only=False, backend="pi", timeout=False):
+        self.setup_run()
+        self.lane.update(backend=backend, effort="high")
+        assignment = self.runs / self.run_id / "assignment.json"
+        saved = json.loads(assignment.read_text())
+        saved["thread_id"] = "saved-thread"
+        assignment.write_text(json.dumps(saved))
+        (self.wt / "local.txt").write_text("local commit\n")
+        self.git("add", "local.txt", cwd=self.wt)
+        self.git("commit", "-qm", "local progress", cwd=self.wt)
+        head = self.git("rev-parse", "HEAD", cwd=self.wt)
+        (self.wt / "base.txt").write_text("staged progress\n")
+        self.git("add", "base.txt", cwd=self.wt)
+        (self.wt / "base.txt").write_text("unstaged progress\n")
+        (self.wt / "partial.txt").write_text("unfinished work\n")
+        (self.wt / ".gitignore").write_text("ignored.txt\n")
+        (self.wt / "ignored.txt").write_text("ignored progress\n")
+        before = self.git("status", "--porcelain", "--ignored", cwd=self.wt)
+        staged = self.git("diff", "--cached", cwd=self.wt)
+        spec, error = self.recover()
+        self.assertIsNone(error)
+        spec.update(started=xs.NOW(), budget_minutes=90, read_only=read_only, verify="must not run")
+        child = mock.Mock(pid=12345)
+        if timeout:
+            child.wait_response.side_effect = TimeoutError("session restore timed out")
+        else:
+            child.wait_response.return_value = {"success": False, "error": "saved session unavailable"}
+        with mock.patch.object(xs, "DATA", str(self.data)), \
+                mock.patch.object(xs, "RUNS", str(self.runs)), \
+                mock.patch.object(xs, "append_ledger"), \
+                mock.patch.object(xs, "run_workspace_prepare", return_value=None), \
+                mock.patch.object(xs, "reserve_provider_slot", return_value=True), \
+                mock.patch.object(xs, "run_verify", return_value={"rc": 0}) as verify:
+            result = xs.lane_do_run(self.lane, spec, child, mock.Mock(), spec)
+        self.assertTrue((self.wt / "partial.txt").exists(), "session recovery failure discarded unfinished work")
+        self.assertEqual(result["status"], "failed")
+        self.assertEqual(result["error_class"], "exec_error")
+        self.assertIsNone(result["commit"])
+        self.assertEqual(result["worktree"], str(self.wt))
+        verify.assert_not_called()
+        request = child.send.call_args_list[0].args[0]
+        self.assertEqual(request.get("type") or request.get("method"),
+                         "switch_session" if backend == "pi" else "thread/resume")
+        self.assertEqual(child.send.call_count, 1)
+        rdir = self.runs / self.run_id
+        self.assertIn("session recovery failed", json.loads((rdir / "status.json").read_text())["recovery_abandoned"])
+        events = [json.loads(line) for line in (rdir / f"events.1.{backend}.jsonl").read_text().splitlines()]
+        self.assertTrue(any(event["type"] == "recovery_abandoned" and event["run_id"] == self.run_id
+                            for event in events))
+        self.assertFalse(any(event["type"] == "recovery" for event in events))
+        self.assertEqual(self.git("rev-parse", "HEAD", cwd=self.wt), head)
+        self.assertEqual(self.git("branch", "--show-current", cwd=self.wt), f"swrm/{self.run_id}")
+        self.assertEqual(self.git("status", "--porcelain", "--ignored", cwd=self.wt), before)
+        self.assertEqual(self.git("diff", "--cached", cwd=self.wt), staged)
+        self.assertEqual((self.wt / "base.txt").read_text(), "unstaged progress\n")
+        self.assertEqual((self.wt / "partial.txt").read_text(), "unfinished work\n")
+        self.assertEqual((self.wt / "ignored.txt").read_text(), "ignored progress\n")
+
+    def test_failed_pi_session_recovery_preserves_workspace(self):
+        self.check_failed_session_recovery_preserves_workspace()
+
+    def test_failed_pi_session_recovery_preserves_read_only_workspace(self):
+        self.check_failed_session_recovery_preserves_workspace(read_only=True)
+
+    def test_timed_out_pi_session_recovery_preserves_read_only_workspace(self):
+        self.check_failed_session_recovery_preserves_workspace(read_only=True, timeout=True)
+
+    def test_failed_codex_session_recovery_preserves_read_only_workspace(self):
+        self.check_failed_session_recovery_preserves_workspace(read_only=True, backend="codex")
+
     @contextlib.contextmanager
     def serve_context(self):
         with mock.patch.object(xs, "DATA", str(self.data)), \
