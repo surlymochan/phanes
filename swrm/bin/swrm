@@ -82,6 +82,7 @@ from typing import Callable, Optional, Sequence
 sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
 
 import evalid_roles
+import procboundary
 
 
 def build_evalid_command(xflow_bin: str, *, request_file: str, output_file: str,
@@ -3876,6 +3877,21 @@ def release_fleet_slot(rdir):
     return True
 
 
+def executor_boundary_empty(rdir, boundary):
+    """Require descendant-set proof before releasing an executor reservation."""
+    if os.path.realpath(rdir) not in _FLEET_RESERVATIONS:
+        if boundary is not None:
+            boundary.finish()
+        return True
+    safe, remaining = boundary.finish() if boundary is not None else (False, None)
+    if not safe:
+        reason = ("executor descendant boundary is unavailable" if boundary is None else
+                  "executor descendants remain in the boundary" if remaining else
+                  "executor boundary could not prove the full descendant set empty")
+        set_status(rdir, fleet_reservation_error="retained: " + reason)
+    return safe
+
+
 def reserve_provider_slot(rdir, backend, provider, policy, lane_name=None, keep_waiting=None, poll=0.1):
     """Atomically admit a turn against provider/backend caps stored in policy.concurrency."""
     keys = concurrency_keys(backend, provider)
@@ -4064,23 +4080,27 @@ def run_executor_with_rate_limit(backend, decision, state, prompt, wd, rdir, bud
                    execution_started=status.get("execution_started") or admitted_at, workspace=wd)
         started = NOW()
         timeout = max(0, budget_deadline - NOW())
-        rc, final, meta, err_text = EXECUTORS[backend](call_decision, state, current_prompt, wd,
-                                                       rdir, timeout, event_file)
+        boundary = procboundary.CgroupBoundary.create()
+        with procboundary.track(boundary):
+            rc, final, meta, err_text = EXECUTORS[backend](call_decision, state, current_prompt, wd,
+                                                           rdir, timeout, event_file)
         seconds = round(NOW() - started, 3)
         error_class = executor_error_class(rc, final, err_text, backend)
+        reservation_active = os.path.realpath(rdir) in _FLEET_RESERVATIONS
+        boundary_safe = executor_boundary_empty(rdir, boundary)
         # run_proc has reaped a normal 403 or reported early-result exit.
-        if error_class in (None, "rate_limit", "risk_blocked") or (
+        if boundary_safe and (error_class in (None, "rate_limit", "risk_blocked") or (
                 backend == "agy" and rc == 1 and (error_class == "upstream_forbidden"
-                                                   or (meta or {}).get("finished_reason"))):
+                                                   or (meta or {}).get("finished_reason")))):
             release_fleet_slot(rdir)
-        elif os.path.realpath(rdir) in _FLEET_RESERVATIONS:
-            set_status(rdir, fleet_reservation_error="retained after abnormal executor exit; inspect descendants")
         set_status(rdir, state="routing", concurrency_keys=[])
         attempt = {"backend": backend, "model": decision.get("model"), "effort": decision.get("effort"),
                    "rc": rc, "seconds": seconds, "error_class": error_class, "meta": meta,
                    "events": event_file, "error_tail": (err_text or "")[-600:] if error_class else None,
                    "quota_before": before}
         attempts.append(attempt)
+        if reservation_active and not boundary_safe:
+            return attempts, final, error_class
         if error_class != "rate_limit":
             return attempts, final, error_class
 
@@ -4556,7 +4576,8 @@ def _run_proc(cmd, cwd, env, timeout, out_path, abort_re=None):
     rdir = os.path.dirname(out_path)
     with open(out_path, "w") as out, open(out_path + ".err", "w") as err:
         p = subprocess.Popen(_spawnable(cmd), cwd=cwd, env=env, stdout=out, stderr=err, stdin=subprocess.DEVNULL,
-                             start_new_session=True)
+                             start_new_session=True, **procboundary.popen_kwargs())
+        procboundary.observe_spawn()
         set_status(rdir, executor_pid=p.pid, events=out_path, attempt_started=NOW())
         end = NOW() + timeout
         policy = load_policy()
@@ -5911,6 +5932,11 @@ def peer_review_prompt(run_id, base, branch, diff):
             f"Run: {run_id}\nBase: {base}\nBranch: {branch}\n\nDiff:\n```diff\n{diff}\n```")
 
 
+def review_rules_hash(rules):
+    """Return the stable short fingerprint for the peer-review rules text."""
+    return hashlib.sha256(rules.encode("utf-8")).hexdigest()[:12]
+
+
 def review_command(reviewer, prompt, repo, scratch_dir, policy):
     backend, binary, model = reviewer["backend"], reviewer["binary"], reviewer.get("model")
     cfg = policy.get(backend) if isinstance(policy.get(backend), dict) else {}
@@ -6035,7 +6061,9 @@ def redact_review_raw(value):
 
 def run_peer_reviewer(command, repo, timeout):
     process = subprocess.Popen(command, cwd=repo, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
-                               stderr=subprocess.PIPE, text=True, start_new_session=True)
+                               stderr=subprocess.PIPE, text=True, start_new_session=True,
+                               **procboundary.popen_kwargs())
+    procboundary.observe_spawn()
     try:
         stdout, stderr = process.communicate(timeout=timeout)
     except subprocess.TimeoutExpired as error:
@@ -6051,6 +6079,7 @@ def invoke_reviewer(reviewer, prompt, repo, rdir, policy):
     raw_attempts = []
     slot_dir = os.path.join(RUNS, "review-slot-" + uuid.uuid4().hex)
     acquired, safe_release = False, True
+    boundary = None
     original_repo = repo
     review_worktree = None
 
@@ -6099,10 +6128,12 @@ def invoke_reviewer(reviewer, prompt, repo, rdir, policy):
                 command = review_command(reviewer, active_prompt, repo, scratch_dir, policy)
                 try:
                     safe_release = False
-                    completed = run_peer_reviewer(command, repo, timeout)
-                    safe_release = True
+                    boundary = procboundary.CgroupBoundary.create()
+                    with procboundary.track(boundary):
+                        completed = run_peer_reviewer(command, repo, timeout)
+                    safe_release = executor_boundary_empty(slot_dir, boundary)
                 except subprocess.TimeoutExpired as error:
-                    safe_release = True
+                    safe_release = executor_boundary_empty(slot_dir, boundary)
                     if os.path.isfile(output_path):
                         with open(output_path, encoding="utf-8") as fh:
                             raw = fh.read()
@@ -6130,6 +6161,8 @@ def invoke_reviewer(reviewer, prompt, repo, rdir, policy):
                 payload = review_payload_from_text(raw)
                 if payload is not None:
                     return payload
+                if not safe_release:
+                    raise RuntimeError("reviewer returned no findings JSON; executor boundary is unproven")
                 if attempt > retries:
                     suffix = " after repair retry" if retries else ""
                     raise RuntimeError(f"reviewer returned no findings JSON{suffix}")
@@ -6203,13 +6236,15 @@ def perform_peer_review(run_id, by, policy):
     else:
         reviewer = choose_review_backend(result.get("backend"), policy, available)
     prompt = peer_review_prompt(run_id, base, branch, diff)
+    rules = prompt.split("\n\nRun:", 1)[0]
+    rules_hash = review_rules_hash(rules)
     payload = invoke_reviewer(reviewer, prompt, repo, run_dir, policy)
     counts = {severity.lower(): sum(item["severity"] == severity for item in payload["findings"])
               for severity in ("P0", "P1", "P2")}
     reviewer_name = reviewer["backend"] + (f":{reviewer['model']}" if reviewer.get("model") else "")
     record = {"run_id": run_id, "by": reviewer_name, **payload,
               "reviewed_at": dt.datetime.now(dt.timezone.utc).isoformat(),
-              "base": base, "branch": branch}
+              "base": base, "branch": branch, "rules_hash": rules_hash}
     jsave(os.path.join(run_dir, "review.json"), record)
     if not update_peer_review_ledger(run_id, {"by": reviewer_name, "verdict": payload["verdict"], **counts}):
         raise ValueError(f"run is missing from the ledger: {run_id}")
@@ -7168,9 +7203,33 @@ def lanes_by_name(names=None):
     return [by_name[n] for n in names]
 
 
+@contextlib.contextmanager
+def lane_state_lock(lane_name):
+    # Lock a stable sidecar: jsave replaces state.json, so locking that inode
+    # would leave readers and writers holding locks on different files.
+    os.makedirs(lane_root(lane_name), exist_ok=True)
+    with open(lane_state_path(lane_name) + ".lock", "a") as lock:
+        _flock(lock, LOCK_EX)
+        yield
+
+
 def lane_write_state(lane_name, **changes):
+    with lane_state_lock(lane_name):
+        return lane_write_state_locked(lane_name, **changes)
+
+
+def lane_write_state_locked(lane_name, **changes):
+    """Read/modify/write with lane_state_lock already held by the caller."""
     state = jload(lane_state_path(lane_name), {}) or {}
+    old_run = state.get("current_run")
     state.update(changes)
+    # Keep stale visible through later activity and status writes. Clear it
+    # only when its run is resolved or a different run is assigned.
+    if ((changes.get("state") == "idle" and changes.get("current_run") is None) or
+            (changes.get("current_run") and changes.get("current_run") != old_run)):
+        state.pop("stale_since", None)
+        state.pop("stale_run", None)
+        state.pop("activity_observed_since", None)
     state["updated"] = NOW()
     jsave(lane_state_path(lane_name), state)
     return state
@@ -7405,9 +7464,12 @@ class LaneChild:
             os.makedirs(child_env["HERMES_HOME"], exist_ok=True)
             if lane.get("model"):
                 child_env["HERMES_MODEL"] = lane["model"]
-        self.proc = subprocess.Popen(_spawnable(cmd), cwd=cwd, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-                                     stderr=subprocess.DEVNULL, text=True, bufsize=1, start_new_session=True,
-                                     env=child_env)
+        self.boundary = procboundary.CgroupBoundary.create()
+        with procboundary.track(self.boundary):
+            self.proc = subprocess.Popen(_spawnable(cmd), cwd=cwd, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                                         stderr=subprocess.DEVNULL, text=True, bufsize=1, start_new_session=True,
+                                         env=child_env, **procboundary.popen_kwargs())
+            procboundary.observe_spawn()
         self.reader = threading.Thread(target=self._read, daemon=True)
         self.reader.start()
         if backend == "codex":
@@ -7522,6 +7584,7 @@ class AgyChild:
         self.lane, self.cwd = lane, cwd
         _tmpdir, self.env = configure_executor_environment(cwd)
         self.proc = None
+        self.boundary = procboundary.CgroupBoundary.create()
         self.events = queue.Queue()
         self.stderr_lines = []
 
@@ -7533,8 +7596,16 @@ class AgyChild:
         cfg = load_policy().get("agy") or {}
         cmd = agy_command(binary, model or self.lane["model"], prompt, effort or self.lane.get("effort"),
                           conversation, cfg)
-        proc = subprocess.Popen(_spawnable(cmd), cwd=self.cwd, env=self.env, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
-                                stderr=subprocess.PIPE, text=True, bufsize=1, start_new_session=True)
+        # A steer/restart may leave detached descendants in the previous scope.
+        # Reuse it until finish() has proved it empty and removed the directory.
+        # Keep None sticky: a later boundary cannot contain earlier descendants.
+        if self.boundary is not None and not self.boundary.path.is_dir():
+            self.boundary = procboundary.CgroupBoundary.create()
+        with procboundary.track(self.boundary):
+            proc = subprocess.Popen(_spawnable(cmd), cwd=self.cwd, env=self.env, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                                    stderr=subprocess.PIPE, text=True, bufsize=1, start_new_session=True,
+                                    **procboundary.popen_kwargs())
+            procboundary.observe_spawn()
         events, stderr_lines = queue.Queue(), []
         self.proc, self.events, self.stderr_lines = proc, events, stderr_lines
         threading.Thread(target=self._read_stdout, args=(proc, events), daemon=True).start()
@@ -7611,9 +7682,16 @@ class CursorHeadlessChild(AgyChild):
         if conversation:
             cmd.append("--continue")
         cmd += ["--", prompt]
-        proc = subprocess.Popen(_spawnable(cmd), cwd=self.cwd, env=self.env, stdin=subprocess.DEVNULL,
-                                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, bufsize=1,
-                                start_new_session=True)
+        # A steer/restart may leave detached descendants in the previous scope.
+        # Reuse it until finish() has proved it empty and removed the directory.
+        # Keep None sticky: a later boundary cannot contain earlier descendants.
+        if self.boundary is not None and not self.boundary.path.is_dir():
+            self.boundary = procboundary.CgroupBoundary.create()
+        with procboundary.track(self.boundary):
+            proc = subprocess.Popen(_spawnable(cmd), cwd=self.cwd, env=self.env, stdin=subprocess.DEVNULL,
+                                    stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, bufsize=1,
+                                    start_new_session=True, **procboundary.popen_kwargs())
+            procboundary.observe_spawn()
         events, stderr_lines = queue.Queue(), []
         self.proc, self.events, self.stderr_lines = proc, events, stderr_lines
         threading.Thread(target=self._read_stdout, args=(proc, events), daemon=True).start()
@@ -7675,6 +7753,19 @@ def lane_refresh_codex_child_if_stale(lane, child, policy, event_file):
 def lane_record_event(path, event):
     with open(path, "a") as f:
         f.write(json.dumps(event, ensure_ascii=False) + "\n")
+    # Executor events are progress; supervisor polling and status writes are not.
+    if event.get("type") not in {"lane_start", "risk_warning", "risk_blocked", "error", "RATELIMIT"}:
+        run_id = os.path.basename(os.path.dirname(path))
+        try:
+            lanes = lane_config()
+        except (OSError, ValueError):
+            return
+        for lane in lanes:
+            with lane_state_lock(lane["name"]):
+                state = jload(lane_state_path(lane["name"]), {}) or {}
+                if state.get("current_run") == run_id and state.get("state") == "busy":
+                    lane_write_state_locked(lane["name"], last_activity=NOW())
+                    break
 
 
 def lane_control_messages(server, lane, current, child, turn, pending):
@@ -7730,7 +7821,7 @@ def lane_control_messages(server, lane, current, child, turn, pending):
                         open(spec["_event_file"], "w").close()
                         current.update(spec)
                         lane_write_state(lane["name"], state="busy", current_run=rid, turn_state="queued",
-                                         concurrency_keys=[], last_error=None)
+                                         concurrency_keys=[], last_error=None, last_activity=NOW())
                         set_status(rdir, id=rid, state="queued", title=spec.get("title") or task.strip().splitlines()[0][:72],
                                    backend=lane["backend"], model=lane["model"], effort=lane.get("effort"), lane=lane["name"],
                                    provider=provider, concurrency_keys=concurrency_keys(lane["backend"], provider),
@@ -8565,13 +8656,16 @@ def lane_do_run(lane, spec, child, server, current):
                 if (not stopped_early or not child.alive()) and (error_class in (None, "rate_limit")
                         or spec.get("_turn_completed") or (error_class == "upstream_forbidden"
                                                            and lane["backend"] == "agy" and not child.alive())):
-                    release_fleet_slot(rdir)
+                    if executor_boundary_empty(rdir, getattr(child, "boundary", None)):
+                        release_fleet_slot(rdir)
                 elif os.path.realpath(rdir) in _FLEET_RESERVATIONS:
                     set_status(rdir, fleet_reservation_error="retained after abnormal executor exit; inspect descendants")
                 attempts.append({"backend": attempt_lane["backend"], "model": model,
                                  "effort": attempt_lane.get("effort"), "rc": rc,
                                  "seconds": round(NOW() - started, 3), "error_class": error_class,
                                  "meta": {"usage": usage}, "events": evp, "error_tail": error_tail})
+                if os.path.realpath(rdir) in _FLEET_RESERVATIONS:
+                    break
                 if allow_fallback and error_class == "exec_error" and MODEL_UNAVAILABLE_RE.search(error_tail or ""):
                     error_class = attempts[-1]["error_class"] = "model_unavailable"
                 # A transient Google 403 can occur before any work starts. Retry once
@@ -8888,14 +8982,42 @@ def cmd_lane_down(args):
 
 def lane_status_rows():
     rows = []
+    now = NOW()
+    try:
+        stale_after = float((load_policy().get("thresholds") or {}).get("busy_stale_minutes", 30)) * 60
+    except (TypeError, ValueError):
+        stale_after = 30 * 60
     for lane in lane_config():
-        state = jload(lane_state_path(lane["name"]), {}) or {}
-        pid = state.get("supervisor_pid")
-        lane_state = state.get("state", "down")
-        if not pid:
-            lane_state = "down"
-        elif not pid_alive(pid):
-            lane_state = "crashed"
+        with lane_state_lock(lane["name"]):
+            state = jload(lane_state_path(lane["name"]), {}) or {}
+            pid = state.get("supervisor_pid")
+            lane_state = state.get("state", "down")
+            if not pid:
+                lane_state = "down"
+            elif not pid_alive(pid):
+                lane_state = "crashed"
+            if state.get("state") == "busy" and state.get("current_run"):
+                activity = state.get("last_activity")
+                if not (isinstance(activity, (int, float)) and not isinstance(activity, bool) and
+                        math.isfinite(activity) and activity > 0):
+                    # Pre-upgrade runs have no activity clock. Start one persisted
+                    # grace window, without treating periodic `updated` as progress.
+                    if "activity_observed_since" not in state:
+                        state = lane_write_state_locked(lane["name"], activity_observed_since=now)
+                    activity = state["activity_observed_since"]
+                if state.get("stale_run") == state.get("current_run"):
+                    lane_state = "stale"
+                elif (isinstance(activity, (int, float)) and not isinstance(activity, bool) and
+                      math.isfinite(activity) and activity > now):
+                    # Normalize a skewed future timestamp once. Persisting the
+                    # observation prevents every status tick from making it fresh.
+                    activity = now
+                    state = lane_write_state_locked(lane["name"], last_activity=activity)
+                elif (isinstance(activity, (int, float)) and not isinstance(activity, bool) and
+                      math.isfinite(activity) and now - activity > stale_after):
+                    state = lane_write_state_locked(lane["name"], stale_since=now,
+                                                    stale_run=state["current_run"])
+                    lane_state = "stale"
         model = state.get("resolved_model") or lane["model"]
         quota_until = state.get("quota_until")
         if (lane_state == "idle" and lane["backend"] == "agy" and state.get("quota_model") == model
@@ -8905,6 +9027,8 @@ def lane_status_rows():
                      "model": model, "pid": state.get("child_pid"), "supervisor_pid": pid,
                      "quota_reset_at": quota_until if lane_state == "quota_exhausted" else None,
                      "current_run": state.get("current_run"),
+                     "last_activity": state.get("last_activity"),
+                     "stale_since": state.get("stale_since"),
                      "run_state": state.get("turn_state"),
                      "provider": execution_provider(lane["backend"], policy=load_policy(), lane=lane),
                      "uptime_seconds": round(NOW() - state["started"], 1) if state.get("started") else None,

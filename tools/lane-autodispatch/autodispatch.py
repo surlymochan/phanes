@@ -9,7 +9,7 @@ Pause: the swrm pause store ($OPENSWARM_HOME/pauses, written by `swrm pause <sco
 legacy markers ~/phanes-ctl/autodispatch/PAUSE (whole loop), PAUSE-<LANE> (one lane),
 PAUSE-HOST-<HOST>, PAUSE-BACKEND-<BACKEND> and PAUSE-MINT (no new issue minted). Both are read (Refs #1366).
 """
-import base64, hashlib, json, os, re, shlex, stat, subprocess, sys, time, tempfile, concurrent.futures as cf
+import base64, hashlib, json, math, os, re, shlex, stat, subprocess, sys, time, tempfile, concurrent.futures as cf
 HOME = os.path.expanduser("~"); D = f"{HOME}/phanes-ctl/autodispatch"
 REPO = "surlymochan/phanes"; LOCAL = "/workspace/phanes-repo"; BRAIN_LOG = "/workspace/phanes/brain/log.md"
 TICK = int(os.environ.get("AD_TICK", "60")); BUDGET = os.environ.get("AD_BUDGET", "45"); LOW = int(os.environ.get("AD_LOW", "10"))
@@ -20,6 +20,10 @@ RULES = ("Rules: work only inside this repository worktree (the current director
          "clear message referencing the issue (\"Refs #{n}\"). Write in the same language as the issue. "
          "Your commit message must also carry a short body with a `Closes #{n}` line and a `验收：<command>` line, and the "
          "commit subject (the PR title) must contain `#{n}`, so the lane PR passes the pre-submit check (Refs #1704).")
+IMPL_CARD_TASK_BOOK = ("## Impl card delivery requirements\n"
+                       "1. 交付说明必须对每个新增函数列出入口→调用链→数据结构来源：由谁调用、输入来自哪个真实数据结构、每个字段由谁填写。\n"
+                       "2. 至少补一个 tick/集成级测试：从真实入口（tick 或等价入口）驱动到可观测结果；只测函数加 mock 不算。\n")
+NON_IMPL_CARD_TYPES = {"upstream", "ops", "follow-up", "planner", "verify-intent"}
 PRIO = {"p0": 0, "p1": 1, "p2": 2}
 DISPATCH_EXCLUDING_LABELS = {"in-progress", "lane-pr", "lane-failed"}
 # One multiplexed connection per host (cuts handshakes ~10x; banner-exchange timeouts came from bursts of parallel ssh).
@@ -623,6 +627,7 @@ L=sys.argv[1]; R=sys.argv[2] if len(sys.argv)>2 else ""
 out={"lane":None,"run":None}
 try:
   ls=json.load(open(f"{O}/lanes/{L}/state.json")); out["lane"]=ls.get("state"); out["current_run"]=ls.get("current_run")
+  if R and ls.get("current_run")==R: out["last_activity"]=ls.get("last_activity")
 except Exception as e: out["lane"]="unknown"
 if R:
   p=f"{O}/runs/{R}/result.json"
@@ -671,7 +676,7 @@ def queue():
             valid, missing = verify_requirements(body)
             if not valid:
                 log_verify_rejected(i["number"], missing); continue
-        items.append({"n": i["number"], "title": i["title"], "body": body, "prio": pr, "backend": be, "strict": "strict-backend" in labels, "verify": verify})
+        items.append({"n": i["number"], "title": i["title"], "body": body, "labels": sorted(labels), "prio": pr, "backend": be, "strict": "strict-backend" in labels, "verify": verify})
     return sorted(items, key=lambda x: (x["prio"], x["n"]))
 
 VERIFY_HEADING_RE = re.compile(r"(?mi)^##[^\S\r\n]*Verify[^\S\r\n]*Intent[^\S\r\n]*$")
@@ -874,10 +879,40 @@ def freshen_queue(q, state, cache=None):
             fresh.append(item)
     return fresh
 
+def update_busy_stale(lanes, state, res):
+    """Retain review markers independently of run tracking, including offline hosts.
+
+    `updated` and dispatch age are deliberately not activity. Legacy runs get one
+    persisted observation window when no trustworthy activity has been seen yet.
+    """
+    now = time.time()
+    threshold = env_number("AD_BUSY_STALE_MINUTES", 30) * 60
+    if not math.isfinite(threshold) or threshold < 0: threshold = 30 * 60
+    for lane in lanes:
+        st = state.get(lane)
+        if not st: continue
+        st.setdefault("activity_observed_since", now)
+        r = res.get(lane, {})
+        activity = r.get("last_activity") if r.get("current_run") == st["run"] else None
+        if (isinstance(activity, (int, float)) and not isinstance(activity, bool)
+                and math.isfinite(activity) and activity > 0):
+            # Remember the raw host reading: an unchanged future clock reading
+            # must not become fresh activity every time it is polled.
+            source = st.get("activity_source", 0)
+            if activity != source and (activity > source or st.get("last_activity", 0) < activity <= now):
+                st["activity_source"] = activity
+                st["last_activity"] = max(st.get("last_activity", 0), min(activity, now))
+        last = st.get("last_activity", st["activity_observed_since"])
+        if now - last > threshold and "stale_since" not in st:
+            st["stale_since"] = now
+            log(f"{lane} #{st['issue']} run {st['run']} stale: no trusted activity; review required", brain=False)
+    save_state(state)
+
 def status_snapshot(lanes, state, res, ready, blocked):
     """Build the observable lane status row, including this process's stale skips."""
-    status = {L: ("busy #%s" % state[L]["issue"]) if state.get(L) else (res[L].get("error") or res[L].get("lane") or "?") for L in lanes}
-    status["_busy"] = sum(1 for L in lanes if state.get(L))
+    status = {L: (("stale #%s (review required)" if "stale_since" in state[L] else "busy #%s") % state[L]["issue"]) if state.get(L) else (res[L].get("error") or res[L].get("lane") or "?") for L in lanes}
+    status["_busy"] = sum(1 for L in lanes if state.get(L) and "stale_since" not in state[L])
+    status["_stale"] = sum(1 for L in lanes if state.get(L) and "stale_since" in state[L])
     status["_ready"] = ready
     status["_blocked"] = blocked
     status["_stale_stripped_n"] = STALE_STRIPPED_N
@@ -912,7 +947,20 @@ def dispatch_failed(lane, cfg, item, error):
     host_fail(cfg["host"], f"dispatch #{item['n']}: {error}")
 
 def dispatch(lane, cfg, item, base):
-    n = item["n"]; task = f"# #{n} {item['title']}\n\n{item['body']}\n\n{RULES.format(n=n)}\n"
+    n = item["n"]
+    body = item["body"]
+    labels = set(item.get("labels", ()))
+    # PLANNER's ordinary work cards have Chinese titles and only priority/backend
+    # labels, so impl is the default. Explicit non-impl markers take precedence,
+    # including when an old impl label or title prefix remains on the card.
+    excluded_labels = {prefix + kind for kind in NON_IMPL_CARD_TYPES for prefix in ("", "card:", "type:")}
+    excluded_labels.add("upstream(swrm)")
+    excluded_title = re.match(r"(?i)^(?:upstream|ops|follow-up|planner|verify-intent)(?:\s*[:：]|\s+|$)", item["title"])
+    is_impl = not (labels & excluded_labels or excluded_title)
+    # A heading mention or a partial block must not suppress either requirement.
+    if is_impl and IMPL_CARD_TASK_BOOK.rstrip() not in body:
+        body = f"{body.rstrip()}\n\n{IMPL_CARD_TASK_BOOK}"
+    task = f"# #{n} {item['title']}\n\n{body}\n\n{RULES.format(n=n)}\n"
     path = f"{D}/tasks/{lane}-{n}.md"; os.makedirs(f"{D}/tasks", exist_ok=True); open(path, "w").write(task)
     h = cfg["host"]; F = cfg.get("fleet", "~/.local/bin/swrm-fleet"); R = cfg.get("repo", "~/work/phanes-fleet")
     with open(path) as task_file:
@@ -1211,8 +1259,15 @@ def tick(lanes, state, last_warn):
             if result.get("done"): state.pop(L); save_state(state)
             if result.get("error"): log(f"{L} #{st['issue']} run {st['run']}: {result['error']}", brain=False)
         elif st and reconcile(L, lanes[L], st, r, state): state.pop(L); save_state(state)
+    update_busy_stale(lanes, state, res)
     try: q = queue()
-    except Exception as e: log(f"queue error: {e}", brain=False); return last_warn
+    except Exception as e:
+        log(f"queue error: {e}", brain=False)
+        st = status_snapshot(lanes, state, res, None, None)
+        st["_queue_error"] = str(e)
+        with open(f"{D}/lanes-status.json", "w") as stream:
+            json.dump(st, stream, ensure_ascii=False, indent=1)
+        return last_warn
     for i in q: i["deps_ok"] = deps_met(i)
     # one authoritative read per issue per tick, shared by the dispatch candidates and the count
     prefetch_labels([i["n"] for i in q])
