@@ -1,8 +1,10 @@
 """Acceptance tests for the offline Sol Spec pilot dispatch gate."""
 
+import hashlib
 import json
 import os
 import pathlib
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -11,11 +13,13 @@ import unittest
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 PILOT = ROOT / "bin" / "evalid_sol_pilot.py"
+SPEC_CONTENT = b'{"kind": "spec", "scenarios": []}\n'
+SPEC_SHA256 = hashlib.sha256(SPEC_CONTENT).hexdigest()
 
 
 class EvalidSolPilotTests(unittest.TestCase):
     def setUp(self):
-        self.directory = tempfile.TemporaryDirectory()
+        self.directory = tempfile.TemporaryDirectory(prefix=".sol-pilot-", dir=ROOT.parent)
         self.runs = pathlib.Path(self.directory.name) / "runs"
         self.runs.mkdir()
 
@@ -32,11 +36,14 @@ class EvalidSolPilotTests(unittest.TestCase):
             "duration_seconds": 75.0,
             "queued_seconds": 20.0,
             "usage": {"input_tokens": 1200, "output_tokens": 300},
-            "artifacts": [{"name": "spec.json", "sha256": "a" * 64}],
+            "attempts": [{"backend": "codex", "model": "gpt-6.1-sol",
+                          "effort": "high", "rc": 0, "error_class": None}],
+            "artifacts": [{"name": "spec.json", "sha256": SPEC_SHA256}],
         }
         receipt.update(overrides)
         run = self.runs / run_id
         run.mkdir()
+        (run / "spec.json").write_bytes(SPEC_CONTENT)
         (run / "result.json").write_text(json.dumps(receipt), encoding="utf-8")
         return receipt
 
@@ -72,8 +79,7 @@ class EvalidSolPilotTests(unittest.TestCase):
             with self.subTest(overrides=overrides):
                 path = self.runs / "spec-1"
                 if path.exists():
-                    (path / "result.json").unlink()
-                    path.rmdir()
+                    shutil.rmtree(path)
                 self.receipt(**overrides)
                 self.assert_rejected_for(reason)
 
@@ -127,15 +133,15 @@ class EvalidSolPilotTests(unittest.TestCase):
     def test_result_and_inputs_are_stable_and_read_only(self):
         self.receipt("z-run")
         self.receipt("a-run")
-        before = {path: path.read_bytes() for path in self.runs.glob("*/result.json")}
+        before = {path: path.read_bytes() for path in self.runs.rglob("*") if path.is_file()}
         rc, report = self.evaluate()
         self.assertEqual(rc, 0)
         self.assertEqual([row["run_id"] for row in report["samples"]], ["a-run", "z-run"])
         self.assertEqual(report, self.evaluate()[1])
-        after = {path: path.read_bytes() for path in self.runs.glob("*/result.json")}
+        after = {path: path.read_bytes() for path in self.runs.rglob("*") if path.is_file()}
         self.assertEqual(before, after)
         self.assertEqual(sorted(path.name for path in self.runs.rglob("*") if path.is_file()),
-                         ["result.json", "result.json"])
+                         ["result.json", "result.json", "spec.json", "spec.json"])
 
     @unittest.skipUnless(hasattr(os, "mkfifo"), "requires FIFO support")
     def test_fifo_receipt_is_rejected_without_waiting_for_a_writer(self):
@@ -155,8 +161,7 @@ class EvalidSolPilotTests(unittest.TestCase):
             with self.subTest(seconds=seconds, queued=queued):
                 folder = self.runs / "spec-1"
                 if folder.exists():
-                    (folder / "result.json").unlink()
-                    folder.rmdir()
+                    shutil.rmtree(folder)
                 receipt = self.receipt(seconds=seconds, queued_seconds=queued)
                 del receipt["duration_seconds"]
                 (folder / "result.json").write_text(json.dumps(receipt), encoding="utf-8")
@@ -174,6 +179,80 @@ class EvalidSolPilotTests(unittest.TestCase):
     def test_wrong_actual_model_rejects_role_pool(self):
         self.receipt(model="gpt-6.1-terra")
         self.assert_rejected_for("profile_mismatch:model")
+
+    def test_actual_attempt_profiles_must_match_even_when_top_level_matches(self):
+        profile = {"backend": "codex", "model": "gpt-6.1-sol", "effort": "high",
+                   "rc": 0, "error_class": None}
+        for field, wrong in (("backend", "pi"), ("model", "gpt-6.1-terra"),
+                             ("effort", "low"), ("model", None)):
+            for index in (0, 1):
+                with self.subTest(field=field, wrong=wrong, index=index):
+                    shutil.rmtree(self.runs / "spec-1", ignore_errors=True)
+                    attempts = [dict(profile), dict(profile)]
+                    attempts[index][field] = wrong
+                    self.receipt(attempts=attempts)
+                    self.assert_rejected_for(f"attempt_profile_mismatch:{field}")
+
+    def test_missing_or_malformed_attempts_cannot_certify_actual_profile(self):
+        for attempts in (None, [], {}, [None], ["done"]):
+            with self.subTest(attempts=attempts):
+                shutil.rmtree(self.runs / "spec-1", ignore_errors=True)
+                self.receipt(attempts=attempts)
+                self.assert_rejected_for("invalid_attempts")
+        receipt = json.loads((self.runs / "spec-1" / "result.json").read_text())
+        del receipt["attempts"]
+        (self.runs / "spec-1" / "result.json").write_text(json.dumps(receipt))
+        self.assert_rejected_for("invalid_attempts")
+
+    def test_final_attempt_must_succeed(self):
+        for overrides in ({"rc": 1}, {"rc": None}, {"rc": False},
+                          {"error_class": "rate_limit"}):
+            with self.subTest(overrides=overrides):
+                shutil.rmtree(self.runs / "spec-1", ignore_errors=True)
+                attempt = {"backend": "codex", "model": "gpt-6.1-sol", "effort": "high",
+                           "rc": 0, "error_class": None, **overrides}
+                self.receipt(attempts=[attempt])
+                self.assert_rejected_for("invalid_terminal_attempt")
+
+    def test_declared_spec_artifact_must_exist(self):
+        self.receipt()
+        (self.runs / "spec-1" / "spec.json").unlink()
+        self.assert_rejected_for("missing_spec_artifact")
+
+    def test_spec_artifact_contents_must_match_digest(self):
+        self.receipt()
+        (self.runs / "spec-1" / "spec.json").write_bytes(b'{"tampered": true}')
+        self.assert_rejected_for("spec_artifact_digest_mismatch")
+
+    def test_spec_artifact_cannot_escape_run_directory(self):
+        outside = self.runs.parent / "spec.json"
+        outside.write_bytes(SPEC_CONTENT)
+        for name in (str(outside), "../../spec.json", "nested/../../spec.json"):
+            with self.subTest(name=name):
+                shutil.rmtree(self.runs / "spec-1", ignore_errors=True)
+                self.receipt(artifacts=[{"name": name, "sha256": SPEC_SHA256}])
+                self.assert_rejected_for("missing_spec_artifact")
+
+    def test_linked_spec_artifact_or_parent_is_rejected(self):
+        self.receipt()
+        artifact = self.runs / "spec-1" / "spec.json"
+        outside = self.runs.parent / "spec.json"
+        artifact.rename(outside)
+        artifact.symlink_to(outside)
+        self.assert_rejected_for("missing_spec_artifact")
+        receipt = json.loads((artifact.parent / "result.json").read_text())
+        receipt["artifacts"][0]["name"] = "linked/spec.json"
+        (artifact.parent / "linked").symlink_to(outside.parent, target_is_directory=True)
+        (artifact.parent / "result.json").write_text(json.dumps(receipt))
+        self.assert_rejected_for("missing_spec_artifact")
+
+    @unittest.skipUnless(hasattr(os, "mkfifo"), "requires FIFO support")
+    def test_fifo_spec_artifact_is_rejected_without_waiting_for_a_writer(self):
+        self.receipt()
+        artifact = self.runs / "spec-1" / "spec.json"
+        artifact.unlink()
+        os.mkfifo(artifact)
+        self.assert_rejected_for("missing_spec_artifact")
 
     def test_execution_timeout_rejects_role_pool(self):
         self.receipt(duration_seconds=81.0, queued_seconds=20.0)
@@ -195,7 +274,10 @@ class EvalidSolPilotTests(unittest.TestCase):
         })
 
     def test_spec_artifact_in_subdirectory_enables_pool(self):
-        self.receipt(artifacts=[{"name": "deliverables/spec.json", "sha256": "a" * 64}])
+        self.receipt(artifacts=[{"name": "deliverables/spec.json", "sha256": SPEC_SHA256}])
+        run = self.runs / "spec-1"
+        (run / "deliverables").mkdir()
+        (run / "spec.json").rename(run / "deliverables" / "spec.json")
         rc, report = self.evaluate()
         self.assertEqual(rc, 0)
         self.assertEqual(report, {

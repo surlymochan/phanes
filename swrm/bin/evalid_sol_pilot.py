@@ -3,12 +3,15 @@
 
 Read RUNS/<run_id>/result.json receipts, never dispatch or enable a pool.
 Exit 0 means the supplied evidence meets the gate; exit 1 rejects it.
-The report checks receipt metadata, not artifact contents or live quota.
+Actual profiles come from attempts, with a successful final attempt required.
+Spec artifact names are relative to the run directory; their local bytes must
+match the declared SHA-256. No live quota query is performed.
 Reasons are ordered by directory then by validation field, with sample-count
 failure first. Native seconds already excludes queue time; legacy total
 duration_seconds includes it and requires subtraction after validation.
 """
 import argparse
+import hashlib
 import json
 import math
 from pathlib import Path
@@ -22,7 +25,41 @@ def nonnegative_number(value):
     return (type(value) in (int, float) and math.isfinite(value) and value >= 0)
 
 
-def validate_receipt(receipt, run_id, max_execution_seconds):
+def validate_spec_artifacts(artifacts, run_dir):
+    """Verify local Spec evidence without following receipt-controlled links."""
+    if not isinstance(artifacts, list):
+        return "missing_spec_artifact"
+    found = False
+    for item in artifacts:
+        if (not isinstance(item, dict) or not isinstance(item.get("name"), str)
+                or Path(item["name"]).name != "spec.json"):
+            continue
+        found = True
+        name, digest = Path(item["name"]), item.get("sha256")
+        if (name.is_absolute() or ".." in name.parts
+                or not isinstance(digest, str)
+                or not re.fullmatch(r"[0-9a-fA-F]{64}", digest)):
+            return "missing_spec_artifact"
+        try:
+            source = run_dir
+            for part in name.parts:
+                source = source / part
+                if source.is_symlink():
+                    return "missing_spec_artifact"
+            if not source.is_file():
+                return "missing_spec_artifact"
+            actual = hashlib.sha256()
+            with source.open("rb") as stream:
+                for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+                    actual.update(chunk)
+        except (OSError, ValueError):
+            return "missing_spec_artifact"
+        if actual.hexdigest() != digest.lower():
+            return "spec_artifact_digest_mismatch"
+    return None if found else "missing_spec_artifact"
+
+
+def validate_receipt(receipt, run_id, max_execution_seconds, run_dir):
     """Return all reasons plus execution time, without executing receipt data."""
     reasons = []
     if not isinstance(receipt, dict):
@@ -32,6 +69,19 @@ def validate_receipt(receipt, run_id, max_execution_seconds):
     for field, expected in PROFILE.items():
         if receipt.get(field) != expected:
             reasons.append(f"profile_mismatch:{field}")
+    attempts = receipt.get("attempts")
+    if (not isinstance(attempts, list) or not attempts
+            or any(not isinstance(attempt, dict) for attempt in attempts)):
+        reasons.append("invalid_attempts")
+    else:
+        # A configured profile cannot certify a fallback to a different model.
+        for field, expected in PROFILE.items():
+            if any(attempt.get(field) != expected for attempt in attempts):
+                reasons.append(f"attempt_profile_mismatch:{field}")
+        final = attempts[-1]
+        if (type(final.get("rc")) is not int or final["rc"] != 0
+                or final.get("error_class") is not None):
+            reasons.append("invalid_terminal_attempt")
     if receipt.get("status") != "done":
         reasons.append("invalid_terminal_status")
     # swrm sums attempt seconds measured after provider-slot admission.
@@ -57,14 +107,9 @@ def validate_receipt(receipt, run_id, max_execution_seconds):
     elif any(type(usage[key]) is not int or usage[key] < 0
              for key in ("input_tokens", "output_tokens")):
         reasons.append("invalid_usage")
-    artifacts = receipt.get("artifacts")
-    if not isinstance(artifacts, list) or not any(
-            isinstance(item, dict) and isinstance(item.get("name"), str)
-            and Path(item["name"]).name == "spec.json"
-            and isinstance(item.get("sha256"), str)
-            and re.fullmatch(r"[0-9a-fA-F]{64}", item["sha256"])
-            for item in artifacts):
-        reasons.append("missing_spec_artifact")
+    artifact_error = validate_spec_artifacts(receipt.get("artifacts"), run_dir)
+    if artifact_error:
+        reasons.append(artifact_error)
     return reasons, execution
 
 
@@ -91,7 +136,7 @@ def evaluate(runs, min_samples=3, max_execution_seconds=60):
             if path.is_symlink() or result.is_symlink() or not result.is_file():
                 raise ValueError("linked receipt")
             receipt = json.loads(result.read_text(encoding="utf-8"))
-            errors, execution = validate_receipt(receipt, path.name, max_execution_seconds)
+            errors, execution = validate_receipt(receipt, path.name, max_execution_seconds, path)
         except (OSError, ValueError, OverflowError, RecursionError):
             errors, execution = ["invalid_receipt"], None
         reasons.extend({"run_id": path.name, "reason": reason} for reason in errors)
