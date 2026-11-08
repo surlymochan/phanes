@@ -3,6 +3,7 @@ import json
 import os
 import pathlib
 import shutil
+import signal
 import socket
 import subprocess
 import sys
@@ -13,6 +14,7 @@ import unittest
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 CLI = ROOT / "bin" / "swrm"
+FLEET_CAPACITY = ROOT / "bin" / "fleet-capacity"
 FIXTURES = ROOT / "tests" / "fixtures"
 
 
@@ -112,6 +114,219 @@ class LaneTests(unittest.TestCase):
     def wait_run(self, run_id, timeout=12):
         return self.wait_for(lambda: (s if (s := self.run_state(run_id)).get("state") == "finished" else None),
                              timeout=timeout, description=f"run {run_id} to finish")
+
+    # ------------------------------------------------------------ fleet recovery
+    # Refs #1816: the recovery of a dead runner is observed through the events the
+    # resident lane supervisor publishes, never through a fixed timeout.
+    #
+    # Verdict of #1816 (full write-up: docs/design/issue-1816-lane-ttl-recovery.md):
+    # the reported CI failure was a real defect in the recovery logic, amplified by
+    # a synchronization bug in this test - not merely a tight timeout window.
+    #   * defect: the reaper counted an exited-but-unreaped (zombie) executor group
+    #     as alive, so the reservation of a dead runner was never released.  Fixed in
+    #     swrm/bin/swrm by `process_exited()` and `process_group_members()`.
+    #   * test: the old wait polled the coordinator's reservation list with a fixed
+    #     15s budget, while the coordinator empties that list *before* the
+    #     supervisor writes the run status marker.  The wait below observes the
+    #     supervisor's own recovery event instead, so it is race free.
+    #
+    # BLOCKER mapping of this delivery:
+    #   B1 -> swrm/tests/test_lane.py:wait_for_lane_event (:178) + the target test
+    #         below (:205, event sync instead of a 15s hard timeout; the "supervisor
+    #         ready" wait at :222 is event based as well) and
+    #         swrm/bin/swrm:process_exited (:4027) / process_group_members (:4066,
+    #         no helper process per poll) / recover_expired_fleet_slots (:4203) /
+    #         lane_recover_expired_fleet_slots (:4319) / reserve_provider_slot
+    #         (:4341) - a failing TTL reaper must not end the resident lane and must
+    #         not fail an admission
+    #         -> tests.test_lane.LaneTests.test_lane_supervisor_recovers_killed_runner_after_ttl_without_new_admission
+    #         -> 50/50 local runs green; the CI matrix (ubuntu-24.04/macos-latest x
+    #            Python 3.9/3.11/3.13) is the PR check, see the doc section 5.2.
+    #   B2 -> docs/design/issue-1816-lane-ttl-recovery.md (verdict, the reproduction
+    #         of the red CI leg of this round in section 1.5, evidence and the
+    #         B1/B2 table) + this comment
+    #         -> same test plus tests.test_fleet_capacity.FleetCapacityTests.
+    #            test_ttl_recovery_waits_for_the_configured_ttl_with_an_injected_clock
+    #            and tests.test_fleet_capacity.FleetCapacityTests.
+    #            test_recovery_counts_an_unreaped_executor_as_stopped
+    #         -> verdict: real defect (zombie counted as alive) + test sync defect.
+
+    def enable_fleet_guard(self):
+        capacity_dir = self.root / "fleet-capacity"
+        guard = self.root / "fleet-guard.json"
+        guard.write_text(json.dumps({"command": [str(FLEET_CAPACITY), "broker"]}))
+        self.env["OPENSWARM_FLEET_GUARD_CONFIG"] = str(guard)
+        self.env["OPENSWARM_FLEET_CAPACITY_DIR"] = str(capacity_dir)
+
+    def fleet_call(self, payload):
+        argv = [str(FLEET_CAPACITY), "broker"]
+        if os.name == "nt":  # Windows cannot CreateProcess a shebang script (WinError 193)
+            argv = [sys.executable, *argv]
+        return subprocess.run(argv, input=json.dumps(payload), text=True,
+                              capture_output=True, check=True, env=self.env, timeout=15)
+
+    def fleet_reservations(self):
+        return json.loads(self.fleet_call({"op": "status"}).stdout)["reservations"]
+
+    @staticmethod
+    def process_identity(pid):
+        try:
+            with open(f"/proc/{int(pid)}/stat", encoding="utf-8") as stream:
+                fields = stream.read().rsplit(")", 1)[1].split()
+            if len(fields) > 19:
+                return f"linux-start:{fields[19]}"
+        except (OSError, ValueError, IndexError):
+            pass
+        result = subprocess.run(["ps", "-o", "lstart=", "-p", str(int(pid))], text=True,
+                                capture_output=True, check=False)
+        return f"ps-lstart:{result.stdout.strip()}" if result.returncode == 0 and result.stdout.strip() else None
+
+    def wait_for_lane_event(self, predicate, progress, description, stall=30.0, limit=300.0):
+        """Wait for an event of the resident lane supervisor.
+
+        `predicate` returns a truthy value once the event happened, `progress`
+        returns a marker that changes while the supervisor keeps working.  The wait
+        has no tight total budget: it fails when the supervisor stops making progress
+        (`stall` seconds without a new marker) or when the whole wait exceeds
+        `limit`.  A loaded CI runner therefore slows this test down instead of
+        breaking it, and a stuck supervisor fails with a readable marker.
+        """
+        started = time.monotonic()
+        last, deadline = None, time.monotonic() + stall
+        while True:
+            value = predicate()
+            if value:
+                return value
+            marker = progress()
+            if isinstance(marker, (int, float)) and marker != last:
+                last, deadline = marker, time.monotonic() + stall
+            now = time.monotonic()
+            if now > deadline:
+                self.fail(f"timed out waiting for {description}; the lane supervisor stopped "
+                          f"publishing recovery checks at {last}")
+            if now - started > limit:
+                self.fail(f"timed out waiting for {description}; last={value!r}")
+            time.sleep(0.05)
+
+    def test_lane_supervisor_recovers_killed_runner_after_ttl_without_new_admission(self):
+        # Refs #1816: the reported CI failure had two causes, and both are fixed here.
+        #   * Real defect: the reaper counted an exited-but-unreaped (zombie) executor
+        #     group as alive, so the reservation of a dead runner was never released.
+        #     The reaper now treats an exited process as stopped
+        #     (swrm/bin/swrm: process_exited, process_group_members).
+        #   * Synchronization bug of this test: the old wait observed the
+        #     coordinator's reservation list, which the coordinator empties *before*
+        #     the supervisor writes the run status marker, so a loaded runner read a
+        #     status file without `fleet_recovered_at`.  The wait below observes the
+        #     supervisor's own recovery event instead: it is published after the
+        #     status marker, so every assertion sees the finished recovery.
+        # The verdict and the evidence are in
+        # docs/design/issue-1816-lane-ttl-recovery.md.
+        self.enable_fleet_guard()
+        (self.data / "policy.local.json").write_text(json.dumps({"fleet": {
+            "recovery_ttl_seconds": 0.1, "recovery_poll_seconds": 0.02}}))
+        self.start_lane()
+        # The supervisor readiness is observed as an event too: `lane up` already waits
+        # for the control socket, and the supervisor publishes its recovery tick marker
+        # from the first tick on.  A fixed 12s window would fail on a loaded CI runner
+        # even though the supervisor is healthy.
+        self.wait_for_lane_event(
+            lambda: (state if (state := self.lane_state()).get("supervisor_pid") and
+                     state.get("state") in ("idle", "busy") else None),
+            lambda: self.lane_state().get("fleet_recovery_checked_at"),
+            "resident lane supervisor to become ready")
+        run_id, token = "killed-runner", "a" * 32
+        answer = json.loads(self.fleet_call({"op": "acquire", "token": token, "run_id": run_id,
+                                             "backend": "pi", "provider": "minimax-cn"}).stdout)
+        self.assertTrue(answer["admitted"])
+        # The sleeps outlive every wait of this test: the executor must still be alive
+        # when the supervisor stops its group, so its own exit can never be mistaken
+        # for the recovery.  Both processes are killed in the finally block.
+        runner = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(120)"])
+        executor = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(120)"], start_new_session=True,
+                                    stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        try:
+            os.kill(runner.pid, signal.SIGKILL)
+            runner.wait()
+            rdir = self.data / "runs" / run_id
+            rdir.mkdir(parents=True)
+            (rdir / "status.json").write_text(json.dumps({
+                "id": run_id, "state": "running", "runner_pid": runner.pid,
+                "executor_pid": executor.pid, "executor_pgid": os.getpgid(executor.pid),
+                "executor_identity": self.process_identity(executor.pid),
+                "fleet_host": "broker", "fleet_reserved_at": time.time() - 1,
+            }))
+            # No later assignment/reserve occurs: the existing lane polling loop must stop only this
+            # recorded group and perform recovery after the group is gone.
+            progress = lambda: self.run_state(run_id).get("fleet_recovery_checked_at")
+            self.wait_for_lane_event(
+                lambda: (s if (s := self.run_state(run_id)).get("fleet_recovery_stop_requested") else None),
+                progress, "resident lane to stop the recorded executor group")
+            # The recovery marker records that SIGTERM/SIGKILL was requested.  On macOS the
+            # runner can publish that marker just before the child scheduler observes its
+            # SIGTERM/SIGKILL shutdown sequence,
+            # so an immediate poll is a race rather than evidence that recovery failed.  Wait
+            # for, and assert, the actual forced exit: this must still happen before capacity
+            # can be released below.
+            self.wait_for_lane_event(lambda: executor.poll() is not None, progress,
+                                     "recorded executor to exit after TTL recovery")
+            self.assertIn(executor.returncode, (-signal.SIGTERM, -signal.SIGKILL))
+            executor.wait()
+            # The supervisor publishes the ids of the runs it recovered after it wrote the
+            # run status marker: waiting for that event keeps the assertions race free.
+            self.wait_for_lane_event(
+                lambda: (runs if (runs := self.lane_state().get("fleet_recovered_runs") or [])
+                         and run_id in runs else None),
+                progress, "resident lane to recover a dead runner")
+            self.assertFalse(self.fleet_reservations())
+            status = self.run_state(run_id)
+            self.assertIn("fleet_recovered_at", status)
+            self.assertIsNone(status.get("fleet_reservation_error"))
+        finally:
+            if runner.poll() is None:
+                runner.kill()
+                runner.wait()
+            if executor.poll() is None:
+                os.killpg(os.getpgid(executor.pid), signal.SIGKILL)
+                executor.wait()
+
+    def test_lane_supervisor_never_kills_unconfirmed_executor_group(self):
+        # Refs #1816: the companion invariant of the TTL recovery.  A group whose
+        # recorded identity cannot be confirmed is retained, never killed.
+        self.enable_fleet_guard()
+        (self.data / "policy.local.json").write_text(json.dumps({"fleet": {
+            "recovery_ttl_seconds": 0.1, "recovery_poll_seconds": 0.02}}))
+        self.start_lane()
+        run_id, token = "unknown-group", "b" * 32
+        self.assertTrue(json.loads(self.fleet_call({"op": "acquire", "token": token, "run_id": run_id,
+                                                    "backend": "pi", "provider": "minimax-cn"}).stdout)["admitted"])
+        runner = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(120)"])
+        executor = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(120)"], start_new_session=True,
+                                    stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        try:
+            os.kill(runner.pid, signal.SIGKILL)
+            runner.wait()
+            rdir = self.data / "runs" / run_id
+            rdir.mkdir(parents=True)
+            (rdir / "status.json").write_text(json.dumps({
+                "id": run_id, "state": "running", "runner_pid": runner.pid,
+                "executor_pid": executor.pid, "executor_pgid": os.getpgid(executor.pid),
+                "executor_identity": "not-this-process", "fleet_host": "broker", "fleet_reserved_at": time.time() - 1,
+            }))
+            retained = self.wait_for_lane_event(
+                lambda: (s if "identity cannot be confirmed" in
+                         str((s := self.run_state(run_id)).get("fleet_reservation_error")) else None),
+                lambda: self.run_state(run_id).get("fleet_recovery_checked_at"),
+                "unconfirmed executor group to be retained", stall=15.0)
+            self.assertEqual(len(self.fleet_reservations()), 1)
+            self.assertIsNone(executor.poll(), retained)
+        finally:
+            if runner.poll() is None:
+                runner.kill()
+                runner.wait()
+            if executor.poll() is None:
+                os.killpg(os.getpgid(executor.pid), signal.SIGKILL)
+                executor.wait()
 
     def wait_running(self, run_id):
         return self.wait_for(lambda: (s if (s := self.run_state(run_id)).get("state") == "running" else None),
