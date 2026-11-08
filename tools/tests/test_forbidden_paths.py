@@ -59,6 +59,14 @@ class ForbiddenPathsTest(unittest.TestCase):
         self.assertEqual(result.returncode, 1)
         self.assertIn("FORBIDDEN M openswarm/x.py", result.stdout)
 
+    def test_openswarm_type_change(self):
+        path = self.root / "openswarm/x.py"
+        path.unlink()
+        path.symlink_to("target")
+        result = self.diff()
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("FORBIDDEN T openswarm/x.py", result.stdout)
+
     def test_added_openswarm(self):
         self.write("openswarm/y.py")
         result = self.diff()
@@ -87,10 +95,12 @@ class ForbiddenPathsTest(unittest.TestCase):
         self.write("swrm/a.py")
         self.assertEqual(self.diff().returncode, 0)
 
-    def test_allow(self):
+    def test_allow_file_cannot_exempt_forbidden_path(self):
         self.write("swrm/tests/.foo.so")
-        self.script.with_name("forbidden_paths.allow").write_text("# exception\nswrm/tests/*.so\n")
-        self.assertEqual(self.diff().returncode, 0)
+        self.script.with_name("forbidden_paths.allow").write_text("*\n")
+        result = self.diff()
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("FORBIDDEN A swrm/tests/.foo.so", result.stdout)
 
     def test_tree(self):
         result = self.check("--tree")
@@ -124,6 +134,16 @@ class ForbiddenPathsTest(unittest.TestCase):
         self.assertEqual(result.returncode, 1)
         self.assertIn("LEGACY-GROWN openswarm/y.py", result.stdout)
 
+    def test_bootstrap_legacy_with_unicode_path(self):
+        self.git("rm", "tools/ci/forbidden_paths.legacy")
+        self.write("openswarm/中文 名.py")
+        self.git("add", "openswarm/中文 名.py")
+        self.git("commit", "-qm", "base without legacy")
+        self.base = self.git("rev-parse", "HEAD").strip()
+        self.write("tools/ci/forbidden_paths.legacy", "openswarm/x.py\nopenswarm/中文 名.py\n")
+        result = self.diff()
+        self.assertEqual(result.returncode, 0, result.stdout)
+
     def test_legacy_deleted_line_allowed(self):
         self.write("tools/ci/forbidden_paths.legacy", "")
         result = self.diff()
@@ -137,6 +157,16 @@ class ForbiddenPathsTest(unittest.TestCase):
         self.assertEqual(result.returncode, 1)
         for path in ("nested/.tmp/a", "a/.lane-review/history.md", "openswarm/x.so", "swrm/x.bak-1"):
             self.assertIn(f"FORBIDDEN A {path}", result.stdout)
+
+    def test_backup_filename_boundaries(self):
+        for path in ("swrm/x.bak", "swrm/x.py.bak", "swrm/x.bak-20261108", "swrm/x.bak.1"):
+            self.write(path)
+        self.write("swrm/x.bakery.py")
+        result = self.diff()
+        self.assertEqual(result.returncode, 1)
+        for path in ("swrm/x.bak", "swrm/x.py.bak", "swrm/x.bak-20261108", "swrm/x.bak.1"):
+            self.assertIn(f"FORBIDDEN A {path}", result.stdout)
+        self.assertNotIn("swrm/x.bakery.py", result.stdout)
 
     def test_review_and_backup(self):
         self.write("a/.lane-review/history.md")

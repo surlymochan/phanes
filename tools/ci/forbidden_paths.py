@@ -3,13 +3,12 @@
 
 import argparse
 from collections import Counter
-import fnmatch
+import re
 import subprocess
 import sys
 from pathlib import Path
 
 
-ALLOW_FILE = Path(__file__).with_name("forbidden_paths.allow")
 LEGACY_FILE = Path(__file__).with_name("forbidden_paths.legacy")
 LEGACY_PATH = "tools/ci/forbidden_paths.legacy"
 
@@ -22,8 +21,8 @@ def rule_for(path):
         return ".lane-review/"
     if path.endswith(".so"):
         return "*.so"
-    if ".bak" in parts[-1]:
-        return "*.bak*"
+    if re.search(r"\.bak($|[-._0-9])", parts[-1]):
+        return ".bak($|[-._0-9])"
     if len(parts) > 1 and parts[0] == "openswarm":
         return "openswarm/"
     return None
@@ -34,9 +33,9 @@ def git(*args):
 
 
 def legacy_lines(revision):
-    if not git("ls-tree", "--name-only", revision, "--", LEGACY_PATH).strip():
+    if not git("ls-tree", "--name-only", "-z", revision, "--", LEGACY_PATH):
         return []
-    return git("show", f"{revision}:{LEGACY_PATH}").decode("utf-8").splitlines()
+    return git("show", f"{revision}:{LEGACY_PATH}").decode("utf-8", errors="surrogateescape").splitlines()
 
 
 def main():
@@ -48,23 +47,26 @@ def main():
     if not args.tree and not args.base:
         parser.error("--base is required unless --tree is used")
 
-    patterns = []
-    if ALLOW_FILE.exists():
-        patterns = [line.strip() for line in ALLOW_FILE.read_text().splitlines()
-                    if line.strip() and not line.strip().startswith("#")]
-
     if args.tree:
         entries = [("A", path) for path in git("ls-tree", "-r", "--name-only", "-z", args.head).split(b"\0") if path]
     else:
         fields = git("diff", "--name-status", "--no-renames", "-z", f"{args.base}...{args.head}").split(b"\0")
-        entries = list(zip(fields[0::2], fields[1::2]))
-        entries = [(status.decode(), path) for status, path in entries if status in (b"A", b"M")]
+        entries = []
+        fields = iter(fields)
+        for status in fields:
+            if not status:
+                break
+            path = next(fields)
+            if status.startswith((b"C", b"R")):
+                path = next(fields)
+            if status != b"D":
+                entries.append((status.decode(), path))
 
     forbidden = False
     legacy = set()
     if args.tree:
         if LEGACY_FILE.exists():
-            legacy = {line.strip() for line in LEGACY_FILE.read_text().splitlines()
+            legacy = {line.strip() for line in LEGACY_FILE.read_text(errors="surrogateescape").splitlines()
                       if line.strip() and not line.strip().startswith("#")}
         tree_paths = {path.decode("utf-8", errors="surrogateescape") for _, path in entries}
         openswarm_paths = {path for path in tree_paths if path.startswith("openswarm/")}
@@ -80,9 +82,10 @@ def main():
             return Counter(l.strip() for l in lines if l.strip() and not l.strip().startswith("#"))
         base_lines = legacy_lines(args.base)
         added = entries_of(legacy_lines(args.head)) - entries_of(base_lines)
-        if not git("ls-tree", "--name-only", args.base, "--", LEGACY_PATH).strip():
+        if not git("ls-tree", "--name-only", "-z", args.base, "--", LEGACY_PATH):
             # Bootstrap: the list may only name files that already exist on the base.
-            base_tree = set(git("ls-tree", "-r", "--name-only", args.base, "--", "openswarm").decode().splitlines())
+            base_tree = {path.decode("utf-8", errors="surrogateescape") for path in
+                         git("ls-tree", "-r", "--name-only", "-z", args.base, "--", "openswarm").split(b"\0") if path}
             added = Counter({l: n for l, n in added.items() if l not in base_tree})
         for line in sorted(added.elements()):
             print(f"LEGACY-GROWN {line}")
@@ -97,9 +100,7 @@ def main():
         rule = rule_for(path)
         if rule == "openswarm/" and args.tree and path in legacy:
             continue
-        allowed = rule != "openswarm/" and any(
-            fnmatch.fnmatchcase(path, pattern) for pattern in patterns)
-        if rule and not allowed:
+        if rule:
             print(f"FORBIDDEN {status} {path} ({rule})")
             forbidden = True
     if forbidden:

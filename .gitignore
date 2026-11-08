@@ -32,4 +32,5 @@ __pycache__/
 
 # Local review records and backup files.
 .lane-review/
-*.bak*
+*.bak
+*.bak[-._0-9]*
