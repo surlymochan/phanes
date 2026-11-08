@@ -21,7 +21,7 @@ FIXTURES = ROOT / "tests" / "fixtures"
                      "lane control plane is AF_UNIX-based; Windows named-pipe transport is not implemented")
 class LaneTests(unittest.TestCase):
     def setUp(self):
-        self.tmp = tempfile.TemporaryDirectory(prefix="oslane-", dir=tempfile.gettempdir())
+        self.tmp = tempfile.TemporaryDirectory(prefix="oslane-", dir=ROOT.parent)
         self.root = pathlib.Path(self.tmp.name)
         self.data = self.root / "data"
         self.repo = self.root / "repo"
@@ -34,7 +34,9 @@ class LaneTests(unittest.TestCase):
         self.git("commit", "-q", "-m", "base")
         for path in FIXTURES.glob("fake_*py"):
             path.chmod(0o755)
-        self.env = dict(os.environ, OPENSWARM_HOME=str(self.data))
+        self.env = dict(os.environ, OPENSWARM_HOME=str(self.data),
+                        OPENSWARM_FLEET_GUARD_CONFIG=str(self.data / "no-fleet-guard.json"),
+                        OPENSWARM_FLEET_GUARD_REQUIRED="0")
         self.env["FAKE_PI_RPC_LOG"] = str(self.root / "fake-pi-rpc.jsonl")
         self.lane_name = "L1"
         self.backend = "codex"
@@ -262,8 +264,10 @@ class LaneTests(unittest.TestCase):
 
         supervisor_pid = self.lane_state()["supervisor_pid"]
         os.kill(supervisor_pid, signal.SIGKILL)
-        self.wait_for(lambda: not pathlib.Path(self.data / "lanes" / self.lane_name / "ctl.sock").exists(),
-                      description="the stopped supervisor socket to disappear")
+        # SIGKILL cannot unlink a filesystem socket; lane up must handle that
+        # stale socket. Observe the dead supervisor rather than its pathname.
+        self.wait_for(lambda: json.loads(self.cli("lane", "status").stdout)[0]["state"] == "crashed",
+                      description="the stopped supervisor to be reported crashed")
         restarted = self.cli("lane", "up", self.lane_name)
         self.assertTrue(json.loads(restarted.stdout)["lanes"][0]["started"])
 
@@ -280,6 +284,147 @@ class LaneTests(unittest.TestCase):
         )
         events = [json.loads(line) for line in (self.data / "runs" / run_id / "events.1.pi.jsonl").read_text().splitlines()]
         self.assertTrue(any(event.get("type") == "recovery" and event.get("run_id") == run_id for event in events))
+
+    def restart_supervisor(self):
+        state = self.lane_state()
+        os.kill(state["supervisor_pid"], signal.SIGKILL)
+        # The stale control socket is removed by lane up's ownership probe.
+        self.cli("lane", "up", self.lane_name)
+
+    def prepare_interrupted_issue(self, backend="pi"):
+        self.set_config(backend)
+        self.env["FAKE_APP_SERVER_LOG"] = str(self.root / "codex.jsonl")
+        self.env["OPENSWARM_AD_STATE"] = str(self.root / "ad.json")
+        self.env["OPENSWARM_BRAIN_LOG"] = str(self.root / "brain.log")
+        gh = self.root / "gh"
+        gh.write_text("#!/bin/sh\ncat " + str(self.root / "issue.json") + "\n")
+        gh.chmod(0o755)
+        self.env["OPENSWARM_GH_BIN"] = str(gh)
+        (self.root / "issue.json").write_text(json.dumps({"state": "open", "labels": [{"name": "in-progress"}]}))
+        self.start_lane()
+        rid = self.assign("LANE_TEST_WAIT broker interrupted task", "--title", "#1720 recovery")
+        self.wait_running(rid)
+        assignment = self.data / "runs" / rid / "assignment.json"
+        key = "session_file" if backend == "pi" else "thread_id"
+        self.wait_for(lambda: json.loads(assignment.read_text()).get(key), description="persisted session")
+        (self.root / "ad.json").write_text(json.dumps({self.lane_name: {"issue": 1720, "run": rid}}))
+        return rid
+
+    def test_broker_disconnect_restart_preserves_workspace_and_rejects_duplicate_dispatch(self):
+        # A short relative AF_UNIX path keeps the broker fixture inside the
+        # worktree without exceeding macOS's sockaddr_un limit.
+        broker_path = pathlib.Path(os.path.relpath(self.root / "broker.sock"))
+        broker = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        broker.bind(str(broker_path))
+        broker.listen(2)
+        broker.settimeout(12)
+        self.addCleanup(broker.close)
+        # The fixture connects from the lane cwd; use a relative path from it.
+        self.env["FAKE_PI_BROKER_SOCKET"] = "../../../../broker.sock"
+        rid = self.prepare_interrupted_issue()
+        connection, _ = broker.accept()
+        self.assertEqual(connection.recv(32), b"inference\n")
+        connection.close()
+        log = pathlib.Path(self.env["FAKE_PI_RPC_LOG"])
+        self.wait_for(lambda: '"broker_disconnected"' in log.read_text(), description="broker transport loss")
+        wt = self.data / "lanes" / self.lane_name / "wt"
+        (wt / "partial.txt").write_text("partial work")
+        self.restart_supervisor()
+        connection, _ = broker.accept()
+        self.assertEqual(connection.recv(32), b"inference\n")
+        connection.sendall(b"ready")
+        connection.close()
+        self.wait_for(lambda: self.lane_state().get("current_run") == rid, description="same run restored")
+        log = pathlib.Path(self.env["FAKE_PI_RPC_LOG"])
+        self.wait_for(lambda: '"switch_session"' in log.read_text(), description="session restored")
+        duplicate = self.cli("lane", "assign", self.lane_name, "--prompt", "duplicate", check=False)
+        self.assertNotEqual(duplicate.returncode, 0)
+        self.assertEqual((wt / "partial.txt").read_text(), "partial work")
+        self.assertEqual(len(list((self.data / "runs").iterdir())), 1)
+        events = [json.loads(line) for line in (self.data / "runs" / rid / "events.1.pi.jsonl").read_text().splitlines()]
+        self.assertTrue(any(e.get("type") == "recovery" and e["level"] == "workspace" for e in events))
+        self.assertIn(rid, (self.root / "brain.log").read_text())
+
+    def check_pushed_restart(self, missing=False):
+        rid = self.prepare_interrupted_issue()
+        wt = self.data / "lanes" / self.lane_name / "wt"
+        base = self.git("rev-parse", "HEAD")
+        (wt / "saved.txt").write_text("pushed progress")
+        self.git("-C", str(wt), "add", "saved.txt")
+        self.git("-C", str(wt), "commit", "-qm", "progress")
+        tip = self.git("-C", str(wt), "rev-parse", "HEAD")
+        remote = self.root / "remote.git"
+        self.git("init", "--bare", "-q", str(remote))
+        self.git("remote", "add", "origin", str(remote))
+        self.git("push", "-q", "origin", f"swrm/{rid}")
+        state = self.lane_state()
+        os.kill(state["supervisor_pid"], signal.SIGKILL)
+        os.kill(state["child_pid"], signal.SIGKILL)
+        if missing:
+            shutil.rmtree(wt)
+        else:
+            self.git("-C", str(wt), "reset", "--hard", base)
+        self.cli("lane", "up", self.lane_name)
+        self.wait_for(lambda: self.lane_state().get("current_run") == rid, description="pushed run restored")
+        self.assertEqual(self.git("-C", str(wt), "rev-parse", "HEAD"), tip)
+        self.assertEqual((wt / "saved.txt").read_text(), "pushed progress")
+        self.wait_for(lambda: (self.root / "brain.log").exists() and tip in (self.root / "brain.log").read_text(),
+                      description="commit recovery brain log")
+
+    def test_restart_restores_remote_tip_ahead_of_local_head(self):
+        self.check_pushed_restart()
+
+    def test_restart_restores_missing_workspace_from_pushed_tip(self):
+        self.check_pushed_restart(missing=True)
+
+    def test_restart_abandons_issue_reassigned_under_new_run_id(self):
+        rid = self.prepare_interrupted_issue()
+        (self.root / "ad.json").write_text(json.dumps({self.lane_name: {"issue": 1720, "run": rid},
+                                                       "L2": {"issue": 1720, "run": "replacement"}}))
+        self.restart_supervisor()
+        self.wait_for(lambda: self.lane_state().get("state") == "idle", description="abandoned run yields idle lane")
+        self.wait_for(lambda: self.run_state(rid).get("recovery_abandoned"), description="abandonment reason")
+        self.assertIn("reassigned", self.run_state(rid)["recovery_abandoned"])
+        self.assertNotIn('"switch_session"', pathlib.Path(self.env["FAKE_PI_RPC_LOG"]).read_text())
+        self.assertEqual(self.wait_run(self.assign("new task"))["status"], "done")
+
+    def check_abandoned_restart(self, condition, reason):
+        rid = self.prepare_interrupted_issue()
+        if condition == "unavailable":
+            (self.root / "ad.json").unlink()
+        elif condition == "not-progress":
+            (self.root / "issue.json").write_text(json.dumps({"state": "open", "labels": []}))
+        else:
+            assignment = self.data / "runs" / rid / "assignment.json"
+            spec = json.loads(assignment.read_text())
+            spec.pop("session_file")
+            assignment.write_text(json.dumps(spec))
+        self.restart_supervisor()
+        self.wait_for(lambda: self.run_state(rid).get("recovery_abandoned"), description="recovery abandoned")
+        self.assertIn(reason, self.run_state(rid)["recovery_abandoned"])
+        self.assertNotIn('"switch_session"', pathlib.Path(self.env["FAKE_PI_RPC_LOG"]).read_text())
+        self.assertIn("recovery_abandoned", (self.root / "brain.log").read_text())
+        self.assertEqual(self.wait_run(self.assign("new task after abandonment"))["status"], "done")
+
+    def test_restart_abandons_unavailable_ad_authority(self):
+        self.check_abandoned_restart("unavailable", "unavailable")
+
+    def test_restart_abandons_issue_without_in_progress(self):
+        self.check_abandoned_restart("not-progress", "not explicitly in-progress")
+
+    def test_restart_abandons_missing_pi_session(self):
+        self.check_abandoned_restart("session", "session file is missing")
+
+    def test_restart_codex_uses_saved_thread(self):
+        rid = self.prepare_interrupted_issue("codex")
+        self.restart_supervisor()
+        log = self.root / "codex.jsonl"
+        self.wait_for(lambda: '"thread/resume"' in log.read_text(), description="Codex resumes persisted thread")
+        messages = [json.loads(line) for line in log.read_text().splitlines()]
+        self.assertEqual(sum(m.get("method") == "thread/start" for m in messages), 1)
+        resumed = next(m for m in messages if m.get("method") == "thread/resume")
+        self.assertEqual(resumed["params"]["threadId"], "fake-thread")
+        self.assertEqual(self.lane_state()["current_run"], rid)
 
     def test_pi_rate_limit_retries_in_session_and_watch_shows_alert(self):
         self.set_config("pi")

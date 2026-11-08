@@ -28,6 +28,9 @@ for line in sys.stdin:
         req = json.loads(line)
     except ValueError:
         continue
+    if os.environ.get("FAKE_APP_SERVER_LOG"):
+        with open(os.environ["FAKE_APP_SERVER_LOG"], "a") as stream:
+            stream.write(json.dumps(req) + "\n")
     method = req.get("method")
     params = req.get("params") or {}
     if method == "initialize":
@@ -35,7 +38,7 @@ for line in sys.stdin:
         response(req, {"serverInfo": {"name": "fake-app-server", "version": "1"}})
     elif method == "initialized":
         continue
-    elif method == "thread/start":
+    elif method in ("thread/start", "thread/resume"):
         cwd = params.get("cwd", cwd)
         model = params.get("model")
         send({"jsonrpc": "2.0", "method": "fixture/unrelated", "params": {"before": method}})

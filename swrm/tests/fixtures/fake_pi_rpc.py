@@ -3,6 +3,7 @@
 import json
 import os
 import select
+import socket
 import sys
 import time
 
@@ -50,6 +51,13 @@ for line in sys.stdin:
             response(req, kind)
     elif kind == "prompt":
         prompt = req.get("message", "")
+        broker_path = os.environ.get("FAKE_PI_BROKER_SOCKET")
+        if broker_path:
+            with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as broker:
+                broker.connect(broker_path)
+                broker.sendall(b"inference\n")
+                if not broker.recv(16):
+                    record({"type": "broker_disconnected"})
         prompt_count += 1
         if "LANE_TEST_RATE_LIMIT_ONCE" in prompt:
             rate_mode = "once"

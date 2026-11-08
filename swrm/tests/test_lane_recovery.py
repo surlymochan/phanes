@@ -14,7 +14,7 @@ xs = _load.load()
 
 class LaneRecoveryTests(unittest.TestCase):
     def setUp(self):
-        self.tmp = tempfile.TemporaryDirectory(prefix="lane-recovery-")
+        self.tmp = tempfile.TemporaryDirectory(prefix="lane-recovery-", dir=pathlib.Path(__file__).resolve().parents[2])
         self.root = pathlib.Path(self.tmp.name)
         self.repo = self.root / "repo"
         self.repo.mkdir()
@@ -42,7 +42,7 @@ class LaneRecoveryTests(unittest.TestCase):
         rdir.mkdir(parents=True)
         (rdir / "status.json").write_text(json.dumps({"state": "running", "lane": "L1"}))
         (rdir / "assignment.json").write_text(json.dumps({"run_id": self.run_id, "task": "continue",
-                                                           "workspace_path": str(self.wt),
+                                                           "workspace_path": str(self.wt), "session_file": "saved-session.jsonl",
                                                            "base": self.git("rev-parse", "HEAD")}))
         self.wt.parent.mkdir(parents=True)
         self.git("worktree", "add", "--detach", "-q", str(self.wt), "HEAD")
@@ -103,6 +103,80 @@ class LaneRecoveryTests(unittest.TestCase):
         spec, error = self.recover()
         self.assertIsNone(spec)
         self.assertIn("not queued/running", error)
+
+    def test_ad_requires_exact_issue_owner_and_explicit_live_status(self):
+        path = self.root / "ad.json"
+        lane = dict(self.lane, recovery_ad={"state_path": str(path)})
+        spec = {"run_id": self.run_id, "title": "#1720 recovery"}
+        self.assertIn("unavailable", xs.lane_ad_recovery_view(lane, spec))
+        path.write_text(json.dumps({"L1": {"issue": 1720, "run": self.run_id}}))
+        with mock.patch.object(xs, "gh_transport", return_value={"state": "open", "labels": [{"name": "in-progress"}]}):
+            self.assertIsNone(xs.lane_ad_recovery_view(lane, spec))
+            path.write_text(json.dumps({"L1": {"issue": 1720, "run": self.run_id},
+                                        "L2": {"issue": 1720, "run": "replacement"}}))
+            self.assertIn("reassigned", xs.lane_ad_recovery_view(lane, spec))
+        path.write_text(json.dumps({"L1": {"issue": 1720, "run": self.run_id}}))
+        for view in ({"state": "open", "labels": []}, {"state": "closed", "labels": ["in-progress"]}, {}):
+            with self.subTest(view=view), mock.patch.object(xs, "gh_transport", return_value=view):
+                self.assertIn("not explicitly", xs.lane_ad_recovery_view(lane, spec))
+
+    def test_remote_ad_reads_run_ownership_and_issue_status(self):
+        lane = dict(self.lane, recovery_ad={"host": "ad-host", "repo": "owner/repo"})
+        replies = [mock.Mock(returncode=0, stdout=json.dumps({"L1": {"issue": 1720, "run": self.run_id}})),
+                   mock.Mock(returncode=0, stdout=json.dumps({"state": "open", "labels": ["in-progress"]}))]
+        with mock.patch.object(xs.subprocess, "run", side_effect=replies) as run:
+            self.assertIsNone(xs.lane_ad_recovery_view(lane, {"run_id": self.run_id, "title": "#1720 resume"}))
+        self.assertEqual(run.call_count, 2)
+        self.assertEqual(run.call_args_list[0].args[0][-1], "cat phanes-ctl/autodispatch/state.json")
+        self.assertEqual(run.call_args_list[1].args[0][-1], "gh api repos/owner/repo/issues/1720")
+
+    def test_stale_tracking_ref_without_remote_confirmation_is_workspace_only(self):
+        self.setup_run()
+        (self.wt / "saved.txt").write_text("local progress")
+        self.git("add", "saved.txt", cwd=self.wt)
+        self.git("commit", "-qm", "local progress", cwd=self.wt)
+        tip = self.git("rev-parse", "HEAD", cwd=self.wt)
+        self.git("update-ref", f"refs/remotes/origin/swrm/{self.run_id}", tip)
+        spec, error = self.recover()
+        self.assertIsNone(error)
+        self.assertEqual(spec["_recovery_level"], "workspace")
+
+    def test_missing_pi_session_does_not_create_new_session(self):
+        child = mock.Mock()
+        with self.assertRaisesRegex(RuntimeError, "missing"):
+            xs.lane_begin_turn(self.lane, child, "continue", str(self.wt), "events", {},
+                               {"_recovered": True, "run_id": self.run_id})
+        child.send.assert_not_called()
+
+    def test_codex_resumes_saved_persistent_thread(self):
+        child = mock.Mock()
+        child.wait_response.side_effect = [{"thread": {"id": "saved-thread"}}, {"turn": {"id": "new-turn"}}]
+        spec = {"_recovered": True, "run_id": self.run_id, "thread_id": "saved-thread"}
+        with mock.patch.object(xs, "lane_save_assignment"), mock.patch.object(xs, "load_policy", return_value={}):
+            xs.lane_begin_turn(dict(self.lane, backend="codex", effort="high"), child, "continue", str(self.wt), "events", {}, spec)
+        request = child.send.call_args_list[0].args[0]
+        self.assertEqual(request["method"], "thread/resume")
+        self.assertEqual(request["params"]["threadId"], "saved-thread")
+
+    def test_pi_session_location_is_read_from_active_state(self):
+        child = mock.Mock()
+        child.wait_response.side_effect = [{"success": True, "data": {"cancelled": False}},
+                                          {"success": True, "data": {"sessionId": "saved", "sessionFile": "/saved.jsonl"}}]
+        spec = {"run_id": self.run_id}
+        with mock.patch.object(xs, "lane_save_assignment") as save:
+            xs.lane_begin_turn(self.lane, child, "continue", str(self.wt), "events", {}, spec)
+        self.assertEqual(child.send.call_args_list[1].args[0]["type"], "get_state")
+        self.assertEqual(spec["session_file"], "/saved.jsonl")
+        save.assert_called_once_with(spec)
+
+    def test_pi_unsuccessful_switch_is_rejected(self):
+        for response in ({"success": False}, {}, {"success": True, "error": "missing session"}):
+            child = mock.Mock()
+            child.wait_response.return_value = response
+            with self.subTest(response=response), self.assertRaisesRegex(RuntimeError, "restore"):
+                xs.lane_begin_turn(self.lane, child, "continue", str(self.wt), "events", {},
+                                   {"_recovered": True, "run_id": self.run_id, "session_file": "saved"})
+            self.assertEqual(child.send.call_count, 1)
 
 
 if __name__ == "__main__":
