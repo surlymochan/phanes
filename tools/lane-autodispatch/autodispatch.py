@@ -719,20 +719,15 @@ FIX_THINKING_LEVELS = ("high", "medium", "low")
 # The marker the review flow writes into the issue body when a review asks for changes
 # ("Review round N (...) on PR #x head ... returned CHANGES"). It names the fix round a card
 # belongs to, so the dispatcher can pick the thinking level of that round (Refs #1847).
-FIX_ROUND_RE = re.compile(r"Review round (\d+)\b")
-# A lane host that does not know a flag yet says so in its error text (argparse).
-UNKNOWN_FLAG_RE = re.compile(r"unrecognized arguments|no such option|unexpected argument", re.I)
-# How long a lane host stays "does not know --thinking" after it said so. The host is probed
-# again after the time, so an updated host gets the level of the fix rounds again (Refs #1847).
-THINKING_FLAG_UNSUPPORTED_TTL = 1800
-# Lane hosts that rejected `--thinking` (they run a swrm older than the flag), with the time of
-# the rejection (Refs #1847).
-NO_THINKING_HOSTS = {}
+FIX_ROUND_RE = re.compile(
+    r"^Review round ([1-9]\d*) \([^\r\n)]+\) on PR #\d+ head `[^`\r\n]+` "
+    r"returned (CHANGES|APPROVED)\.", re.M)
 
 def fix_round_of(body):
-    """The fix round a card belongs to (1 = the first fix round), or None when it is not one."""
+    """Use the latest review result; only a CHANGES result requests a fix round."""
     rounds = FIX_ROUND_RE.findall(body or "")
-    return max(int(round_no) for round_no in rounds) if rounds else None
+    if not rounds or rounds[-1][1] != "CHANGES": return None
+    return int(rounds[-1][0])
 
 def fix_thinking(cfg, item):
     """The thinking level a pi fix round runs at, or None (Refs #1847).
@@ -746,19 +741,6 @@ def fix_thinking(cfg, item):
     round_no = fix_round_of(item.get("body") or "")
     if not round_no: return None
     return FIX_THINKING_LEVELS[min(round_no, len(FIX_THINKING_LEVELS)) - 1]
-
-def host_knows_thinking(host):
-    """Whether the lane host still gets the `--thinking` flag of a fix round (Refs #1847).
-
-    A host that runs a swrm older than the flag rejects the assign; the card still runs, at the
-    level of the lane. The host is asked again after the rejection is old enough, so an updated
-    host gets the level of the fix rounds again.
-    """
-    seen = NO_THINKING_HOSTS.get(host)
-    if seen is None: return True
-    if time.time() - seen < THINKING_FLAG_UNSUPPORTED_TTL: return False
-    NO_THINKING_HOSTS.pop(host, None)
-    return True
 
 def rank(backend, item):  # own pin first, then unpinned, then cross-pinned; within each by priority, work before verify, number
     return (0 if item["backend"] == backend else 1 if item["backend"] is None else 2, item["prio"], bool(item.get("verify")), item["n"])
@@ -971,14 +953,10 @@ def dispatch(lane, cfg, item, base):
     ver = verify_of(item["body"]); title = f"#{n} {item['title']}"[:120]
     assign = (f"{F} lane assign {lane} --task-file /tmp/task-{lane}.md --base {base} --budget-minutes {BUDGET} --title {shlex.quote(title)}"
               + (f" --verify {shlex.quote(ver)}" if ver else ""))
-    # A pi fix round runs at the thinking level of its round (Refs #1847). A lane host that does
-    # not know the flag yet runs the round at the level of the lane instead.
+    # A pi fix round must carry its level even when the host runs an older swrm. A
+    # rejected flag fails dispatch; retrying without it would silently change the level.
     thinking = fix_thinking(cfg, item)
-    thinking_flag = f" --thinking {shlex.quote(thinking)}" if thinking and host_knows_thinking(h) else ""
-    if thinking and not thinking_flag:
-        log(f"{lane} fix round wants thinking level {thinking}, but {h} does not know --thinking; "
-             f"the round runs at the level of the lane", brain=True)
-    assign += thinking_flag
+    if thinking: assign += f" --thinking {shlex.quote(thinking)}"
     # Refs #1810: the base commit must exist in the target repo before the lane is assigned. The
     # target repo lags behind upstream, so a missing base is fetched and the check is repeated; the
     # check itself is not relaxed (a base that stays missing is still an error).
@@ -987,18 +965,6 @@ def dispatch(lane, cfg, item, base):
         rc, out, err = sh(ssh_argv(ssh_opts(h), h, cmd), timeout=180)
         m = re.search(r'"id":\s*"([^"]+)"', out)
         if not rc and m: return m.group(1), ver
-        if thinking_flag and UNKNOWN_FLAG_RE.search(err or ""):
-            # A lane host on an older release does not know --thinking: the fix round still runs,
-            # at the level the lane itself carries (Refs #1847). The host is not asked again for a
-            # while, so the card is not retried with a flag the host cannot parse.
-            log(f"{lane} assign on {h} does not know --thinking; the fix round runs at the level of "
-                f"the lane instead of {thinking}", brain=True)
-            NO_THINKING_HOSTS[h] = time.time()
-            cmd = f"{base_check_command(R, base)} && {assign.replace(thinking_flag, '')}"
-            rc, out, err = sh(ssh_argv(ssh_opts(h), h, cmd), timeout=180)
-            m = re.search(r'"id":\s*"([^"]+)"', out)
-            if not rc and m: return m.group(1), ver
-            break
         if not base_missing(err) or attempt == DISPATCH_BASE_FETCH_ATTEMPTS: break
         # fetch-on-miss: pull the base branch into the target repo, then check again. No AD-side
         # mutex guards the fetch, so concurrent ticks never block each other (git serializes its

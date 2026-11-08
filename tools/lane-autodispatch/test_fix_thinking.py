@@ -47,9 +47,25 @@ class FixThinkingLevelTest(unittest.TestCase):
             with self.subTest(round=round_no):
                 self.assertEqual(AUTODISPATCH.fix_thinking({"backend": "pi"}, card(round_body(round_no))), "low")
 
-    def test_the_highest_round_of_a_card_wins(self):
+    def test_the_latest_review_result_wins(self):
         body = round_body(1) + "\n" + round_body(2)
         self.assertEqual(AUTODISPATCH.fix_thinking({"backend": "pi"}, card(body)), "medium")
+
+    def test_historical_approved_round_does_not_override_current_changes(self):
+        body = round_body(9).replace("CHANGES", "APPROVED") + "\n" + round_body(1)
+        self.assertEqual(AUTODISPATCH.fix_thinking({"backend": "pi"}, card(body)), "high")
+
+    def test_a_latest_approval_does_not_request_a_fix(self):
+        body = round_body(1) + "\n" + round_body(2).replace("CHANGES", "APPROVED")
+        self.assertIsNone(AUTODISPATCH.fix_thinking({"backend": "pi"}, card(body)))
+
+    def test_mentions_and_incomplete_markers_do_not_request_a_fix(self):
+        for body in ("Document Review round 1 behavior", "Review round 1", "Review round 0",
+                     "Example: " + round_body(1), "> " + round_body(1),
+                     "Review round 1 returned CHANGES.",
+                     round_body(1).replace("CHANGES", "APPROVED")):
+            with self.subTest(body=body):
+                self.assertIsNone(AUTODISPATCH.fix_thinking({"backend": "pi"}, card(body)))
 
     def test_the_other_backends_keep_their_own_level(self):
         for backend in ("codex", "agy", "cursor"):
@@ -67,13 +83,9 @@ class DispatchThinkingFlagTest(unittest.TestCase):
     """The assign of a pi fix round carries the level; the other assigns do not."""
 
     def setUp(self):
-        AUTODISPATCH.NO_THINKING_HOSTS.clear()
         SCRATCH.mkdir(parents=True, exist_ok=True)
 
-    def tearDown(self):
-        AUTODISPATCH.NO_THINKING_HOSTS.clear()
-
-    def dispatch(self, cfg, item, answers=None):
+    def dispatch(self, cfg, item, answers=None, expected_error=None):
         """Run one dispatch with the ssh side effects faked; returns (commands, logs)."""
         commands, logs = [], []
         answers = list(answers or [])
@@ -94,7 +106,11 @@ class DispatchThinkingFlagTest(unittest.TestCase):
                 # pre-existing
                 with warnings.catch_warnings():
                     warnings.simplefilter("ignore", ResourceWarning)
-                    AUTODISPATCH.dispatch("PI1", cfg, item, "b" * 40)
+                    if expected_error:
+                        with self.assertRaisesRegex(RuntimeError, expected_error):
+                            AUTODISPATCH.dispatch("PI1", cfg, item, "b" * 40)
+                    else:
+                        AUTODISPATCH.dispatch("PI1", cfg, item, "b" * 40)
         finally:
             AUTODISPATCH.sh, AUTODISPATCH.D, AUTODISPATCH.log = old_sh, old_d, old_log
         return commands, logs
@@ -114,21 +130,16 @@ class DispatchThinkingFlagTest(unittest.TestCase):
         commands, _ = self.dispatch({"host": "h1", "backend": "codex"}, card(round_body(1)))
         self.assertNotIn("--thinking", " ".join(self.assigns(commands)))
 
-    def test_a_host_without_the_flag_runs_the_round_at_the_level_of_the_lane(self):
-        # A lane host on an older release rejects the flag: the round still runs, without it.
-        commands, logs = self.dispatch({"host": "h1", "backend": "pi"}, card(round_body(1)), answers=[
-            (0, "", ""),                                                  # the task upload
-            (1, "", "swrm: error: unrecognized arguments: --thinking high"),
-            (0, json.dumps({"id": "run-1"}), ""),                         # the retry without the flag
-        ])
-        assigns = self.assigns(commands)
-        self.assertEqual(len(assigns), 2)
-        self.assertIn("--thinking high", assigns[0])
-        self.assertNotIn("--thinking", assigns[1])
-        self.assertTrue(any("does not know --thinking" in line for line in logs))
-        # the host is not asked again for a while
-        self.assertFalse(AUTODISPATCH.host_knows_thinking("h1"))
-        self.assertTrue(AUTODISPATCH.host_knows_thinking("h2"))
+    def test_a_host_without_the_flag_fails_without_downgrading_the_round(self):
+        # Every dispatch must request high, including another attempt on the same old host.
+        for _ in range(2):
+            commands, _ = self.dispatch({"host": "h1", "backend": "pi"}, card(round_body(1)), answers=[
+                (0, "", ""),
+                (1, "", "swrm: error: unrecognized arguments: --thinking high"),
+            ], expected_error="unrecognized arguments: --thinking high")
+            assigns = self.assigns(commands)
+            self.assertEqual(len(assigns), 1)
+            self.assertIn("--thinking high", assigns[0])
 
 
 if __name__ == "__main__":

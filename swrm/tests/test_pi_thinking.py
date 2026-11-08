@@ -180,12 +180,63 @@ class ThinkingChildTest(unittest.TestCase):
         self.assertIs(new_child, child)
         self.assertFalse(launcher.called)
 
-    def test_an_unknown_level_keeps_the_child(self):
-        # An unknown level never reaches pi: the run keeps the level of the lane.
+    def test_an_unknown_level_fails_without_using_the_resident_child(self):
+        for level in ("deeper", "", 3, True):
+            with self.subTest(level=level), self.assertRaises(ValueError):
+                self.relaunch({"thinking": level}, self.Child("low"))
+
+    def test_a_launch_failure_never_uses_the_resident_child(self):
         child = self.Child("low")
-        new_child, launcher = self.relaunch({"thinking": "deeper"}, child)
-        self.assertIs(new_child, child)
-        self.assertFalse(launcher.called)
+        with mock.patch.object(xs, "lane_child", side_effect=RuntimeError("pi unavailable")), \
+                mock.patch.object(xs, "lanes_by_name", return_value=[{"name": "L1", "backend": "pi"}]), \
+                mock.patch.object(xs, "lane_record_event") as event:
+            with self.assertRaisesRegex(RuntimeError, "pi thinking level high launch failed"):
+                xs.lane_pi_thinking_child({"name": "L1", "backend": "pi"}, child,
+                                         {"thinking": "high"}, {})
+        self.assertFalse(child.closed)
+        self.assertEqual(event.call_args[0][1]["type"], "pi_thinking_level_failed")
+
+    def test_a_run_scoped_child_is_closed_when_the_run_fails(self):
+        child, run_child = self.Child("low"), self.Child("high")
+        with tempfile.TemporaryDirectory() as scratch:
+            (pathlib.Path(scratch) / "run-1").mkdir()
+            lane = {"name": "L1", "backend": "pi", "model": "fake-model"}
+            spec = {"run_id": "run-1", "thinking": "high", "task": "do it"}
+            with mock.patch.object(xs, "RUNS", scratch), \
+                    mock.patch.object(xs, "lane_prepare_workspace", return_value={"repo": scratch, "root": scratch, "path": scratch}), \
+                    mock.patch.object(xs, "run_workspace_prepare", return_value=None), \
+                    mock.patch.object(xs, "load_policy", return_value={}), \
+                    mock.patch.object(xs, "lane_pi_thinking_child", return_value=run_child), \
+                    mock.patch.object(xs, "execution_prompt", side_effect=RuntimeError("prompt failed")), \
+                    mock.patch.object(xs, "lane_finalize_run", return_value={"status": "failed"}):
+                result = xs.lane_do_run(lane, spec, child, None, spec)
+            self.assertEqual(result["status"], "failed")
+            self.assertTrue(run_child.closed)
+            self.assertFalse(child.closed)
+
+    def test_a_launch_failure_finalizes_the_run_without_starting_a_turn(self):
+        child = self.Child("low")
+        with tempfile.TemporaryDirectory() as scratch:
+            run_dir = pathlib.Path(scratch) / "run-1"
+            run_dir.mkdir()
+            lane = {"name": "L1", "backend": "pi", "model": "fake-model"}
+            spec = {"run_id": "run-1", "thinking": "high"}
+            workspace = {"repo": scratch, "root": scratch}
+            with mock.patch.object(xs, "RUNS", scratch), \
+                    mock.patch.object(xs, "lane_prepare_workspace", return_value=workspace), \
+                    mock.patch.object(xs, "run_workspace_prepare", return_value=None), \
+                    mock.patch.object(xs, "load_policy", return_value={}), \
+                    mock.patch.object(xs, "lanes_by_name", return_value=[lane]), \
+                    mock.patch.object(xs, "lane_child", side_effect=RuntimeError("pi unavailable")), \
+                    mock.patch.object(xs, "lane_run_turn") as turn, \
+                    mock.patch.object(xs, "lane_finalize_run", return_value={"status": "failed"}) as finalize:
+                result = xs.lane_do_run(lane, spec, child, None, spec)
+            self.assertEqual(result["status"], "failed")
+            self.assertEqual(finalize.call_args[0][5:7], ("exec_error", 1))
+            turn.assert_not_called()
+            self.assertFalse(child.closed)
+            events = (run_dir / "events.1.pi.jsonl").read_text()
+            self.assertIn("pi thinking level high launch failed", events)
 
 
 if __name__ == "__main__":
