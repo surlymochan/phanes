@@ -79,6 +79,28 @@ def test_runner_evidence_takes_precedence_over_nested_result(completed_run):
         "status": "available", "stat": " 1 file changed, 1 insertion(+)"}
 
 
+@pytest.mark.parametrize("diffstat", ["", " \n", None])
+def test_empty_receipt_fields_preserve_complete_nested_evidence(completed_run, diffstat):
+    report = completed_run({
+        "ci": {"conclusion": "success"},
+        "tests": {"command": "pytest -q", "rc": 0, "log": "2 passed\n"},
+        "diff": {"files_changed": 2, "insertions": 14, "deletions": 3},
+        "acceptance": [{"item": "bundle is readable", "result": "pass", "detail": "git bundle verify: ok"}],
+        "opinion": "APPROVE: reference only",
+    }, verify=None, diffstat=diffstat)
+
+    assert report["evidence"] == {
+        "version": 1,
+        "ci": {"status": "available", "conclusion": "success"},
+        "tests": {"status": "available", "command": "pytest -q", "rc": 0,
+                  "log": "2 passed\n", "truncated": False},
+        "diff": {"status": "available", "files_changed": 2, "insertions": 14, "deletions": 3},
+        "acceptance": {"status": "available", "items": [
+            {"item": "bundle is readable", "result": "pass", "detail": "git bundle verify: ok"}]},
+    }
+    assert report["reference_opinion"] == "APPROVE: reference only"
+
+
 def test_production_verify_log_is_size_limited(completed_run):
     log = "中" * 30000
     tests = completed_run(verify={"cmd": "test", "rc": 0, "tail": log})["evidence"]["tests"]

@@ -27,9 +27,9 @@ def raw_evidence(raw, receipt):
         if isinstance(ci.get("url"), str):
             evidence["ci"]["url"] = ci["url"]
     tests = raw.get("tests")
-    # Runner verification is authoritative when present, including missing logs.
-    if "verify" in receipt:
-        verify = receipt["verify"]
+    # Non-null runner verification is authoritative, including missing logs.
+    verify = receipt.get("verify")
+    if verify is not None:
         tests = ({"command": verify.get("cmd"), "rc": verify.get("rc"),
                   "log": verify.get("tail")} if isinstance(verify, dict) else None)
     if (isinstance(tests, dict) and isinstance(tests.get("command"), str)
@@ -45,13 +45,11 @@ def raw_evidence(raw, receipt):
     if isinstance(diff, dict) and all(type(diff.get(key)) is int and diff[key] >= 0
                                       for key in counts):
         evidence["diff"] = {"status": "available", **{key: diff[key] for key in counts}}
-    if "diffstat" in receipt:
-        stat = receipt["diffstat"]
+    stat = receipt.get("diffstat")
+    if isinstance(stat, str) and stat.strip():
         # Preserve Git's recorded --stat output rather than interpreting filenames
         # or localized summary text as numeric counts.
-        evidence["diff"] = ({"status": "available", "stat": stat}
-                            if isinstance(stat, str) and stat.strip()
-                            else {"status": "unavailable"})
+        evidence["diff"] = {"status": "available", "stat": stat}
     acceptance = raw.get("acceptance")
     fields = ("item", "result", "detail")
     if isinstance(acceptance, list) and acceptance and all(
