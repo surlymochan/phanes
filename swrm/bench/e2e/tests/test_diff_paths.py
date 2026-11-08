@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import errno
 import os
 import subprocess
 import sys
 from pathlib import Path
+
+import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
@@ -87,7 +90,12 @@ def test_diff_inventory_round_trips_non_utf8_bytes(tmp_path: Path) -> None:
     git(repo, "-c", "user.email=bench@example.test", "-c", "user.name=bench",
         "commit", "--allow-empty", "-qm", "baseline")
     raw_name = b"invalid-\xff-name"
-    with open(os.fsencode(repo) + b"/" + raw_name, "wb") as handle:
-        handle.write(b"untracked")
+    try:
+        with open(os.fsencode(repo) + b"/" + raw_name, "wb") as handle:
+            handle.write(b"untracked")
+    except OSError as exc:
+        if exc.errno != errno.EILSEQ:
+            raise
+        pytest.skip("filesystem does not support non-UTF-8 filenames")
     files, _ = diff_against(repo, "HEAD")
     assert [os.fsencode(name) for name in files] == [raw_name]
