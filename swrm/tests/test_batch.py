@@ -99,6 +99,31 @@ class FakeFleetFixture:
 
 
 class BatchTests(FakeFleetFixture, unittest.TestCase):
+    def test_empty_cards_create_stable_summary_without_fleet_or_runner(self):
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output), \
+                mock.patch.object(xs, "fleet_config", wraps=xs.fleet_config) as fleet_config, \
+                mock.patch.object(xs, "execute_batch", wraps=xs.execute_batch) as execute:
+            error = None
+            try:
+                xs.cmd_batch(self.args(base=self.initial), xs.load_policy())
+            except Exception as exc:
+                error = exc
+
+        self.assertIsNone(error, f"empty batch should produce a summary: {error}")
+        fleet_config.assert_not_called()
+        execute.assert_not_called()
+        paths = list((self.data / "batches").glob("*/summary.json"))
+        self.assertEqual(len(paths), 1)
+        summary = json.loads(paths[0].read_text())
+        self.assertEqual(summary["state"], "finished")
+        self.assertEqual(summary["base"], self.initial)
+        self.assertEqual(summary["cards"], [])
+        markdown = paths[0].with_name("summary.md").read_text()
+        self.assertIn("State: finished", markdown)
+        self.assertIn("| Card | Host | Status | Verify rc | Branch | Commit | Seconds | Summary |", markdown)
+        self.assertEqual(markdown.count("| --- | --- | --- | --- | --- | --- | --- | --- |"), 1)
+
     def test_batch_launch_passes_path_hints_to_remote_run(self):
         card = self.cards / "one.md"
         card.write_text("Update src/widget.py")
