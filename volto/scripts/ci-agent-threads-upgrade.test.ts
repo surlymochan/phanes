@@ -23,6 +23,12 @@ describe("agent thread upgrade host E2E", () => {
     expect(script).not.toContain("new DatabaseCore(");
   });
 
+  test("does not register Bun tests during direct E2E execution", () => {
+    expect(script).toMatch(/const RUN_E2E = process\.argv\.includes\("--run-e2e"\);/);
+    expect(script).toMatch(/if \(!RUN_E2E\) \{\s*test\("the upstream 47 fixture matches the released schema"/);
+    expect(script).toMatch(/if \(RUN_E2E\) await runE2E\(\);\s*else test\(/);
+  });
+
   test("checks migration state, retained data, and SQLite integrity after restart", () => {
     expect(script).toMatch(/schema_migrations/);
     expect(script).toMatch(/foreign_key_check/);

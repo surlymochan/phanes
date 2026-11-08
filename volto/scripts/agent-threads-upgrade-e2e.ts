@@ -31,6 +31,7 @@ const UPSTREAM_VERSION = 47;
 const THREAD_VERSION = UPSTREAM_VERSION + 1;
 const LATEST_VERSION = THREAD_VERSION + 1;
 const E2E_TIMEOUT_MS = 240_000;
+const RUN_E2E = process.argv.includes("--run-e2e");
 let build: Promise<unknown> | undefined;
 
 /** Launch the real application entry, including createApplicationServices and AgentService.initialize. */
@@ -376,27 +377,29 @@ async function createUpstreamFixture(path: string): Promise<void> {
   }
 }
 
-test("the upstream 47 fixture matches the released schema", async () => {
-  await mkdir(OUT, { recursive: true });
-  const directory = await mkdtemp(join(OUT, "fixture-"));
-  const path = join(directory, "upstream-47.db");
-  try {
-    await createUpstreamFixture(path);
-    const db = new DatabaseSync(path, { readOnly: true });
+if (!RUN_E2E) {
+  test("the upstream 47 fixture matches the released schema", async () => {
+    await mkdir(OUT, { recursive: true });
+    const directory = await mkdtemp(join(OUT, "fixture-"));
+    const path = join(directory, "upstream-47.db");
     try {
-      const tables = tableNames(db);
-      assert.equal(version(db), 47);
-      assert.ok(tables.includes("projection_agent_threads"), "released upstream 47 has agent threads");
-      assert.ok(!tables.includes("projection_agent_tasks"), "released upstream 47 dropped the task table");
-      assert.ok(!tables.includes("routine_backoff"), "released upstream 47 has no fork backoff table");
-      assert.ok(Number(db.prepare("SELECT COUNT(*) AS count FROM projection_agent_threads").get()?.count ?? 0) > 0);
+      await createUpstreamFixture(path);
+      const db = new DatabaseSync(path, { readOnly: true });
+      try {
+        const tables = tableNames(db);
+        assert.equal(version(db), 47);
+        assert.ok(tables.includes("projection_agent_threads"), "released upstream 47 has agent threads");
+        assert.ok(!tables.includes("projection_agent_tasks"), "released upstream 47 dropped the task table");
+        assert.ok(!tables.includes("routine_backoff"), "released upstream 47 has no fork backoff table");
+        assert.ok(Number(db.prepare("SELECT COUNT(*) AS count FROM projection_agent_threads").get()?.count ?? 0) > 0);
+      } finally {
+        db.close();
+      }
     } finally {
-      db.close();
+      await rm(directory, { recursive: true, force: true });
     }
-  } finally {
-    await rm(directory, { recursive: true, force: true });
-  }
-});
+  });
+}
 
 async function runE2E(): Promise<void> {
   await mkdir(OUT, { recursive: true });
@@ -423,5 +426,5 @@ async function runE2E(): Promise<void> {
   }
 }
 
-if (process.argv.includes("--run-e2e")) await runE2E();
+if (RUN_E2E) await runE2E();
 else test("real host upgrades and restarts with upstream agent task data", runE2E, E2E_TIMEOUT_MS);
