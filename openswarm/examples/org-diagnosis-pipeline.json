@@ -270,7 +270,7 @@
       "id": "org-health-demo-e2e",
       "provides": "bun run test:org-health-demo",
       "used_by": "builder",
-      "note": "仓库已有（openbot/package.json:194），需要 bun 与 Chrome，且只覆盖合成示例数据。"
+      "note": "仓库已有（volto/package.json:194），需要 bun 与 Chrome，且只覆盖合成示例数据。"
     }
   ]
 }

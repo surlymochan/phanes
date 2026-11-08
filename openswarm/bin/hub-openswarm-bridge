@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""OpenBot dispatch adapter with a durable, fail-closed remote handoff journal."""
+"""Volto dispatch adapter with a durable, fail-closed remote handoff journal."""
 import argparse
 import base64
 import json
@@ -241,9 +241,9 @@ def run_submit(args):
     card = Path(opts.task_file).read_text(encoding='utf-8')
     if not card.strip() or len(card)>50000: raise ValueError('invalid task card')
     # Hub's own workspace is not a repository. Do not silently redirect work
-    # for another project into this explicitly configured OpenBot checkout.
-    if not re.search(r'(?im)^\s*repository\s*:\s*openbot\s*$', card):
-        raise ValueError('task card must declare Repository: openbot')
+    # for another project into this explicitly configured Volto checkout.
+    if not re.search(r'(?im)^\s*repository\s*:\s*volto\s*$', card):
+        raise ValueError('task card must declare Repository: volto')
     # Explicit metadata is deterministic. An omitted or unrecognised profile
     # defaults to a normal Codex task instead of guessing from natural language.
     match = re.search(r'(?im)^\s*(?:executor-type|task-type)\s*:\s*([a-z-]+)\s*$',card)

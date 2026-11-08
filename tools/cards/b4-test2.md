@@ -1,6 +1,6 @@
 # M10 #66: E2E for creating, revising and installing a local skill (tests 6)
 
-Repository: OpenBot desktop (Electron, Bun, TypeScript, SolidJS). Base commit: b50d5ce925 (head of PR nibiru-labs/openbot#42,
+Repository: Volto desktop (Electron, Bun, TypeScript, SolidJS). Base commit: b50d5ce925 (head of PR nibiru-labs/volto#42,
 the upstream sync). Read AGENTS.md and the AGENTS.md of every directory you change, and follow them.
 
 ## Scope
@@ -33,7 +33,7 @@ directory. It saves a first revision, saves a second one, and checks that the fi
 readable. It checks that a stale expected revision is refused. It installs a revision for an agent and
 checks the files in `.agents/skills/` and `.claude/skills/`. It changes an installed file and checks
 that the next update refuses to overwrite it. It writes
-`.openbot-build/local-skill-library-e2e/report.json`.
+`.volto-build/local-skill-library-e2e/report.json`.
 
 **Size: M**
 
@@ -44,7 +44,7 @@ that the next update refuses to overwrite it. It writes
 
 - First confirm each finding against the current code. If upstream already fixed one, do not change it: report
   "already fixed" with the file and line that show it. That is a valid result.
-- Smallest change that fixes the behavior. No new dependency. User-visible text comes from `@openbot/i18n` catalog
+- Smallest change that fixes the behavior. No new dependency. User-visible text comes from `@volto/i18n` catalog
   keys (read docs/i18n.md before adding a key; add it to every locale). Errors that main/backend send use `sourceText(key)`.
 - Tests: E2E scripts under `scripts/` only (repository rule); vitest only for the protected areas named in AGENTS.md.
   Do not add a package.json script; run a new script with `bun scripts/<name>.ts`.

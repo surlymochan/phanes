@@ -5,8 +5,8 @@ Subject: [PATCH] fix(dev): run the pre-commit hook and dev checks from a
  subdirectory or worktree
 
 The pre-commit hook, staged-typecheck, dev-verify, prepare-dev-environment
-and check-release-notes assumed that OpenBot is the root of its git
-repository. When OpenBot is checked out as a subdirectory of a larger
+and check-release-notes assumed that Volto is the root of its git
+repository. When Volto is checked out as a subdirectory of a larger
 repository, git reports paths from the repository root, so the checks
 missed every staged file. In a linked worktree the hook also staged a
 second copy of each Biome-fixed file, because git gives a hook GIT_DIR
@@ -23,7 +23,7 @@ without GIT_WORK_TREE and the hook changes directory before git add.
   layouts (root or subdirectory, normal checkout or linked worktree) and
   fails on the current main hook.
 
-A checkout with OpenBot at the repository root behaves as before.
+A checkout with Volto at the repository root behaves as before.
 ---
  .githooks/pre-commit                   | 43 ++++++++++--
  package.json                           |  1 +
@@ -53,7 +53,7 @@ index 40800321..8766e858 100755
 +unset GIT_DIR GIT_WORK_TREE
 +
 +# The project is the directory that holds this hook's .githooks. It is the repository root in a
-+# normal checkout, and a subdirectory when OpenBot is checked out inside a larger repository.
++# normal checkout, and a subdirectory when Volto is checked out inside a larger repository.
 +repository_root=$(cd -- "$(git rev-parse --show-toplevel)" && pwd -P)
 +project_root=$(cd -- "$(dirname -- "$0")/.." && pwd -P)
 +project_path=""
@@ -185,7 +185,7 @@ index a0646c5a..e279ebef 100644
      encoding: "utf8",
 +  }).trim();
 +  const projectPath = relative(repositoryRoot, resolve(projectRoot)).split(sep).join("/");
-+  // Git names paths from the repository root, which is above the project when OpenBot is a
++  // Git names paths from the repository root, which is above the project when Volto is a
 +  // subdirectory of a larger repository. Scope the listing to the project and remove the prefix.
 +  const pathspec = projectPath || ".";
 +  const tracked = execFileSync("git", ["diff", "--name-only", "HEAD", "--", pathspec], {
@@ -215,7 +215,7 @@ index 00000000..06ede95d
 @@ -0,0 +1,94 @@
 +#!/bin/bash
 +# Checks that the pre-commit hook stages each file under its own path, in four layouts:
-+# OpenBot as the repository root or as a subdirectory of a larger repository, each in a normal
++# Volto as the repository root or as a subdirectory of a larger repository, each in a normal
 +# checkout and in a linked worktree.
 +#
 +# Git runs a hook with GIT_DIR set and without GIT_WORK_TREE. In a linked worktree GIT_DIR points
@@ -225,13 +225,13 @@ index 00000000..06ede95d
 +#
 +# The test copies the real hook into throwaway repositories, stubs `bun` so it needs no runtime,
 +# and commits one file in each layout. Each commit must contain exactly that file, and the hook must
-+# have seen it as staged. The report is written to .openbot-build/pre-commit-subdirectory.json.
++# have seen it as staged. The report is written to .volto-build/pre-commit-subdirectory.json.
 +#
 +# Usage: bash scripts/pre-commit-subdirectory-e2e.sh
 +set -euo pipefail
 +
 +project_root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
-+report="$project_root/.openbot-build/pre-commit-subdirectory.json"
++report="$project_root/.volto-build/pre-commit-subdirectory.json"
 +
 +fail() {
 +  echo "FAIL: $*" >&2
@@ -257,7 +257,7 @@ index 00000000..06ede95d
 +
 +results=()
 +
-+# Builds a repository whose OpenBot project is at `$2` ("" for the root) and commits one example
++# Builds a repository whose Volto project is at `$2` ("" for the root) and commits one example
 +# file there, in a normal checkout and in a linked worktree.
 +check_layout() {
 +  local name=$1 subdirectory=$2
@@ -298,7 +298,7 @@ index 00000000..06ede95d
 +}
 +
 +check_layout root ""
-+check_layout subdirectory "vendor/openbot"
++check_layout subdirectory "vendor/volto"
 +
 +mkdir -p "$(dirname "$report")"
 +{
@@ -355,8 +355,8 @@ index 39d2a36c..8a9e30eb 100644
 +    cwd: ROOT,
 +    encoding: "utf8",
 +  }).trim();
-+  // Git names staged paths from the repository root, which is above the project when OpenBot is
-+  // a subdirectory of a larger repository. Project selectors are relative to OpenBot.
++  // Git names staged paths from the repository root, which is above the project when Volto is
++  // a subdirectory of a larger repository. Project selectors are relative to Volto.
 +  const projectPath = relative(repositoryRoot, ROOT).split(sep).join("/");
 +  const prefix = projectPath ? `${projectPath}/` : "";
    const output = execFileSync("git", ["diff", "--cached", "--name-only", "--no-renames", "-z"], {

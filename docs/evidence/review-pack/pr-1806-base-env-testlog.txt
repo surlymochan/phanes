@@ -10,7 +10,7 @@ ERROR: test_batchmode_probe_failure_is_excluded_from_hosts_ok (tests.test_fleet_
 A non-zero BatchMode probe exit keeps the host out of hosts_ok (Refs #954).
 ----------------------------------------------------------------------
 Traceback (most recent call last):
-  File "/root/.claude/openswarm-executor-candidate/lanes/M10/wt/.openswarm-tmp/base/openswarm/tests/test_fleet_refresh.py", line 23, in setUp
+  File "/path/to/executor-state/lanes/M10/wt/.openswarm-tmp/base/openswarm/tests/test_fleet_refresh.py", line 23, in setUp
     subprocess.run(["openssl", "req", "-x509", "-newkey", "rsa:2048", "-nodes",
   File "/usr/lib/python3.12/subprocess.py", line 571, in run
     raise CalledProcessError(retcode, process.args,
@@ -21,7 +21,7 @@ ERROR: test_batchmode_probe_success_still_counts (tests.test_fleet_refresh.Fleet
 A zero BatchMode probe exit keeps the host in hosts_ok (Refs #954).
 ----------------------------------------------------------------------
 Traceback (most recent call last):
-  File "/root/.claude/openswarm-executor-candidate/lanes/M10/wt/.openswarm-tmp/base/openswarm/tests/test_fleet_refresh.py", line 23, in setUp
+  File "/path/to/executor-state/lanes/M10/wt/.openswarm-tmp/base/openswarm/tests/test_fleet_refresh.py", line 23, in setUp
     subprocess.run(["openssl", "req", "-x509", "-newkey", "rsa:2048", "-nodes",
   File "/usr/lib/python3.12/subprocess.py", line 571, in run
     raise CalledProcessError(retcode, process.args,
@@ -31,7 +31,7 @@ subprocess.CalledProcessError: Command '['openssl', 'req', '-x509', '-newkey', '
 ERROR: test_nonempty_fleet_success_and_statuses (tests.test_fleet_refresh.FleetRefreshTests.test_nonempty_fleet_success_and_statuses)
 ----------------------------------------------------------------------
 Traceback (most recent call last):
-  File "/root/.claude/openswarm-executor-candidate/lanes/M10/wt/.openswarm-tmp/base/openswarm/tests/test_fleet_refresh.py", line 23, in setUp
+  File "/path/to/executor-state/lanes/M10/wt/.openswarm-tmp/base/openswarm/tests/test_fleet_refresh.py", line 23, in setUp
     subprocess.run(["openssl", "req", "-x509", "-newkey", "rsa:2048", "-nodes",
   File "/usr/lib/python3.12/subprocess.py", line 571, in run
     raise CalledProcessError(retcode, process.args,
@@ -41,7 +41,7 @@ subprocess.CalledProcessError: Command '['openssl', 'req', '-x509', '-newkey', '
 ERROR: test_partial_failure_preserves_old_certificates (tests.test_fleet_refresh.FleetRefreshTests.test_partial_failure_preserves_old_certificates)
 ----------------------------------------------------------------------
 Traceback (most recent call last):
-  File "/root/.claude/openswarm-executor-candidate/lanes/M10/wt/.openswarm-tmp/base/openswarm/tests/test_fleet_refresh.py", line 23, in setUp
+  File "/path/to/executor-state/lanes/M10/wt/.openswarm-tmp/base/openswarm/tests/test_fleet_refresh.py", line 23, in setUp
     subprocess.run(["openssl", "req", "-x509", "-newkey", "rsa:2048", "-nodes",
   File "/usr/lib/python3.12/subprocess.py", line 571, in run
     raise CalledProcessError(retcode, process.args,
@@ -51,7 +51,7 @@ subprocess.CalledProcessError: Command '['openssl', 'req', '-x509', '-newkey', '
 ERROR: test_restart_is_idempotent (tests.test_fleet_refresh.FleetRefreshTests.test_restart_is_idempotent)
 ----------------------------------------------------------------------
 Traceback (most recent call last):
-  File "/root/.claude/openswarm-executor-candidate/lanes/M10/wt/.openswarm-tmp/base/openswarm/tests/test_fleet_refresh.py", line 23, in setUp
+  File "/path/to/executor-state/lanes/M10/wt/.openswarm-tmp/base/openswarm/tests/test_fleet_refresh.py", line 23, in setUp
     subprocess.run(["openssl", "req", "-x509", "-newkey", "rsa:2048", "-nodes",
   File "/usr/lib/python3.12/subprocess.py", line 571, in run
     raise CalledProcessError(retcode, process.args,
@@ -61,7 +61,7 @@ subprocess.CalledProcessError: Command '['openssl', 'req', '-x509', '-newkey', '
 FAIL: test_host_secrets_and_network_are_not_visible (tests.test_pi_isolation.PiIsolationTests.test_host_secrets_and_network_are_not_visible)
 ----------------------------------------------------------------------
 Traceback (most recent call last):
-  File "/root/.claude/openswarm-executor-candidate/lanes/M10/wt/.openswarm-tmp/base/openswarm/tests/test_pi_isolation.py", line 55, in test_host_secrets_and_network_are_not_visible
+  File "/path/to/executor-state/lanes/M10/wt/.openswarm-tmp/base/openswarm/tests/test_pi_isolation.py", line 55, in test_host_secrets_and_network_are_not_visible
     self.assertEqual(result.returncode, 0, result.stderr)
 AssertionError: 1 != 0 : bwrap: No permissions to create new namespace, likely because the kernel does not allow non-privileged user namespaces. See <https://deb.li/bubblewrap> or <file:///usr/share/doc/bubblewrap/README.Debian.gz>.
 
@@ -70,7 +70,7 @@ AssertionError: 1 != 0 : bwrap: No permissions to create new namespace, likely b
 FAIL: test_linked_git_worktree_and_node_remain_available (tests.test_pi_isolation.PiIsolationTests.test_linked_git_worktree_and_node_remain_available)
 ----------------------------------------------------------------------
 Traceback (most recent call last):
-  File "/root/.claude/openswarm-executor-candidate/lanes/M10/wt/.openswarm-tmp/base/openswarm/tests/test_pi_isolation.py", line 97, in test_linked_git_worktree_and_node_remain_available
+  File "/path/to/executor-state/lanes/M10/wt/.openswarm-tmp/base/openswarm/tests/test_pi_isolation.py", line 97, in test_linked_git_worktree_and_node_remain_available
     self.assertEqual(result.returncode, 0, result.stderr)
 AssertionError: 1 != 0 : bwrap: No permissions to create new namespace, likely because the kernel does not allow non-privileged user namespaces. See <https://deb.li/bubblewrap> or <file:///usr/share/doc/bubblewrap/README.Debian.gz>.
 
@@ -79,7 +79,7 @@ AssertionError: 1 != 0 : bwrap: No permissions to create new namespace, likely b
 FAIL: test_sandbox_tmp_is_a_disk_directory_that_rpc_starts_empty (tests.test_pi_isolation.PiIsolationTests.test_sandbox_tmp_is_a_disk_directory_that_rpc_starts_empty)
 ----------------------------------------------------------------------
 Traceback (most recent call last):
-  File "/root/.claude/openswarm-executor-candidate/lanes/M10/wt/.openswarm-tmp/base/openswarm/tests/test_pi_isolation.py", line 129, in test_sandbox_tmp_is_a_disk_directory_that_rpc_starts_empty
+  File "/path/to/executor-state/lanes/M10/wt/.openswarm-tmp/base/openswarm/tests/test_pi_isolation.py", line 129, in test_sandbox_tmp_is_a_disk_directory_that_rpc_starts_empty
     self.assertEqual(result.returncode, 0, result.stderr)
 AssertionError: 1 != 0 : bwrap: No permissions to create new namespace, likely because the kernel does not allow non-privileged user namespaces. See <https://deb.li/bubblewrap> or <file:///usr/share/doc/bubblewrap/README.Debian.gz>.
 

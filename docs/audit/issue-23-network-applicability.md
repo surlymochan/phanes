@@ -19,7 +19,7 @@
 
 ## 1. 评估范围
 
-检索范围：`openswarm/`、`openbot/`、`integrations/`、`tools/`、`.github/`、仓库根 `README.md` 与 `HANDOFF.md`，以及 `git log` / `git show` 中的相关提交历史。
+检索范围：`openswarm/`、`volto/`、`integrations/`、`tools/`、`.github/`、仓库根 `README.md` 与 `HANDOFF.md`，以及 `git log` / `git show` 中的相关提交历史。
 
 检索关键词：`egress`、`proxy`、`HTTP(S)_PROXY`、`no_proxy`、`ssh`、`socket`、`tunnel`、`vpn/tailscale/wireguard`、`instabox`、`自托管/自建/出口`，以及 host 别名清单。
 
@@ -27,17 +27,17 @@
 
 ## 2. 仓库中现存的"网络"相关物
 
-### 2.1 控制面自建部署（OpenBot 上游能力，与执行网络无关）
+### 2.1 控制面自建部署（Volto 上游能力，与执行网络无关）
 
 | 位置 | 内容 |
 | --- | --- |
-| `openbot/docs/self-hosting.md:1-40` | 自建账号服务 + Signal + TURN 的部署指南（Cloudflare Workers/D1/R2、一台 Linux 服务器、SMTP） |
-| `openbot/deploy/self-host/README.md:1-40` | 自建 Signal/TURN 捆绑包（Caddy + coturn + systemd）；`:25` 要求"一个静态公网 IPv4"，`:34` 起是端口与防火墙清单 |
-| `openbot/src/main/private-network-detection.ts:3-17` | 通过网卡地址前缀判断 Tailscale 是否连接 |
-| `openbot/src/renderer/src/features/team/team-webrtc-private-network.ts:1-7, 9-24, 32-45` | 私网模式：过滤掉所有非私网 ICE candidate，不用 STUN/TURN |
-| `openbot/src/main/host-service.ts:152` | `privateNetwork?: () => boolean` 开关 |
+| `volto/docs/self-hosting.md:1-40` | 自建账号服务 + Signal + TURN 的部署指南（Cloudflare Workers/D1/R2、一台 Linux 服务器、SMTP） |
+| `volto/deploy/self-host/README.md:1-40` | 自建 Signal/TURN 捆绑包（Caddy + coturn + systemd）；`:25` 要求"一个静态公网 IPv4"，`:34` 起是端口与防火墙清单 |
+| `volto/src/main/private-network-detection.ts:3-17` | 通过网卡地址前缀判断 Tailscale 是否连接 |
+| `volto/src/renderer/src/features/team/team-webrtc-private-network.ts:1-7, 9-24, 32-45` | 私网模式：过滤掉所有非私网 ICE candidate，不用 STUN/TURN |
+| `volto/src/main/host-service.ts:152` | `privateNetwork?: () => boolean` 开关 |
 
-这些属于 OpenBot 上游"用户接入 Hub"的能力，Phanes 未改动；其网络模型是**单一公网地址 + 单条私网路径**，本身不含"多出口"概念。
+这些属于 Volto 上游"用户接入 Hub"的能力，Phanes 未改动；其网络模型是**单一公网地址 + 单条私网路径**，本身不含"多出口"概念。
 
 ### 2.2 执行面传输（当前 Hub 回路真正在用的）
 
@@ -46,10 +46,10 @@
 | `openswarm/bin/openswarm:8581-8603` | `fleet_config()`：主机种类只有 `local` / `ssh` / `instabox` |
 | `openswarm/bin/openswarm:8619-8630` | `host_run()`：`ssh <alias> --` 或 `instabox ssh <box> --` 两种出站传输 |
 | `openswarm/bin/openswarm:9276-9280` | `instabox_states()`：状态探测不唤醒暂停的临时盒 |
-| `openbot/src/backend/dispatch/dispatch-service.ts:72-83` | Hub 侧的 fleet schema，种类同上 |
-| `openbot/src/backend/dispatch/dispatch-service.ts:481-487` | Hub 从 `$OPENSWARM_HOME/fleet.json` 读取主机清单 |
-| `openbot/src/backend/dispatch/dispatch-service.ts:500-503` | 按 `kind` 选择 `ssh` / `instabox` 传输 |
-| `openbot/src/backend/dispatch/dispatch-process.ts:79, 91-95` | 传输参数拼装（任务卡经 stdin 送到远端） |
+| `volto/src/backend/dispatch/dispatch-service.ts:72-83` | Hub 侧的 fleet schema，种类同上 |
+| `volto/src/backend/dispatch/dispatch-service.ts:481-487` | Hub 从 `$OPENSWARM_HOME/fleet.json` 读取主机清单 |
+| `volto/src/backend/dispatch/dispatch-service.ts:500-503` | 按 `kind` 选择 `ssh` / `instabox` 传输 |
+| `volto/src/backend/dispatch/dispatch-process.ts:79, 91-95` | 传输参数拼装（任务卡经 stdin 送到远端） |
 | `openswarm/bin/hub-openswarm-bridge:21` | Hub → 调度主机：SSH 固定强制命令通道（专用 SSH 配置 + 固定主机别名） |
 | `openswarm/bin/hub-fleet-gateway:13` | 执行主机 → 网关：另一条 SSH 固定强制命令通道 |
 | `integrations/README.md:5, 14-16, 34-35` | Hub 与执行网络的连接入口说明；直连 fleet 的环境变量与 Hub 本机配置要求 |
@@ -95,7 +95,7 @@
 
 | 提交 | 内容 |
 | --- | --- |
-| `443f34554` "Bridge remote fleet guards through gocc coordinator" | 新增 `fleet-capacity-stdio`、`fleet-capacity-reverse-tunnel`、`fleet-capacity-socket-client` 与文档 `openswarm/docs/fleet-reverse-socket.md`，用于让一批自建网络主机（该文档以 `govpn` / `govpn2` 为主机示例）通过**反向 Unix socket + SSH 转发**接入共享协调器；远端以 socket client 作为 guard command |
+| `443f34554` "Bridge remote fleet guards through broker coordinator" | 新增 `fleet-capacity-stdio`、`fleet-capacity-reverse-tunnel`、`fleet-capacity-socket-client` 与文档 `openswarm/docs/fleet-reverse-socket.md`，用于让一批自建网络主机（该文档以 `worker-a.example.invalid` / `worker-b.example.invalid` 为主机示例）通过**反向 Unix socket + SSH 转发**接入共享协调器；远端以 socket client 作为 guard command |
 | `c33d8d4d5` "Revert expanded fleet transport changes" | 整体回滚上述改动（−555 行），并删除 `openswarm/docs/fleet-reverse-socket.md` 与相关测试。该提交信息未给出回滚原因 |
 | `45c8ada52`（`origin/brain/fleet-multihost`，**未合入本分支**） | 改用配置扩展：协调器读取 `topology.json`（主机 + 限额），`openswarm` 接受 `OPENSWARM_FLEET_HOSTS` 追加守护属主，使**新执行主机**可以接入而无需新增传输层 |
 | `tools/watch8.sh:3` | 历史批次清单里出现过自建网络主机别名与 instabox 临时盒两类远端主机 |
@@ -107,7 +107,7 @@
 ### 2.7 全量检索的否定结论
 
 - `policy.json` 顶层键为 `_doc / agy / bus / codex / concurrency / copilot / cursor / deepseek / difficulty_map / efforts / fleet / hermes / local_sources / never_efforts / ocgo / pi / rate_limit / recommended_concurrency / review / routing / run / thresholds / workspace` —— **没有 proxy / egress / network / ip 相关键**。
-- 在 `openswarm/`、`tools/`、`integrations/`、`README.md`、`HANDOFF.md`、`.github/` 中检索 `egress`、`public ip`、`ip pool`、`rotate ip`、`proxy pool`、`出口` 等词，除"regression"之类的误命中外**无任何多出口相关命中**（仓库其余位置的 "egress" 命中只是 OpenBot 技能目录里把 "egress guard" 列为一种防御性代码类别的泛指，例如 `openbot/marketplace/production-catalog/bundles/pstack/skills/why/references/source-playbook.md:17`，不是网络出口配置）。
+- 在 `openswarm/`、`tools/`、`integrations/`、`README.md`、`HANDOFF.md`、`.github/` 中检索 `egress`、`public ip`、`ip pool`、`rotate ip`、`proxy pool`、`出口` 等词，除"regression"之类的误命中外**无任何多出口相关命中**（仓库其余位置的 "egress" 命中只是 Volto 技能目录里把 "egress guard" 列为一种防御性代码类别的泛指，例如 `volto/marketplace/production-catalog/bundles/pstack/skills/why/references/source-playbook.md:17`，不是网络出口配置）。
 - `openswarm/policy.json` 中唯一的网络相关键是 `fleet.recovery_ttl_seconds / recovery_poll_seconds`（`:55-58`），属于恢复语义，与出口无关。
 
 ## 3. 当前 Hub 回路实际需要的网络能力
@@ -147,7 +147,7 @@
 
 ### 4.3 控制面自建部署：不纳入本 issue
 
-`openbot/docs/self-hosting.md` 与 `openbot/deploy/self-host/` 属 OpenBot 上游"用户接入 Hub"的能力，Phanes 未改动其语义，也不参与执行网络。除非决定把 OpenBot 自建部署纳入 Phanes 部署范围，否则与本 issue 无关。
+`volto/docs/self-hosting.md` 与 `volto/deploy/self-host/` 属 Volto 上游"用户接入 Hub"的能力，Phanes 未改动其语义，也不参与执行网络。除非决定把 Volto 自建部署纳入 Phanes 部署范围，否则与本 issue 无关。
 
 ## 5. 触发重新评估的条件
 
@@ -155,22 +155,22 @@
 
 1. 出现按来源 IP 的供应商限流 / 封禁证据（ledger 记录、provider 错误或策略中出现 IP 维度）；
 2. 需要接入位于不可直达网络的新执行主机族，且 `topology.json` + SSH 别名方案不满足；
-3. 决定把 OpenBot 控制面自建部署（Signal / TURN / 账号服务）纳入 Phanes 部署范围；
+3. 决定把 Volto 控制面自建部署（Signal / TURN / 账号服务）纳入 Phanes 部署范围；
 4. 出现需要执行器持有**多个**供应商凭据或需要按出口分流计量的明确需求。
 
 ## 6. 本次评估未覆盖的部分
 
 - 未访问 issue 追踪服务或外网，因此未核对 issue 正文与历史讨论；
 - 未做运行期验证（未部署任何主机、未发起真实派发），全部结论来自静态核对与 `git` 历史；
-- 未评估 OpenBot 上游仓库自身的网络实现，仅在第 2.1 节列出其与本 issue 的边界。
+- 未评估 Volto 上游仓库自身的网络实现，仅在第 2.1 节列出其与本 issue 的边界。
 
 ## 附录：核对清单（文件 : 行号）
 
 | 主题 | 位置 |
 | --- | --- |
 | fleet 主机种类与出站传输 | `openswarm/bin/openswarm:8581-8603, 8619-8630, 9276-9280` |
-| Hub 侧 fleet schema 与传输选择 | `openbot/src/backend/dispatch/dispatch-service.ts:72-83, 481-487, 500-503` |
-| 远端任务卡投递 | `openbot/src/backend/dispatch/dispatch-process.ts:79, 91-95` |
+| Hub 侧 fleet schema 与传输选择 | `volto/src/backend/dispatch/dispatch-service.ts:72-83, 481-487, 500-503` |
+| 远端任务卡投递 | `volto/src/backend/dispatch/dispatch-process.ts:79, 91-95` |
 | Hub ↔ 执行主机固定强制命令 | `openswarm/bin/hub-openswarm-bridge:21`；`openswarm/bin/hub-fleet-gateway:13` |
 | 连接入口与配置要求 | `integrations/README.md:5, 14-16, 34-35` |
 | MiniMax broker（单上游、并发闸门） | `openswarm/bin/pi-minimax-broker.mjs:22, 27, 55, 75` |
@@ -181,4 +181,4 @@
 | 已回滚的反向 socket 隧道 | `443f34554`（新增）；`c33d8d4d5`（回滚，删除 `openswarm/docs/fleet-reverse-socket.md`）；已回滚文档原文见 `git show c33d8d4d5^:openswarm/docs/fleet-reverse-socket.md` |
 | 未合入的配置扩展 | `45c8ada52`（`origin/brain/fleet-multihost`，不在本分支祖先中） |
 | 历史主机清单 | `tools/watch8.sh:3` |
-| 控制面自建部署（边界说明） | `openbot/docs/self-hosting.md:1-40`；`openbot/deploy/self-host/README.md:1-40`；`openbot/src/main/private-network-detection.ts:3-17`；`openbot/src/renderer/src/features/team/team-webrtc-private-network.ts:1-45`；`openbot/src/main/host-service.ts:152` |
+| 控制面自建部署（边界说明） | `volto/docs/self-hosting.md:1-40`；`volto/deploy/self-host/README.md:1-40`；`volto/src/main/private-network-detection.ts:3-17`；`volto/src/renderer/src/features/team/team-webrtc-private-network.ts:1-45`；`volto/src/main/host-service.ts:152` |

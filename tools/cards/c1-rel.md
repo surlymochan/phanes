@@ -1,6 +1,6 @@
 # M10 #64: fix backend reliability findings 1-3
 
-Repository: OpenBot desktop (Electron, Bun, TypeScript, SolidJS). Base commit: b50d5ce925 (head of PR nibiru-labs/openbot#42,
+Repository: Volto desktop (Electron, Bun, TypeScript, SolidJS). Base commit: b50d5ce925 (head of PR nibiru-labs/volto#42,
 the upstream sync). Read AGENTS.md and the AGENTS.md of every directory you change, and follow them.
 
 ## Scope
@@ -25,7 +25,7 @@ Evidence:
 Why it matters: the `initialize` request before this one gets 30 seconds, or 180 seconds for a
 slow provider. The account read that follows gets five seconds. A slow or busy machine answers the
 account read later than that. The timeout then counts as a failed start. Three such timeouts stop
-the provider. The chat stays unusable until the user acts. The status row says that OpenBot stopped
+the provider. The chat stays unusable until the user acts. The status row says that Volto stopped
 starting the provider, so the user does not learn that the machine was busy.
 
 Fix: give the account read the same budget as the initialize request. Use `this.#requestTimeoutMs`,
@@ -69,7 +69,7 @@ Evidence:
 - `src/backend/dispatch/dispatch-service.ts:240` — `for (const record of this.#runs) if (!record.delivered) yield* this.#watch(record.host, record.runId);`
 
 Why it matters: a run that never reaches a terminal state keeps a poll loop for the life of the
-app. Every poll spawns an `openswarm` process. A restart of the app watches every record that was
+app. Every poll spawns an `swrm` process. A restart of the app watches every record that was
 not delivered again. The remote host then sees one process every two seconds, for as long as the
 app runs. The row of the run in the interface also stays "running" for ever.
 
@@ -80,7 +80,7 @@ unknown when the limit passes. The user can then stop the run.
 
 - First confirm each finding against the current code. If upstream already fixed one, do not change it: report
   "already fixed" with the file and line that show it. That is a valid result.
-- Smallest change that fixes the behavior. No new dependency. User-visible text comes from `@openbot/i18n` catalog
+- Smallest change that fixes the behavior. No new dependency. User-visible text comes from `@volto/i18n` catalog
   keys (read docs/i18n.md before adding a key; add it to every locale). Errors that main/backend send use `sourceText(key)`.
 - Tests: E2E scripts under `scripts/` only (repository rule); vitest only for the protected areas named in AGENTS.md.
   Do not add a package.json script; run a new script with `bun scripts/<name>.ts`.

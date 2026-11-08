@@ -1,0 +1,12 @@
+[Unit]
+Description=Volto TURN runtime configuration
+After=volto-caddy.service
+Wants=volto-caddy.service
+
+[Service]
+Type=oneshot
+TimeoutStartSec=330
+EnvironmentFile=/etc/volto/coturn.env
+# The script writes the configuration and the certificate into /run/volto. It runs as root,
+# because the certificate of Caddy has the mode 0600 and the `caddy` user owns it.
+ExecStart=/usr/local/sbin/volto-turn-config

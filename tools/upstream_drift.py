@@ -218,7 +218,7 @@ def main() -> int:
         unmarked = unmarked_paths(reports, changed, args.title)
         if unmarked:
             print("generic upstream paths require a PR title mentioning 'upstream' "
-                  "(for example 'upstream:' or 'upstream(openbot):')", file=sys.stderr)
+                  "(for example 'upstream:' or 'upstream(volto):')", file=sys.stderr)
             return 1
     return 0
 

@@ -3,7 +3,7 @@
 
 A lane that takes a card leaves two traces on the issue itself:
 
-* an **assignee** — the claimer.  Today that is the repo owner, later the OpenBot bot
+* an **assignee** — the claimer.  Today that is the repo owner, later the volto bot
   name; the login comes from the configuration, never from the code.
 * the **lane id in the project's ``Lane`` field** (a TEXT field), so the board shows
   which agent is actually working on the card.

@@ -1,20 +1,21 @@
 # Phanes
 
-> **当前迁移状态：** 本仓库正收敛 OpenBot、OpenSwarm 和连接层。源码导入与构建检查不代表正式部署或真实任务验收完成；最新状态见 [HANDOFF.md](HANDOFF.md)。
+> **当前迁移状态：** 本仓库正收敛 Volto、Swrm 和连接层。源码导入与构建检查不代表正式部署或真实任务验收完成；最新状态见 [HANDOFF.md](HANDOFF.md)。
 
-- [`openbot/`](openbot/)：OpenBot Hub 和界面。
-- [`openswarm/`](openswarm/)：执行器、路由与跨主机并发。
+- [`volto/`](volto/)：Volto Hub 和界面。
+- [`swrm/`](swrm/)：执行器、路由与跨主机并发。
+- [`phanes/evalid/`](phanes/evalid/)：运行验证与证据封存。
 - [`integrations/`](integrations/)：Hub 与执行网络的连接入口。
 - Issue、PR 和 Discussions 以本仓库为入口；当前执行看板为 [phanes RSI 异构 Agent 网络](https://github.com/users/surlymochan/projects/6)（SSH fleet + GitHub issue bus）。既有 Phanes / Agent Task Project 保留历史与跨项目视图。
 
-组件保留各自许可证：OpenBot 使用 [PolyForm Noncommercial 1.0.0](openbot/LICENSE)，OpenSwarm 使用 [Apache 2.0](openswarm/LICENSE)。其他文件适用其自身声明。
+组件保留各自许可证：Volto 使用 [PolyForm Noncommercial 1.0.0](volto/LICENSE)，Swrm 使用 [Apache 2.0](swrm/LICENSE)。其他文件适用其自身声明。
 
 **A unified agent network: one control plane, distributed heterogeneous execution, unified resource management, and evidence-based self-improvement.**
 
 Phanes brings three existing systems together into a single network for running fleets of AI coding agents:
 
-- **[OpenBot](https://github.com/nibiru-labs/openbot)** is the control plane — user entry point, agent identity, goals and tasks, authorization, and the final accept/reject decision.
-- **[openswarm](https://github.com/surlymochan/openswarm)** is the execution plane — resource registry, scheduling across machines and model backends, run/attempt state, cancellation and recovery, and run evidence.
+- **[Volto](https://github.com/nibiru-labs/openbot)** is the control plane — user entry point, agent identity, goals and tasks, authorization, and the final accept/reject decision.
+- **[swrm](https://github.com/surlymochan/swrm)** is the execution plane — resource registry, scheduling across machines and model backends, run/attempt state, cancellation and recovery, and run evidence.
 - **RSI (agent-knowledge)** is the learning layer — versioned experience, reusable patterns, evaluation rules, and improvement proposals distilled from completed work.
 
 GitHub sits alongside them as the evidence surface for code work: issues, pull requests, reviews, and releases that reference run records.
@@ -59,5 +60,5 @@ Formal release of each stage requires passing negative tests (wrong-host receipt
 ## Related projects
 
 - [openflow](https://github.com/surlymochan/openflow) — executable delivery workflows with stage contracts and evidence gates
-- [openswarm](https://github.com/surlymochan/openswarm) — quota-aware multi-agent scheduling for the execution plane
-- [openbot](https://github.com/nibiru-labs/openbot) — the control-plane client and hub
+- [swrm](https://github.com/surlymochan/swrm) — quota-aware multi-agent scheduling for the execution plane
+- [volto](https://github.com/nibiru-labs/openbot) — the control-plane client and hub

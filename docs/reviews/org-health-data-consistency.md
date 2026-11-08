@@ -3,8 +3,8 @@
 Refs #6、#179。
 
 本报告对组织诊断（org-health-local）样例数据进行逐条交叉核对，审阅范围涵盖：
-1. **静态缺省快照**：`openbot/examples/org-health-local/data/diagnosis.json`（任务书中指定的默认数据文件，用于本地应用独立预览与单测基准）；
-2. **三 Bot 实跑快照**：`openbot/examples/org-health-local/demo/diagnosis.json`（由 DA 基于任务书 `demo/brief.json` 与合成原始数据 `da/sample-raw/` 实跑生成的诊断快照）。
+1. **静态缺省快照**：`volto/examples/org-health-local/data/diagnosis.json`（任务书中指定的默认数据文件，用于本地应用独立预览与单测基准）；
+2. **三 Bot 实跑快照**：`volto/examples/org-health-local/demo/diagnosis.json`（由 DA 基于任务书 `demo/brief.json` 与合成原始数据 `da/sample-raw/` 实跑生成的诊断快照）。
 
 审阅重点：逐条核对**结论、洞察、风险、建议**文字中提到的数字与指标数值（metrics）是否一致、计算是否准确、单位是否正确及口径是否闭环。
 
@@ -27,11 +27,11 @@ Refs #6、#179。
 
 ---
 
-## 1. 静态数据审阅：`openbot/examples/org-health-local/data/diagnosis.json`
+## 1. 静态数据审阅：`volto/examples/org-health-local/data/diagnosis.json`
 
 ### 1.1 指标数据盘点（Metrics）
 
-文件路径：[`openbot/examples/org-health-local/data/diagnosis.json`](file:///Users/surlymo/.claude/openswarm-executor-candidate/lanes/A1/wt/openbot/examples/org-health-local/data/diagnosis.json#L16-L80)
+文件路径：[`volto/examples/org-health-local/data/diagnosis.json`](file:///path/to/operator/.claude/openswarm-executor-candidate/lanes/A1/wt/volto/examples/org-health-local/data/diagnosis.json#L16-L80)
 
 | 指标标题 | 2026-01实际 | 2026-05H1参考 | 2026-09实际 | 年末测算 | 年末目标 | 单位（口径说明） |
 | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
@@ -47,7 +47,7 @@ Refs #6、#179。
 ### 1.2 发现的问题与分析
 
 #### 问题 1：成本率比率计算与底层数值严重冲突（ISSUE-07）
-- **位置**：`openbot/examples/org-health-local/data/diagnosis.json` 第 62–77 行。
+- **位置**：`volto/examples/org-health-local/data/diagnosis.json` 第 62–77 行。
 - **现状**：
   - 口径说明（第 10 行）明确指出：“技术人力成本单位为万元/月... 收入单位为万美元/月；成本率为成本占同期收入折人民币比例”。
   - 以 2026-01实际 为例：技术人力成本为 `10 万元/月`，收入为 `10 万美元/月`。按当前系统标准汇率 7.2 计算，折合人民币收入为 `72 万元/月`。
@@ -57,7 +57,7 @@ Refs #6、#179。
 - **建议改法**：按标准汇率 7.2 重新核算比率字符串（如 2026-01 为 `"约13.9%"`，2026-09 为 `"约13.9%"` 或采用符合演示梯度的合理收入数值）。
 
 #### 问题 2：分部数据与整体数据完全重合，全口径成本率未体现额外成本（ISSUE-08）
-- **位置**：`openbot/examples/org-health-local/data/diagnosis.json` 第 36–51 行及第 74–77 行。
+- **位置**：`volto/examples/org-health-local/data/diagnosis.json` 第 36–51 行及第 74–77 行。
 - **现状**：
   - 整体技术人力成本（10, null, 12, 14）与营收业务技术人力成本（10, null, 12, 14）在所有期次完全相等，折算人头亦然（均一致为 10, null, 12, 14），即营收业务占比恒等于 100%。
   - 全口径技术成本率（含运维设施）在 2026-01实际 为 `"约1%"`，2026-09实际 为 `"约2%"`，与不含运维设施的整体技术人力成本率（约1%、约2%）毫无差异。
@@ -65,7 +65,7 @@ Refs #6、#179。
 - **建议改法**：建议将 `data/diagnosis.json` 对齐 `demo/diagnosis.json` 中的合成基准数据（如整体成本 10.4、12.4，营收业务成本 8.3、9.9，全口径成本率 15.5%、15.2% 等）。
 
 #### 问题 3：文字洞察与指标数据零交互（ISSUE-10）
-- **位置**：`openbot/examples/org-health-local/data/diagnosis.json` 第 81–103 行。
+- **位置**：`volto/examples/org-health-local/data/diagnosis.json` 第 81–103 行。
 - **现状**：
   - `insights` 仅有一条“此处只展示人工构造的数据。”，`recommendations` 仅有一条“补充证据”。
   - 文字未提及指标中的任何数字（如 10、12 万元，1%、2% 等），没有定量结论。
@@ -73,11 +73,11 @@ Refs #6、#179。
 
 ---
 
-## 2. 三 Bot 实跑数据审阅：`openbot/examples/org-health-local/demo/diagnosis.json`
+## 2. 三 Bot 实跑数据审阅：`volto/examples/org-health-local/demo/diagnosis.json`
 
 ### 2.1 指标数据盘点（Metrics）
 
-文件路径：[`openbot/examples/org-health-local/demo/diagnosis.json`](file:///Users/surlymo/.claude/openswarm-executor-candidate/lanes/A1/wt/openbot/examples/org-health-local/demo/diagnosis.json#L22-L88)
+文件路径：[`volto/examples/org-health-local/demo/diagnosis.json`](file:///path/to/operator/.claude/openswarm-executor-candidate/lanes/A1/wt/volto/examples/org-health-local/demo/diagnosis.json#L22-L88)
 汇率说明：7.2 人民币/美元；数据截止：2026-09-30。
 
 | 指标标题 | 2026-01实际 | 2026-05H1参考 | 2026-09实际 | 年末测算 | 年末目标 | 基础单位 |
@@ -220,7 +220,7 @@ Refs #6、#179。
 
 ## 3. 修复建议行动清单
 
-1. **针对 `openbot/examples/org-health-local/da/build_diagnosis.py` 的代码修复**：
+1. **针对 `volto/examples/org-health-local/da/build_diagnosis.py` 的代码修复**：
    - 重构 `answer_question(question, facts)` 函数：
      - 不应使用单纯的单关键词包含判断（`if "率" in question`），应建立针对各必答问题的匹配映射表或复合条件判断。
      - 当问题包含“增减多少（金额与百分比）”时，输出差值计算结果（+2.0 万元/月，+19.2%）。
@@ -229,14 +229,14 @@ Refs #6、#179。
      - 当问题包含“全口径”及“期次”时，输出期次覆盖（2026-01、2026-09）与缺口处理（null / 未提供）。
    - 在 `fmt_number` 或相关输出中，对于当量人头补充单位“人（当量）”。
 
-2. **针对 `openbot/examples/org-health-local/data/diagnosis.json` 的数据修复**：
+2. **针对 `volto/examples/org-health-local/data/diagnosis.json` 的数据修复**：
    - 修正伪造的“约1%”、“约2%”、“约3%”成本率占位数据，填入与基础数值和汇率相符的真实比例，或同步为合理梯度的演示数据。
    - 补充 `口径说明` 中缺失的“汇率：7.2 人民币/美元”。
    - 区分整体业务与营收业务数值，避免 100% 重合。
    - 补充至少一条引用具体指标数值的洞察与建议。
 
 3. **回归验证**：
-   - 修改后执行 `python3 openbot/examples/org-health-local/da/build_diagnosis.py --brief demo/brief.json --raw da/sample-raw --out demo/diagnosis.json`；
-   - 运行校验工具 `python3 openbot/examples/org-health-local/validate.py demo/diagnosis.json`；
-   - 运行交叉检查 `python3 openbot/examples/org-health-local/review/cross_check.py --brief demo/brief.json --data demo/diagnosis.json`；
-   - 运行测试集 `python3 openbot/examples/org-health-local/run_tests.py`。
+   - 修改后执行 `python3 volto/examples/org-health-local/da/build_diagnosis.py --brief demo/brief.json --raw da/sample-raw --out demo/diagnosis.json`；
+   - 运行校验工具 `python3 volto/examples/org-health-local/validate.py demo/diagnosis.json`；
+   - 运行交叉检查 `python3 volto/examples/org-health-local/review/cross_check.py --brief demo/brief.json --data demo/diagnosis.json`；
+   - 运行测试集 `python3 volto/examples/org-health-local/run_tests.py`。

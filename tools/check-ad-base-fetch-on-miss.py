@@ -37,8 +37,8 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 MODULE_PATH = ROOT / "tools/lane-autodispatch/autodispatch.py"
-# Scratch space stays inside the worktree (the executor's TMPDIR is .openswarm-tmp/).
-SCRATCH = Path(os.environ.get("TMPDIR") or (ROOT / ".openswarm-tmp"))
+# Scratch space stays inside the worktree (the executor's TMPDIR is .swrm-tmp/).
+SCRATCH = Path(os.environ.get("TMPDIR") or (ROOT / ".swrm-tmp"))
 HOST = "ad-base-fetch-test"
 LANE = "CX1"
 ISSUE = 1810
@@ -102,7 +102,7 @@ class Sandbox:
         subprocess.run(["git", "clone", "-q", str(self.origin), str(self.fleet)], check=True)
         # upstream moves on: the new base commit is not in the target repo yet
         self.base = commit_file(self.origin, "README.md", "c2\n")
-        self.fleet_bin = root / "openswarm-fleet"
+        self.fleet_bin = root / "swrm-fleet"
         self.fleet_bin.write_text(f"#!/bin/sh\necho \"assigned $*\" >> {self.assign_log}\necho '{{\"id\": \"run-1\"}}'\n")
         self.fleet_bin.chmod(0o755)
         self.issues = {ISSUE: {"title": f"#{ISSUE} base fetch check", "body": "",

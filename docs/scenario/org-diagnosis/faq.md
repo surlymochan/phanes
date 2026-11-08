@@ -256,8 +256,8 @@ python3 builder/check_site.py <dist>
   覆盖根目录与 `boss/`、`da/`、`builder/`、`review/` 子包的全部 `test_*.py`
   （`examples/org-health-local/run_tests.py:14-19`）。
 - 浏览器端到端（需要 Bun 与 Chrome）：在**仓库根目录**跑 `bun run test:org-health-demo`
-  （`openbot/package.json:194`），覆盖中英文、回退语言、无效数据、无效 Host 与私有路径，
-  结果写 `.openbot-build/`（`examples/org-health-local/README.md:168`）。
+  （`volto/package.json:194`），覆盖中英文、回退语言、无效数据、无效 Host 与私有路径，
+  结果写 `.volto-build/`（`examples/org-health-local/README.md:168`）。
 - 不打开浏览器核对页面会展示什么：`python3 demo/make_site_summary.py`
   （`examples/org-health-local/demo/make_site_summary.py:422-423`），生成
   `demo/site-summary.md`：指标卡片的标题与各期次数值、口径说明条目、洞察/建议条数，
@@ -326,7 +326,7 @@ python3 run_tests.py                                          # Ran 581 tests: 0
 - **换观察月份当前不可用**：结构定义写死 2026-09 的期次键（见本文 Q5），放开需要改
   `examples/org-health-local/schema/diagnosis.schema.json`、页面与文案，属结构改动。
 - **`validate.py` 不接受 `--data`**：只用位置参数；`docs/scenario/org-diagnosis/pipeline.md` 与
-  `openswarm/examples/org-diagnosis-pipeline.json` 里的 verify 命令仍按 `--data` 写法，按实际 CLI 为准
+  `swrm/examples/org-diagnosis-pipeline.json` 里的 verify 命令仍按 `--data` 写法，按实际 CLI 为准
   （`docs/scenario/org-diagnosis/contract.md` 第 8 节缺口 5）。
 - **真实数据链路未演练**：本文实测全部使用仓库内合成样本；接真实数据前需先确认期间、指标定义与结构一致
   （`examples/org-health-local/README.md:47`）。

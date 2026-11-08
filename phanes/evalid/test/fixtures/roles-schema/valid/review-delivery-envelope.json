@@ -1,0 +1,52 @@
+{
+  "schema_version": 1,
+  "kind": "review",
+  "role": "evalid-review",
+  "stage": "delivery",
+  "change_id": "feature-example",
+  "attempt": 0,
+  "run_id": "run-review-0004",
+  "issue_ref": "issue#1887",
+  "base_commit": "1111111111111111111111111111111111111111",
+  "head_commit": "2222222222222222222222222222222222222222",
+  "parents": [
+    "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+  ],
+  "producer": {
+    "backend": "codex",
+    "model": "gpt-6.1-sol",
+    "effort": "high",
+    "policy_digest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "tool_commit": "3333333333333333333333333333333333333333"
+  },
+  "artifacts": [
+    {
+      "name": "spec.json",
+      "sha256": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "media_type": "application/json"
+    }
+  ],
+  "payload": {
+    "spec_digest": "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+    "tdd_digest": "sha256:5555555555555555555555555555555555555555555555555555555555555555",
+    "reviewed_base": "1111111111111111111111111111111111111111",
+    "reviewed_head": "2222222222222222222222222222222222222222",
+    "commits": [
+      "6666666666666666666666666666666666666666",
+      "2222222222222222222222222222222222222222"
+    ],
+    "verdict": "PASS",
+    "findings": [
+      {
+        "severity": "FOLLOW-UP",
+        "requirement_ref": "issue#1887",
+        "artifact_ref": "src/cli.js",
+        "reason": "the error message could name the offending flag",
+        "path": "src/cli.js",
+        "line": 42
+      }
+    ],
+    "holdout_receipt": "sha256:7777777777777777777777777777777777777777777777777777777777777777"
+  },
+  "evidence_id": "sha256:fb1fbb9588f86b63771ed63e3858ed545ab44c224d1c86709060a18291e8ff55"
+}

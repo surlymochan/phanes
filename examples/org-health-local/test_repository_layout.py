@@ -39,7 +39,7 @@ class RepositoryLayoutTest(unittest.TestCase):
                 self.assertEqual(getattr(args, option), ROOT / relative)
                 self.assertTrue(getattr(args, option).exists())
         self.assertEqual(run_e2e.source_repo_root(), REPOSITORY)
-        self.assertFalse((REPOSITORY / 'openbot/examples/org-health-local').exists())
+        self.assertFalse((REPOSITORY / 'volto/examples/org-health-local').exists())
 
     def test_default_pipeline_runs_from_repository_root(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -85,7 +85,7 @@ class RepositoryLayoutTest(unittest.TestCase):
         workflow = (REPOSITORY / '.github/workflows/phanes.yml').read_text(encoding='utf-8')
         self.assertIn('examples/org-health-local', workflow)
         self.assertIn('examples/org-health-local/validate.py', workflow)
-        self.assertNotIn('openbot/examples/org-health-local', workflow)
+        self.assertNotIn('volto/examples/org-health-local', workflow)
 
     def test_frontend_translation_import_resolves_from_the_moved_source(self):
         source = (ROOT / 'app.js').read_text(encoding='utf-8')
@@ -93,7 +93,7 @@ class RepositoryLayoutTest(unittest.TestCase):
         self.assertEqual(len(imports), 1)
         self.assertTrue(imports[0].startswith('.'))
         entry = (ROOT / imports[0]).resolve()
-        self.assertEqual(entry, REPOSITORY / 'openbot/packages/i18n/src/index.ts')
+        self.assertEqual(entry, REPOSITORY / 'volto/packages/i18n/src/index.ts')
         exports = entry.read_text(encoding='utf-8')
         self.assertRegex(exports, r'export\s*\{[^}]*\bresolveLocale\b')
         self.assertRegex(exports, r'export function translateFor\(')

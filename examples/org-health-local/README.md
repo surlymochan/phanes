@@ -129,11 +129,11 @@ python3 -m unittest discover -s demo -p 'test_*.py'
 | 入口 | 执行位置 | 任务载体 | 结果回来方式 | 适用场景 |
 | --- | --- | --- | --- | --- |
 | 本地 `run_e2e.py` | 自己的机器 | 命令行参数 | 产物落在 `--workdir` | 调试、评审、改代码 |
-| SSH lane | box → 受控主机（ib1–ib5、gocc、gorelay、govpn、govpn2） | 任务卡文件 | lane 分支 `openswarm/<run-id>` | 自己控制的主机与账号 |
-| GitHub issue bus | 不受控执行器（他人 agent、云 agent） | bus issue | issue 里的 `openswarm-result` 评论 | 外部或不受管的执行器 |
+| SSH lane | box → 受控主机（node-1.example.invalid–node-5.example.invalid、broker、relay.example.invalid、worker-a.example.invalid、worker-b.example.invalid） | 任务卡文件 | lane 分支 `swrm/<run-id>` | 自己控制的主机与账号 |
+| GitHub issue bus | 不受控执行器（他人 agent、云 agent） | bus issue | issue 里的 `swrm-result` 评论 | 外部或不受管的执行器 |
 
 网络入口的部署约定见 `docs/dual-mode-*.md`（当前仓库只有 SSH 一篇：`docs/dual-mode-ssh.md`；
-issue bus 的协议与结果格式在 `openswarm/docs/BUS.md`），当前盘点见 `brain/dual-mode-status.md`。
+issue bus 的协议与结果格式在 `swrm/docs/BUS.md`），当前盘点见 `brain/dual-mode-status.md`。
 原则不变：自己控制的主机走 SSH lane，不要改走 bus。
 
 ### 1) 本地跑通
@@ -152,20 +152,20 @@ python3 run_e2e.py --workdir <workdir> --review
 `docs/dual-mode-ssh.md`。任务卡就是给执行器看的自然语言指令：
 
 ```bash
-cd /srv/phanes/openbot-workspace
+cd /srv/phanes/volto-workspace
 umask 077
-task=$(mktemp /tmp/openswarm-org-health.XXXXXX.md)
+task=$(mktemp /tmp/swrm-org-health.XXXXXX.md)
 cat >"$task" <<'EOF'
-Repository: openbot
+Repository: volto
 Task type: docs
 在 examples/org-health-local 下运行 python3 run_e2e.py --workdir <目录> --review，
 把 brief.json、diagnosis.json、dist/ 和 review.md 的结论写进提交说明；只用合成数据，
 不要提交真实组织数据。
 EOF
 
-openswarm-fleet fleet status --json
-openswarm-fleet fleet exec ib1 -- lane status
-openswarm-fleet fleet exec ib1 -- lane assign M1 --task-file "$task" \
+swrm-fleet fleet status --json
+swrm-fleet fleet exec node-1.example.invalid -- lane status
+swrm-fleet fleet exec node-1.example.invalid -- lane assign M1 --task-file "$task" \
   --title "org-health demo" --budget-minutes 15
 ```
 
@@ -173,8 +173,8 @@ openswarm-fleet fleet exec ib1 -- lane assign M1 --task-file "$task" \
 派发后查状态、取回结果：
 
 ```bash
-openswarm-fleet fleet exec ib1 -- runs --active --json
-openswarm-fleet fleet exec ib1 -- lane status
+swrm-fleet fleet exec node-1.example.invalid -- runs --active --json
+swrm-fleet fleet exec node-1.example.invalid -- lane status
 ```
 
 跑完确认 lane 回到 `idle`，再删临时任务卡：
@@ -187,31 +187,31 @@ box 上由常驻 `lane-autodispatch` 承接 `lane-ready` issue 的自动派发�
 
 ### 3) 经 GitHub issue bus 派发（不受控执行器）
 
-协议、状态标签（`openswarm:queued`、`openswarm:claimed`、`openswarm:done`、`openswarm:failed`）
-与结果字段见 `openswarm/docs/BUS.md`。先把 bus 仓库和白名单落地：
+协议、状态标签（`swrm:queued`、`swrm:claimed`、`swrm:done`、`swrm:failed`）
+与结果字段见 `swrm/docs/BUS.md`。先把 bus 仓库和白名单落地：
 
 ```bash
-openswarm bus init <bus-owner>/<bus-repo>
+swrm bus init <bus-owner>/<bus-repo>
 ```
 
 再从目标仓库派发（`--base` 指向已推送的提交）：
 
 ```bash
-openswarm run --backend github-issue --cwd <target-repo> --base <commit> \
+swrm run --backend github-issue --cwd <target-repo> --base <commit> \
   --budget-minutes 40 \
   --verify 'python3 -m unittest discover -s examples/org-health-local -p "test_*.py"' \
   --task-file task.md
-openswarm bus status
+swrm bus status
 ```
 
 执行侧由 worker 认领并回结果：
 
 ```bash
-openswarm bus-worker --bus <bus-owner>/<bus-repo> --name <executor-name> --backend codex --once
+swrm bus-worker --bus <bus-owner>/<bus-repo> --name <executor-name> --backend codex --once
 ```
 
 `task.md` 写的就是上面 lane 任务卡的同一段要求。planner 取最早一条合法 claim 的
-`openswarm-result` 评论作为结果（字段为 `status`、`summary`、`files_changed`、`tests`、
+`swrm-result` 评论作为结果（字段为 `status`、`summary`、`files_changed`、`tests`、
 `followups`，bus 另加 `branch`、`commit`），按需在本地复验；planner 自己不合并、不推目标仓库。
 
 ### 三种入口的共同边界
@@ -269,7 +269,7 @@ python3 -m unittest discover -s examples/org-health-local -p 'test_*.py'
 审查脚本输出含非 UTF-8 字节时同样判失败：运行器给出可读提示而不是裸 Traceback，
 报告保留原始字节不删除，`timings.json` 里审查步骤的退出码为非 0。
 
-`openbot/` 目录下运行 `bun run test:org-health-demo` 可启动隔离服务，以浏览器检查中英文、回退语言、无效数据和请求边界，并将结果写入 `openbot/.openbot-build/org-health-demo-e2e/`（仓库根目录没有 `package.json`，这条命令要在 `openbot/` 里跑）。
+`volto/` 目录下运行 `bun run test:org-health-demo` 可启动隔离服务，以浏览器检查中英文、回退语言、无效数据和请求边界，并将结果写入 `volto/.volto-build/org-health-demo-e2e/`（仓库根目录没有 `package.json`，这条命令要在 `volto/` 里跑）。
 
 服务边界测试覆盖 loopback Host 白名单、路径白名单、目录与穿越请求拒绝、`--root` 产物目录服务、`--data` 指定的数据文件、启动提示和端口占用处理；全部单元测试均由 `python3 run_tests.py` 运行。
 

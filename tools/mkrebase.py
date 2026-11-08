@@ -8,7 +8,7 @@ blocks = []
 for spec in prs:
     pr, branch, files = spec.split(":", 2)
     blocks.append(
-        f"### PR nibiru-labs/openbot#{pr}  (branch `{branch}`)\n\n"
+        f"### PR nibiru-labs/volto#{pr}  (branch `{branch}`)\n\n"
         f"Files this PR changes: {files.replace(',', ', ')}\n\n"
         f"Get its change: `git fetch https://github.com/nibiru-labs/openbot.git {branch}` then\n"
         f"`git diff 44c1e550da FETCH_HEAD -- {files.replace(',', ' ')}` (44c1e550da is the old main it was written against;\n"
@@ -16,7 +16,7 @@ for spec in prs:
     )
 card = f"""# {title}
 
-Repository: OpenBot desktop (Electron, Bun, TypeScript). Read AGENTS.md and the AGENTS.md of every directory you change.
+Repository: Volto desktop (Electron, Bun, TypeScript). Read AGENTS.md and the AGENTS.md of every directory you change.
 Base: `fd5719fc7f`, the new main. It contains the merge of 429 upstream commits, so the code, docs and scripts
 around these files changed a lot since these PRs were written.
 
@@ -34,10 +34,10 @@ Re-apply each PR below onto this base so that it is correct for the new code. Fo
 
 ## Rules
 
-- Smallest change. No new dependency. Interface text comes from `@openbot/i18n` keys. No migrations, no released
+- Smallest change. No new dependency. Interface text comes from `@volto/i18n` keys. No migrations, no released
   wire or IPC contract change.
 - Tests are E2E scripts under `scripts/`; do not add unit tests. Wait on state, not time.
-- Never read or print `.env*`, auth or credential files. Temporary files only under `$TMPDIR` or `.openbot-build/`
+- Never read or print `.env*`, auth or credential files. Temporary files only under `$TMPDIR` or `.volto-build/`
   in the worktree; never write or remove anything in `/tmp` or outside the worktree. Do not use Computer Use.
 - Do not commit (the runner commits) and do not push. Add a release note `changelog.d/<short-name>.md` only if the PR
   did not carry the `no-changelog` label (PR #36 carries a note; keep it).

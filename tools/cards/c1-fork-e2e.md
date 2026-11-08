@@ -1,6 +1,6 @@
 # Two fork E2E checks fail after the upstream sync: steer/interrupt/queue pause and backup model failover
 
-Repository: OpenBot desktop. Read AGENTS.md, src/backend/AGENTS.md and src/main/AGENTS.md. Base: `fd5719fc7f` (main, after merging 429 upstream commits into the fork).
+Repository: volto desktop. Read AGENTS.md, src/backend/AGENTS.md and src/main/AGENTS.md. Base: `fd5719fc7f` (main, after merging 429 upstream commits into the fork).
 
 ## Problem
 

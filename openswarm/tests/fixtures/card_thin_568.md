@@ -2,4 +2,4 @@
 labels: p2,backend:agy
 validate serve run_e2e
 
-验收：`rg -n "run_e2e" openbot/examples/org-health-local/README.md`
+验收：`rg -n "run_e2e" volto/examples/org-health-local/README.md`

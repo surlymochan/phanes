@@ -1,6 +1,6 @@
-# openswarm: three executor reliability fixes (roadmap #6)
+# swrm: three executor reliability fixes (roadmap #6)
 
-Repository: openswarm (Python CLI `bin/openswarm`, tests under tests/ run with
+Repository: swrm (Python CLI `bin/swrm`, tests under tests/ run with
 `cd tests && python3 -m unittest <module>`). Read README.md sections on lanes, run status and risk first.
 
 ## Problems observed on 2026-10-28

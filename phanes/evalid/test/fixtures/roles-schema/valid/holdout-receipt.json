@@ -1,0 +1,12 @@
+{
+  "change_id": "feature-example",
+  "attempt": 0,
+  "subject_head": "2222222222222222222222222222222222222222",
+  "spec_digest": "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+  "suite_digest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  "required": true,
+  "status": "PASS",
+  "isolation": "verified",
+  "l1_eligible": true,
+  "evidence_digest": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+}

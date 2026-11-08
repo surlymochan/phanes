@@ -1,6 +1,6 @@
 # Fix the type errors in the two accessibility E2E scripts
 
-Repository: OpenBot desktop. Read AGENTS.md. Base: your commit 25f0842df4 (the end of your accessibility work, findings 1-15).
+Repository: Volto desktop. Read AGENTS.md. Base: your commit 25f0842df4 (the end of your accessibility work, findings 1-15).
 
 ## Problem
 
@@ -24,4 +24,4 @@ The pre-commit hook runs `bun run typecheck:node`, which covers `scripts/`. It f
 3. Run each remaining script (`bun scripts/<name>.ts`), `bun run typecheck:node`, `bun run typecheck:renderer`, `bun run check:ui`
    and `bunx biome check <changed files>`. All must pass.
 
-Temporary files only under `$TMPDIR` or `.openbot-build/` in the worktree. Do not commit; do not push. Report each check result.
+Temporary files only under `$TMPDIR` or `.volto-build/` in the worktree. Do not commit; do not push. Report each check result.

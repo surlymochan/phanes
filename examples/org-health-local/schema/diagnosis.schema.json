@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "urn:openbot:examples:org-health-local:diagnosis.schema.json",
+  "$id": "urn:volto:examples:org-health-local:diagnosis.schema.json",
   "title": "组织健康诊断快照",
   "description": "diagnosis.json 的结构定义。字段与 app.js 读取的字段一致：scope 给出口径与 schema版本，metrics 按页面顺序给出四个指标。",
   "$comment": "指标标题与页面 expected 数组一致；series 键名是页面按名读取的锚点。",

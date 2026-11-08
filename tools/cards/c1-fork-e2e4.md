@@ -1,6 +1,6 @@
 # Fix the last two fork E2E failures (CI shows the exact errors; the fake provider CLI cannot start in your sandbox, so work from code and these logs)
 
-Repository: OpenBot desktop. Read AGENTS.md and src/backend/AGENTS.md. Base: your commit `18aa0ea58c` (PR nibiru-labs/openbot#54 branch `fix/fork-e2e-regressions`).
+Repository: Volto desktop. Read AGENTS.md and src/backend/AGENTS.md. Base: your commit `18aa0ea58c` (PR nibiru-labs/volto#54 branch `fix/fork-e2e-regressions`).
 
 ## CI result after your last change (real runs, GitHub Actions)
 

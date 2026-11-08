@@ -226,7 +226,7 @@ def main():
     check_backoff_ladder(module)
     check_outcome_threshold(module)
 
-    scratch_root = ROOT / ".openswarm-tmp"
+    scratch_root = ROOT / ".swrm-tmp"
     scratch_root.mkdir(exist_ok=True)
     check_transient_sequence(module, scratch_root)
     check_fatal_error(module, scratch_root)

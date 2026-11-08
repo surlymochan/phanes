@@ -30,8 +30,8 @@ fi
 if [ -d "$HOME/tools/pi-sandbox/node_modules" ]; then
   export OPENSWARM_PI_RUNTIME="${OPENSWARM_PI_RUNTIME:-$HOME/tools/pi-sandbox}"
 fi
-if [ -d "$HOME/work/openbot-executor-base/node_modules" ]; then
-  export OPENSWARM_PI_DEPS_ROOT="${OPENSWARM_PI_DEPS_ROOT:-$HOME/work/openbot-executor-base}"
+if [ -d "$HOME/work/volto-executor-base/node_modules" ]; then
+  export OPENSWARM_PI_DEPS_ROOT="${OPENSWARM_PI_DEPS_ROOT:-$HOME/work/volto-executor-base}"
 fi
 if [ -x "$HOME/tools/bun-runtime/node_modules/.bin/bun" ]; then
   export OPENSWARM_PI_BUN_RUNTIME="${OPENSWARM_PI_BUN_RUNTIME:-$HOME/tools/bun-runtime}"

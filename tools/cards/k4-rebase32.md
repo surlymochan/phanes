@@ -1,6 +1,6 @@
 # Re-apply PR #32 (architecture docs back in line with the code) on the new main
 
-Repository: OpenBot desktop (Electron, Bun, TypeScript). Read AGENTS.md and the AGENTS.md of every directory you change.
+Repository: Volto desktop (Electron, Bun, TypeScript). Read AGENTS.md and the AGENTS.md of every directory you change.
 Base: `fd5719fc7f`, the new main. It contains the merge of 429 upstream commits, so the code, docs and scripts
 around these files changed a lot since these PRs were written.
 
@@ -14,7 +14,7 @@ Re-apply each PR below onto this base so that it is correct for the new code. Fo
    longer true, drop what upstream already did, and say so. Do not copy a stale claim.
 4. Keep the PR's scope. Do not add unrelated changes.
 
-### PR nibiru-labs/openbot#32  (branch `docs/architecture-drift`)
+### PR nibiru-labs/volto#32  (branch `docs/architecture-drift`)
 
 Files this PR changes: docs/architecture/channels-and-messaging.md, docs/architecture/providers.md, docs/architecture/servers.md, docs/architecture/skills-and-plugins.md
 
@@ -24,10 +24,10 @@ ignore any other commit on that branch, those are already merged or belong to ot
 
 ## Rules
 
-- Smallest change. No new dependency. Interface text comes from `@openbot/i18n` keys. No migrations, no released
+- Smallest change. No new dependency. Interface text comes from `@volto/i18n` keys. No migrations, no released
   wire or IPC contract change.
 - Tests are E2E scripts under `scripts/`; do not add unit tests. Wait on state, not time.
-- Never read or print `.env*`, auth or credential files. Temporary files only under `$TMPDIR` or `.openbot-build/`
+- Never read or print `.env*`, auth or credential files. Temporary files only under `$TMPDIR` or `.volto-build/`
   in the worktree; never write or remove anything in `/tmp` or outside the worktree. Do not use Computer Use.
 - Do not commit (the runner commits) and do not push. Add a release note `changelog.d/<short-name>.md` only if the PR
   did not carry the `no-changelog` label (PR #36 carries a note; keep it).

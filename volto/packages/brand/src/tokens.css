@@ -1,0 +1,445 @@
+/*
+ * Every --volto-* token in the product is written here, once. The desktop
+ * renderer, the public web app and the mobile app all @import this file; none of
+ * them declares a token of its own. That was not true until recently - the same
+ * names lived in three files that no single commit had ever touched together, so
+ * the web palette was a frozen snapshot of a desktop palette that had moved on by
+ * two hundred tokens, and a token added for one surface was simply absent on the
+ * other two. Keep this file the only declaration site.
+ *
+ * The values here are the base, dark palette. The desktop app and the web client
+ * layer tokens-light.css on top of this file for their light appearance; mobile
+ * layers tokens-native.css. Both change values only; neither declares a new token.
+ */
+
+:root {
+  --volto-provider-current: currentcolor;
+  /* Main screen canvas and drawer, used by the native app. The desktop also uses the sidebar, the
+     sheet (its menus) and the grouped tokens, so tokens-light.css sets them too. */
+  --volto-bg-native-canvas: #141414;
+  --volto-bg-native-sidebar: #141414;
+  /* Grouped sheet surfaces, used by the native app. */
+  --volto-bg-sheet: #141414;
+  --volto-bg-grouped: #212121;
+  --volto-text-grouped-secondary: #96969b;
+  --volto-border-grouped: #333335;
+  --volto-radius-grouped: 16px;
+  /* The milky chrome of the native app where it has no Liquid Glass: the search field and bar buttons. */
+  --volto-bg-chrome-glass: rgba(38, 38, 40, 0.96);
+  --volto-border-chrome-glass: rgba(255, 255, 255, 0.08);
+  /* The fill of that chrome over a real blur, lighter than the solid glass. */
+  --volto-bg-chrome-blur: rgba(26, 26, 28, 0.62);
+
+  /* Neutral color system. Keep UI colors here, not in components. */
+  --volto-bg-canvas: #1a1a1a;
+  /* The window frame around the page card, darker than the card, so the card comes forward. */
+  --volto-bg-frame: #0d0d0d;
+  /* A rail inside a menu, a step darker than the menu sheet. */
+  --volto-bg-sheet-inset: #101010;
+  --volto-bg-canvas-clear: rgba(26, 26, 26, 0);
+  --volto-bg-sidebar: #1a1a1a;
+  --volto-marketplace-detail-bg: #111111;
+  --volto-bg-surface: #212121;
+  --volto-bg-surface-raised: #242424;
+  --volto-bg-control: #212121;
+  --volto-bg-control-hover: #242424;
+  --volto-bg-control-active: #2a2a2a;
+  --volto-tabs-bar-bg: #212121;
+  --volto-tabs-pill-bg: #2a2a2a;
+  --volto-bg-overlay: rgba(26, 26, 26, 0.92);
+  --volto-dialog-overlay: rgba(0, 0, 0, 0.1);
+  --volto-dialog-ring: rgba(255, 255, 255, 0.1);
+  --volto-bg-glass: rgba(33, 33, 33, 0.76);
+
+  /* Translucent glass surfaces: the landing page, and the browser dock and previews of the desktop. */
+  --volto-glass-surface: rgba(255, 255, 255, 0.07);
+  --volto-glass-surface-hover: rgba(255, 255, 255, 0.11);
+  --volto-glass-border: rgba(255, 255, 255, 0.18);
+  --volto-glass-highlight: rgba(255, 255, 255, 0.12);
+  --volto-glass-shadow: rgba(0, 0, 0, 0.28);
+  --volto-hero-grid-line: rgba(214, 173, 242, 0.09);
+
+  /* The landing price figure, and nothing else: a dark glass "$0" lit by one soft
+     iridescent band. These are a material, not aliases of the neutral palette -
+     the body sits a shade either side of the canvas so the glyph reads as a solid
+     object, and the band is the only warm/cool pair on the page. */
+  --volto-price-metal-high: #4c4c4c;
+  --volto-price-metal-core: #1f1f1f;
+  --volto-price-metal-low: #343434;
+  --volto-price-sheen-cool: rgba(150, 196, 255, 0.92);
+  --volto-price-sheen-light: rgba(240, 244, 250, 0.98);
+  --volto-price-sheen-warm: rgba(255, 184, 132, 0.94);
+  /* The band has to fade out through its own hue. Fading to --volto-transparent
+     would interpolate towards transparent *black* and leave a dirty grey halo
+     above and below the light. */
+  --volto-price-sheen-cool-soft: rgba(150, 196, 255, 0.26);
+  --volto-price-sheen-warm-soft: rgba(255, 184, 132, 0.28);
+  --volto-price-sheen-cool-clear: rgba(150, 196, 255, 0);
+  --volto-price-sheen-warm-clear: rgba(255, 184, 132, 0);
+  --volto-price-rim: rgba(255, 255, 255, 0.28);
+  --volto-price-rim-under: rgba(255, 255, 255, 0.1);
+  --volto-price-glow: rgba(180, 200, 255, 0.22);
+  --volto-bg-host-inset: #101216;
+  --volto-bg-notch: #000000;
+  /* The frame around the window card. It darkens the canvas toward black, so the light theme has its own. */
+  --volto-window-frame: color-mix(in srgb, var(--volto-bg-canvas) 50%, var(--volto-bg-notch));
+  --volto-mask-solid: #000000;
+  --volto-transparent: rgba(0, 0, 0, 0);
+  --volto-drawer-scrim: #000000;
+  --volto-scroll-edge-overlay: rgba(0, 0, 0, 0.72);
+  --volto-queue-surface: var(--volto-bg-surface);
+  --volto-queue-border: var(--volto-border-strong);
+  --volto-queue-text: var(--volto-text-primary);
+  --volto-queue-action: var(--volto-text-muted);
+  --volto-border: rgba(255, 255, 255, 0.035);
+  --volto-border-strong: rgba(255, 255, 255, 0.045);
+  --volto-image-outline: rgba(255, 255, 255, 0.1);
+  /* Focus is neutral: a grey border or a thin grey ring, never blue and never a halo. */
+  --volto-border-focus: var(--volto-text-muted);
+  --volto-text-primary: #ffffff;
+  --volto-text-on-light: #141414;
+  --volto-surface-light: #f0f0f0;
+  /* Not a duplicate of surface-light/text-on-light: tokens-native.css swaps this pair
+     between the mobile light and dark themes, so it is the high-contrast button that
+     inverts with the theme. Only mobile's uniwind mapping reads it. */
+  --volto-action: #f0f0f0;
+  --volto-action-foreground: #141414;
+  --volto-qr-background: #ffffff;
+  /* Ink on paper that is always light, in both themes: a QR code, the onboarding drawing of a
+     computer, the profile image that is shared. The on-light tokens above turn dark in the light
+     theme, because there they are the inverted element; these never change. */
+  --volto-paper: #f0f0f0;
+  --volto-paper-text: #141414;
+  --volto-paper-text-muted: rgba(20, 20, 20, 0.52);
+  --volto-paper-text-dim: rgba(20, 20, 20, 0.36);
+  --volto-paper-border: rgba(20, 20, 20, 0.14);
+  --volto-onboarding-desktop-mist: #dbe9ff;
+  --volto-onboarding-desktop-blue: #7eb4f2;
+  --volto-onboarding-desktop-indigo: #6f7de8;
+  /* The dither tiles of the sound theme picker: a back and an ink color for each sound theme. */
+  --volto-sound-warm-back: #d95926;
+  --volto-sound-warm-ink: #f2c46b;
+  --volto-sound-mech-back: #1f1f1f;
+  --volto-sound-mech-ink: #dbe9ff;
+  --volto-sound-bubble-back: #5b5fe0;
+  --volto-sound-bubble-ink: #8bdee8;
+  --volto-sound-press-back: #ff1e5e;
+  --volto-sound-press-ink: #ffd8a8;
+  --volto-sound-off-back: #212121;
+  --volto-sound-off-ink: #4c4c4c;
+  --volto-onboarding-window: #f3f5f8;
+  --volto-text-secondary: #dcdcdc;
+  --volto-text-muted: #979797;
+  --volto-text-dim: #6a6a6a;
+  --volto-text-readable: rgba(255, 255, 255, 0.52);
+  --volto-text-muted-on-light: rgba(20, 20, 20, 0.52);
+  --volto-text-dim-on-light: rgba(20, 20, 20, 0.36);
+  /* Ink on a surface that is light in every theme: a QR code card, the onboarding drawing, a
+     highlight. The *-on-light family above inverts in the desktop light theme; these do not. */
+  --volto-ink-on-light: #141414;
+  --volto-ink-muted-on-light: rgba(20, 20, 20, 0.52);
+  --volto-ink-dim-on-light: rgba(20, 20, 20, 0.36);
+  --volto-ink-border-on-light: rgba(20, 20, 20, 0.14);
+  --volto-download-card-muted: rgba(20, 20, 20, 0.68);
+  --volto-download-card-chip: rgba(20, 20, 20, 0.1);
+  --volto-download-card-border: rgba(20, 20, 20, 0.16);
+  --volto-download-card-focus: rgba(242, 242, 242, 0.86);
+  --volto-text-placeholder: #bfbfbf;
+  --volto-text-on-accent: #ffffff;
+  --volto-text-on-status: #07130c;
+  /* Hue 210, sampled from the reference UIs rather than picked: their status dot is
+     #007cf7 and their link and section headings are #42a0ff, both hue 210. The palette
+     sat at hue 206, which reads cyan next to them, and accent-text was 71% light,
+     which reads washed out. */
+  --volto-accent: #007cf7;
+  --volto-accent-hover: #1f8fff;
+  --volto-accent-text: #42a0ff;
+  --volto-accent-soft: rgba(0, 124, 247, 0.16);
+  --volto-accent-strong: rgba(0, 124, 247, 0.34);
+  --volto-settings-text-muted: rgba(255, 255, 255, 0.59);
+  --volto-provider-codex: var(--volto-text-primary);
+  --volto-provider-claude: #d97757;
+  --volto-provider-grok: var(--volto-text-primary);
+  /* The Gemini brand colour that Simple Icons gives. */
+  --volto-provider-antigravity: #8e75b2;
+  /* A chart series needs a hue of its own: the logo colours above give codex and grok the
+     same white, which no reader can tell apart in two overlaid areas. Validated together
+     with the dataviz skill's checker -
+     node scripts/validate_palette.js "#d6adf2,#d97757,#6bc7d9" --mode dark --surface "#1a1a1a"
+     - for colour-vision separation and contrast on the canvas. */
+  --volto-chart-series-codex: #d6adf2;
+  --volto-chart-series-claude: var(--volto-provider-claude);
+  --volto-chart-series-grok: #6bc7d9;
+  --volto-chart-series-other: var(--volto-text-muted);
+  /* The storage bar: five hues in this fixed order, then neutral app data. Validated with
+     node scripts/validate_palette.js "#3987e5,#d95926,#199e70,#9085e9,#c98500" --mode dark --surface "#1a1a1a"
+     and again on #212121. */
+  --volto-chart-storage-workspaces: #3987e5;
+  --volto-chart-storage-files: #d95926;
+  --volto-chart-storage-chats: #199e70;
+  --volto-chart-storage-downloads: #9085e9;
+  --volto-chart-storage-runtimes: #c98500;
+  --volto-chart-storage-app: var(--volto-text-dim);
+  --volto-logo-production: #d6adf2;
+  --volto-logo-eye: #040007;
+  /* The eyes of the release logo. The logo color setting changes it with `--volto-logo-production`;
+     a dev or preview logo keeps `--volto-logo-eye`. */
+  --volto-logo-production-eye: var(--volto-logo-eye);
+  /* The build colors of the logo match the app icons in `build/icon-*.png`, so the Dock, the app
+     and the Dynamic Island show one color for each build. They are brand colors, not status
+     colors: a change to warning or success does not change them. */
+  --volto-logo-dev: #e3b866;
+  --volto-logo-preview: #61c985;
+  --volto-unread-surface: #74b9ff;
+  --volto-unread-text: #07131f;
+  /* The last hue that had not been retuned with the rest. #61c985 was OKLCH chroma
+     0.139 while accent, warning and danger now average 0.205, so green was the one
+     family member that still read as a disabled tint beside them. Matching 0.205 is
+     not possible: sRGB tops out at 0.195 along this hue, and that ceiling value
+     (#00d271) is a neon with no headroom, which every renderer clips differently.
+     0.180 is the usable step, and lightness is held at the old 0.756 so contrast on
+     the canvas is unchanged at 8.5:1 and no text legibility moves. */
+  --volto-success: #31cf76;
+  /* Status text sits on neutral surfaces; status fills have separate contrast needs. */
+  --volto-success-text: #31cf76;
+  --volto-warning-text: #ff9412;
+  --volto-danger-text: #ff6069;
+  --volto-success-soft: rgba(49, 207, 118, 0.12);
+  --volto-success-wash: rgba(49, 207, 118, 0.045);
+  /* Both warning marks in the reference measure hue 33 at full saturation (#ff9917 on
+     the triangle, #ff9412 on the heading). The palette's #e3b866 was a desaturated gold
+     at hue 39, which reads as a disabled state rather than as something needing attention. */
+  --volto-warning: #ff9412;
+  --volto-warning-soft: rgba(255, 148, 18, 0.12);
+  --volto-question-option: #6bc7d9;
+  --volto-question-option-soft: rgba(107, 199, 217, 0.14);
+  --volto-question-option-hover: rgba(107, 199, 217, 0.2);
+  --volto-question-option-pressed: rgba(107, 199, 217, 0.26);
+  --volto-island-identity-name: var(--volto-text-primary);
+  --volto-question-badge-text: #8bdee8;
+  --volto-question-badge-soft: rgba(107, 199, 217, 0.16);
+  --volto-message-badge-text: #91c8ff;
+  --volto-message-badge-soft: rgba(116, 185, 255, 0.16);
+  /* The "new thing is available" pill. It is deliberately not --volto-accent: an
+     announcement is not an action. */
+  --volto-badge-new: #ff1e5e;
+  --volto-badge-new-soft: rgba(255, 30, 94, 0.16);
+  /* The moving border of an offer, such as the hosted server offer: teal, blue, then pink. */
+  --volto-beam-teal: var(--volto-file-teal);
+  --volto-beam-blue: var(--volto-accent-text);
+  --volto-beam-pink: var(--volto-file-pink);
+  --volto-approval-badge-soft: rgba(255, 148, 18, 0.18);
+  /* One red. The palette carried four families - danger (#e47d75), danger-strong
+     (#ff4058), settings-danger (#eb4145) and button-destructive (oklch, #ff6467) -
+     all between hue 352 and 359, i.e. the same red at four saturations, and the
+     settings family existed only to re-override button-destructive inside one modal.
+     #fd2f3b is the reference's count badge. The five steps below are roles, not
+     shades: solid fill, its hover, tinted fill, its hover, ring, border. */
+  --volto-danger: #fd2f3b;
+  --volto-danger-hover: #fd5d67;
+  --volto-danger-soft: rgba(253, 47, 59, 0.16);
+  --volto-danger-soft-hover: rgba(253, 47, 59, 0.28);
+  --volto-danger-focus: rgba(253, 47, 59, 0.4);
+  --volto-danger-border: rgba(253, 47, 59, 0.5);
+  /* Literal values: the mobile themes repeat these in tokens-native.css, where var() resolves to
+   * nothing. They equal warning, question-option, success, danger and accent-text. */
+  --volto-file-blue: #74b9ff;
+  --volto-file-blue-soft: rgba(116, 185, 255, 0.14);
+  --volto-file-yellow: #ff9412;
+  --volto-file-yellow-soft: rgba(255, 148, 18, 0.12);
+  --volto-file-orange: #f0a06a;
+  --volto-file-orange-soft: rgba(240, 160, 106, 0.14);
+  --volto-file-teal: #6bc7d9;
+  --volto-file-teal-soft: rgba(107, 199, 217, 0.14);
+  --volto-file-green: #31cf76;
+  --volto-file-green-soft: rgba(49, 207, 118, 0.12);
+  --volto-file-red: #fd2f3b;
+  --volto-file-red-soft: rgba(253, 47, 59, 0.16);
+  --volto-file-pink: #d98ac9;
+  --volto-file-pink-soft: rgba(217, 138, 201, 0.14);
+  --volto-file-default: #42a0ff;
+  --volto-file-default-soft: rgba(0, 124, 247, 0.14);
+  --volto-data-table-border: #303030;
+  --volto-data-table-header-text: #a1a1a1;
+  --volto-data-table-text: #f5f5f5;
+  --volto-data-table-outer-border: rgba(255, 255, 255, 0);
+  --volto-data-table-ring: rgba(255, 255, 255, 0.12);
+  --volto-shadow-popover-ambient: rgba(0, 0, 0, 0.1);
+  --volto-shadow-dialog: rgba(0, 0, 0, 0.48);
+  --volto-shadow-menu: rgba(0, 0, 0, 0.45);
+  --volto-shadow-dynamic-island: rgba(0, 0, 0, 0.6);
+  --volto-shadow-ring: rgba(228, 228, 228, 0.04);
+  --volto-border-on-light: rgba(20, 20, 20, 0.14);
+  --volto-hover: rgba(255, 255, 255, 0.06);
+  --volto-font-sans: "Inter Variable", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  --volto-font-mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Monaco, Consolas, monospace;
+  /* Six steps, one line-height each, named for the step it pairs with. The scale had
+   * sixteen sizes and eight line-heights, four of them a single call site, which is how
+   * an 11px size ended up paired with a 26px line-height. scripts/ui-foundation-check.ts
+   * holds "untokenized font-size" at zero, so a size that is not here has nowhere to go. */
+  --volto-text-sm: 12px;
+  --volto-text-md: 13px;
+  --volto-text-lg: 14px;
+  --volto-text-xl: 16px;
+  --volto-text-2xl: 18px;
+  --volto-text-3xl: 24px;
+  --volto-leading-sm: 16px;
+  --volto-leading-md: 18px;
+  --volto-leading-lg: 20px;
+  --volto-leading-xl: 22px;
+  --volto-leading-2xl: 24px;
+  --volto-leading-3xl: 30px;
+
+  /* Not scale steps, and named for their surface so they do not read as one. Three
+   * full-bleed screens (login wordmark, first-run setup, onboarding) and the public
+   * landing page carry type above 24px; .landing-hero-logo is sized in em off
+   * --volto-text-hero, so that token is layout, not just type. */
+  --volto-text-display: 32px;
+  --volto-text-usage-total: clamp(2rem, 5cqi, 3.5rem);
+  --volto-leading-display: 38px;
+  --volto-text-hero: clamp(3rem, 8vw, 6.5rem);
+
+  /* Glyphs, not copy: a file-extension string inside a fixed 16-24px chip. Below the
+   * scale's floor because the container is fixed, not because the text is small. Outside
+   * the text-* namespace so text-* means exactly the six steps above. */
+  --volto-glyph-xs: 7px;
+  --volto-glyph-sm: 8px;
+
+  --volto-weight-regular: 400;
+  --volto-weight-medium: 500;
+  --volto-weight-semibold: 600;
+  --volto-weight-bold: 700;
+  --volto-tracking-tight: -0.1px;
+  --volto-tracking-normal: 0;
+  --volto-tracking-wide: 0.02em;
+  --volto-space-0-5: 2px;
+  --volto-space-1: 4px;
+  --volto-space-1-5: 6px;
+  --volto-space-2: 8px;
+  --volto-space-3: 12px;
+  --volto-space-4: 16px;
+  --volto-space-6: 24px;
+  --volto-space-8: 32px;
+  --volto-scrollbar-size: 8px;
+  --volto-radius-xs: 4px;
+  --volto-radius-sm: 6px;
+  --volto-radius-md: 8px;
+  --volto-radius-lg: 12px;
+  --volto-radius-card: 14px;
+  --volto-radius-xl: 20px;
+  --volto-radius-bubble: 22px;
+  --volto-radius-bubble-inset: calc(var(--volto-radius-bubble) - var(--volto-space-3) - 1px);
+  --volto-radius-modal: 30px;
+  --volto-radius-media-preview: calc(var(--volto-radius-lg) - 1px);
+  --volto-radius-pill: 999px;
+  --volto-radius-logo: 20%;
+  --volto-control-xs: 24px;
+  --volto-control-sm: 28px;
+  --volto-control-md: 32px;
+  --volto-control-lg: 36px;
+  --volto-control-xl: 40px;
+  /* The switch follows the same compact pill proportions across desktop and web.
+   * Keep its geometry named so the motion code can measure the same inset and travel
+   * that CSS paints. */
+  --volto-switch-width: 36px;
+  --volto-switch-height: 20px;
+  --volto-switch-thumb: 16px;
+  --volto-switch-inset: 2px;
+  --volto-switch-sm-width: 24px;
+  --volto-switch-sm-height: 14px;
+  --volto-switch-sm-thumb: 12px;
+  --volto-switch-sm-inset: 1px;
+  /* Unitless on purpose. Lucide icons carry viewBox="0 0 24 24", so CSS stroke-width
+   * resolves in user units, not px: a literal 1px paints 1 * (16/24) = 0.67 device px at
+   * the 16px default size and reads blurry. 1.5 user units is the 1px the design asks for.
+   *
+   * Which is also why three kinds of SVG keep a weight of their own rather than reading
+   * this: the hand-written icons under src/renderer/src/features draw on a 16- or 20-unit
+   * viewBox, so the same number paints a different device weight there; the onboarding
+   * computer is a drawing, not an icon; and the checkbox tick would come out at 0.75
+   * device px inside its 12px box. Every lucide icon in the renderer reads this token. */
+  --volto-icon-stroke: 1.5;
+  --volto-icon-xs: 12px;
+  --volto-icon-sm: 14px;
+  --volto-icon-md: 16px;
+  --volto-icon-lg: 20px;
+  --volto-chat-entry-gap: var(--volto-space-3);
+  --volto-chat-marker-gap: var(--volto-space-1);
+  --volto-chat-marker-height: var(--volto-control-xs);
+  --volto-chat-marker-avatar: var(--volto-icon-md);
+  /* Keep container-relative calculations at the CSS use site for native consumers. */
+  --volto-chat-marker-width: 680px;
+  --volto-duration-fast: 120ms;
+  --volto-duration-hover: 0ms;
+  --volto-duration-dialog: 100ms;
+  --volto-duration-normal: 160ms;
+  --volto-duration-slow: 200ms;
+  --volto-duration-overlay: 240ms;
+  --volto-duration-toast-enter: 340ms;
+  --volto-duration-toast-exit: 220ms;
+  --volto-duration-island-content: 340ms;
+  --volto-duration-island-content-exit: 220ms;
+  --volto-agent-activity-exit-delay: 500ms;
+  /* A loading indicator waits this long, so a fast answer replaces it before it shows. */
+  --volto-loading-indicator-delay: 400ms;
+  --volto-ease-out: cubic-bezier(0.23, 1, 0.32, 1);
+  --volto-ease-in-out: cubic-bezier(0.77, 0, 0.175, 1);
+  --volto-shadow-raised: 0 12px 32px var(--volto-shadow-popover-ambient);
+  --volto-shadow-card: 0 0 0 transparent;
+  --volto-shadow-overlay: 0 12px 32px rgba(0, 0, 0, 0.48);
+  --volto-focus-ring: 0 0 0 1px var(--volto-border-focus);
+  --volto-layer-dropdown: 40;
+  --volto-layer-popover: 60;
+  --volto-layer-dialog: 100;
+  /* A dialog that opens other surfaces over itself, such as the marketplace. Its own menus take
+     one above it, and a dialog it opens takes two, so the order is stated once here instead of
+     being re-derived by arithmetic at each surface - where a tie is decided by insertion order,
+     and the surface opened last wins only by accident. */
+  --volto-layer-dialog-host: calc(var(--volto-layer-dialog) + var(--volto-layer-popover));
+  --volto-layer-toast: 120;
+  /* A tooltip names the control under the pointer. It shows above every other layer, also above
+     a dialog or a menu that holds the control. */
+  --volto-layer-tooltip: 240;
+}
+
+/* Every surface that paints a provider - the picker mark, the update toast and its progress bar,
+   the usage icon, the account picker, the landing page - used to carry one rule per provider per
+   surface, so a new provider meant ten new rules across five stylesheets before it had a colour.
+   These rules are the only place a provider id meets its colour; a surface writes
+   `data-provider` on the element and reads `--volto-provider-current`. A provider with no rule
+   here falls back to the current text colour rather than to another provider's brand. */
+[data-provider] {
+  --volto-provider-current: currentcolor;
+}
+
+[data-provider="codex"] {
+  --volto-provider-current: var(--volto-provider-codex);
+}
+
+[data-provider="claude"] {
+  --volto-provider-current: var(--volto-provider-claude);
+}
+
+[data-provider="grok"] {
+  --volto-provider-current: var(--volto-provider-grok);
+}
+
+[data-provider="opencode"] {
+  --volto-provider-current: var(--volto-text-primary);
+}
+
+[data-provider="antigravity"] {
+  --volto-provider-current: var(--volto-provider-antigravity);
+}
+
+[data-provider="cursor"] {
+  --volto-provider-current: var(--volto-text-primary);
+}
+
+[data-provider="cline"] {
+  --volto-provider-current: var(--volto-text-primary);
+}
+
+[data-provider="acp"] {
+  --volto-provider-current: var(--volto-text-primary);
+}

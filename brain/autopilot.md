@@ -16,17 +16,17 @@
 ### 1) SSH fleet（受控主机，默认）
 1. 建 issue：标签 `lane-ready` + `p0|p1|p2`，可选 `backend:pi|agy|codex`。
 2. 正文可写 `依赖：#a #b` 与 `验收：\`命令\``。
-3. `lane-autodispatch` 自动 SSH 到对应主机 `openswarm-fleet lane assign`。
+3. `lane-autodispatch` 自动 SSH 到对应主机 `swrm-fleet lane assign`。
 4. 看状态：`~/phanes-ctl/bin/lane-autodispatch-status` 或 `lanes-status.json`。
 
-当前拓扑（目标 ≥10，实测可达 11）：M1–M4 pi@ib1–4；A1 agy@gocc；A2 agy@gorelay；CX1/CX3 codex@ib5；CX2/CX4 codex@govpn2；CX5 codex@govpn（内存紧，盯 swap）。**禁止 Copilot。** 控制面在 **box**，不依赖用户 Mac。
+当前拓扑（目标 ≥10，实测可达 11）：M1–M4 pi@node-1.example.invalid–4；A1 agy@broker；A2 agy@relay.example.invalid；CX1/CX3 codex@node-5.example.invalid；CX2/CX4 codex@worker-b.example.invalid；CX5 codex@worker-a.example.invalid（内存紧，盯 swap）。**禁止 Copilot。** 控制面在 **box**，不依赖用户 Mac。
 
 ### 2) GitHub issue bus（非受控执行器）
-协议见仓库 `openswarm/docs/BUS.md`。落地与冒烟任务：#225。概要：
+协议见仓库 `swrm/docs/BUS.md`。落地与冒烟任务：#225。概要：
 ```sh
-openswarm bus init <bus-owner>/<bus-repo>
-openswarm run --backend github-issue --cwd <target-repo> --base <sha> --task-file task.md
-openswarm bus-worker --bus <bus-repo> --name <executor> --backend codex --once
+swrm bus init <bus-owner>/<bus-repo>
+swrm run --backend github-issue --cwd <target-repo> --base <sha> --task-file task.md
+swrm bus-worker --bus <bus-repo> --name <executor> --backend codex --once
 ```
 受控主机请继续用 SSH fleet，不要改走 bus。
 

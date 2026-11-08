@@ -53,7 +53,7 @@ labels: p1,backend:agy
 e2e 进程返回预期退出码。
 实现与测试：为两个模式补充真实请求测试、清理逻辑和最小服务修正，预计 30+ LOC。
 
-验收：`python3 openbot/examples/org-health-local/test_serve.py`
+验收：`python3 volto/examples/org-health-local/test_serve.py`
 ```
 
 ## 不合格示例

@@ -13,7 +13,7 @@ spec = importlib.util.spec_from_file_location("autodispatch", Path(__file__).wit
 ad = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(ad)
 
-ARTIFACTS = {"openswarm/tests/.dde4xxx-00000000.so": "binary\n",
+ARTIFACTS = {"swrm/tests/.dde4xxx-00000000.so": "binary\n",
              ".lane-review/PR-1.md": "VERDICT: APPROVE\n"}
 
 

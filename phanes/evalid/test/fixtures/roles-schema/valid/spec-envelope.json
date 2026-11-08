@@ -1,0 +1,78 @@
+{
+  "schema_version": 1,
+  "kind": "spec",
+  "role": "evalid-spec",
+  "stage": "spec",
+  "change_id": "feature-example",
+  "attempt": 0,
+  "run_id": "run-spec-0001",
+  "issue_ref": "issue#1887",
+  "base_commit": "1111111111111111111111111111111111111111",
+  "head_commit": "2222222222222222222222222222222222222222",
+  "parents": [
+    "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+  ],
+  "producer": {
+    "backend": "codex",
+    "model": "gpt-6.1-sol",
+    "effort": "high",
+    "policy_digest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "tool_commit": "3333333333333333333333333333333333333333"
+  },
+  "artifacts": [
+    {
+      "name": "spec.json",
+      "sha256": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "media_type": "application/json"
+    }
+  ],
+  "payload": {
+    "spec_version": 1,
+    "scope": {
+      "allowed_files": [
+        "src/cli.js",
+        "test/cli.test.js"
+      ],
+      "excluded_files": [
+        "docs/**"
+      ]
+    },
+    "scenarios": [
+      {
+        "id": "S1",
+        "requirement_ref": "issue#1887",
+        "given": "a checked out repository",
+        "when": "the cli is started with --version",
+        "then": [
+          {
+            "channel": "exit",
+            "operator": "eq",
+            "expected": 0
+          },
+          {
+            "channel": "stdout",
+            "operator": "contains",
+            "expected": "xflow"
+          }
+        ],
+        "command_id": "C1"
+      }
+    ],
+    "commands": [
+      {
+        "id": "C1",
+        "argv": [
+          "node",
+          "bin/xflow.js",
+          "--version"
+        ],
+        "cwd": ".",
+        "expected_exit": 0,
+        "timeout_s": 60,
+        "environment_digest": "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+      }
+    ],
+    "tdd_mode": "red-green"
+  },
+  "evidence_id": "sha256:80e848c2de49d56eb76f549af425ae4eae78893ee9918b36e780f85c8b2cc2a5"
+}

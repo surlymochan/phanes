@@ -1,6 +1,6 @@
 # M10 #64: E2E for the browser tab sweep overlap guard (reliability 15)
 
-Repository: OpenBot desktop. Read AGENTS.md and src/backend/AGENTS.md first.
+Repository: volto desktop. Read AGENTS.md and src/backend/AGENTS.md first.
 Base: your commit b11bc81523, which adds an overlap guard to the browser tab sweep in src/backend/browser-host.ts.
 
 ## Task

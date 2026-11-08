@@ -1,0 +1,18 @@
+{
+  "schema_version": 1,
+  "role": "evalid-tdd",
+  "stage": "red",
+  "change_id": "feature-example",
+  "attempt": 0,
+  "run_id": "run-build-0009",
+  "base_commit": "1111111111111111111111111111111111111111",
+  "head_commit": "2222222222222222222222222222222222222222",
+  "inputs": [
+    {
+      "name": "spec.json",
+      "sha256": "sha256:9999999999999999999999999999999999999999999999999999999999999999"
+    }
+  ],
+  "policy_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "model": "gpt-6.1-sol"
+}

@@ -1,6 +1,6 @@
 # M10 #66: E2E for a signed webhook request that starts a routine (tests 1)
 
-Repository: OpenBot desktop (Electron, Bun, TypeScript, SolidJS). Read AGENTS.md and the AGENTS.md of every
+Repository: Volto desktop (Electron, Bun, TypeScript, SolidJS). Read AGENTS.md and the AGENTS.md of every
 directory you change, and follow them.
 
 ## Scope
@@ -37,7 +37,7 @@ Add `scripts/webhook-routine-e2e.ts`. It starts the real `HostEventsService` on 
 with a fake account service and a fake routine scheduler. It sends signed requests for: a matching
 event, a wrong event type, a wrong filter value, a repeated delivery ID, a bad signature, an old
 timestamp, a body over 64 KiB, and a wrong content type. It asserts the status code, the receipt
-row, and the run instruction. It writes `.openbot-build/webhook-routine-e2e/report.json`. Add the
+row, and the run instruction. It writes `.volto-build/webhook-routine-e2e/report.json`. Add the
 same script to the `reverse-actions-e2e` job in `.github/workflows/ci.yml`.
 
 **Size: M**
@@ -50,7 +50,7 @@ same script to the `reverse-actions-e2e` job in `.github/workflows/ci.yml`.
 - First confirm each finding against the current code. If upstream already fixed or covered it, do not change it:
   report "already fixed" with the file and line that show it. That is a valid result.
 - Do every finding in scope before you finish; report each one as fixed / already fixed / not fixed (why).
-- Smallest change that fixes the behavior. No new dependency. User-visible text comes from `@openbot/i18n` catalog
+- Smallest change that fixes the behavior. No new dependency. User-visible text comes from `@volto/i18n` catalog
   keys (read docs/i18n.md before adding a key; add it to every locale). Errors that main/backend send use `sourceText(key)`.
 - Tests: E2E scripts under `scripts/` only (repository rule); vitest only for the protected areas named in AGENTS.md.
   Do not add a package.json script; run a new script with `bun scripts/<name>.ts`. Running this repository's own

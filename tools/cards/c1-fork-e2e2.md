@@ -1,6 +1,6 @@
 # Continue: two fork E2E checks still fail after the upstream sync
 
-Repository: OpenBot desktop. Read AGENTS.md and src/backend/AGENTS.md. Base: your commit `2d8949daba` (one product fix in `src/backend/mailbox-store.ts`: message batching no
+Repository: volto desktop. Read AGENTS.md and src/backend/AGENTS.md. Base: your commit `2d8949daba` (one product fix in `src/backend/mailbox-store.ts`: message batching no
 longer adds queued messages to a run-now turn). Main is `fd5719fc7f`; the fork before the sync is `44c1e550da` (compare behavior with `git worktree add` at that commit when needed).
 
 ## State after your first run

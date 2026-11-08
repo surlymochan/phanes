@@ -8,7 +8,7 @@
 
 ## 一、背景与核心评测基准回顾
 
-在 2026-10-18 的 SWE-bench Verified 实验中（详见 [`openswarm/bench/swebench/README.md`](file:///Users/surlymo/.claude/openswarm-executor-candidate/lanes/A1/wt/openswarm/bench/swebench/README.md) 及 [`openswarm/README.md`](file:///Users/surlymo/.claude/openswarm-executor-candidate/lanes/A1/wt/openswarm/README.md#L16-L37)），针对 6 个真实困难问题（来自 sympy、pytest、pylint，难度在 1-4 小时区间）使用 `deepseek-flash` 进行了 4 个 Arm 的横向对比（n=1，独立 TMPDIR 重测后）：
+在 2026-10-18 的 SWE-bench Verified 实验中（详见 [`openswarm/bench/swebench/README.md`](file:///path/to/operator/.claude/openswarm-executor-candidate/lanes/A1/wt/openswarm/bench/swebench/README.md) 及 [`openswarm/README.md`](file:///path/to/operator/.claude/openswarm-executor-candidate/lanes/A1/wt/openswarm/README.md#L16-L37)），针对 6 个真实困难问题（来自 sympy、pytest、pylint，难度在 1-4 小时区间）使用 `deepseek-flash` 进行了 4 个 Arm 的横向对比（n=1，独立 TMPDIR 重测后）：
 
 | Arm | 解决率 (Official Tests) | 耗时中位数 (IQR) | 单任务成本中位数 (DeepSeek) | 总成本 (6 runs) | 输入+输出 Token 中位数 |
 | --- | --- | --- | --- | --- | --- |
@@ -32,14 +32,14 @@
 - **目标定义**：降低 openswarm 工作流带来的额外耗时（降低至接近 baseline）与 Token 冗余开销，提升成本效益比。
 - **代码现状与证据**：
   1. **Planner 独立会话与冗余 Prompt**：
-     - 在 [`openswarm/bench/swebench/harness/arms.py`](file:///Users/surlymo/.claude/openswarm-executor-candidate/lanes/A1/wt/openswarm/bench/swebench/harness/arms.py#L160-L179)，`PLANNER` 提示词模版将完整的 [`openswarm/SKILL.md`](file:///Users/surlymo/.claude/openswarm-executor-candidate/lanes/A1/wt/openswarm/SKILL.md) 全量注入（数千 Token），并包含长篇工程任务说明。
-     - 在 [`openswarm/bench/swebench/harness/arms.py`](file:///Users/surlymo/.claude/openswarm-executor-candidate/lanes/A1/wt/openswarm/bench/swebench/harness/arms.py#L183-L207) 的 `arm_openswarm` 中，流程被强制分为两段：先启动一个 300 秒超时的独立 Pi 会话生成 `executor-task.md` 与 `verify.txt`（L189: `run_pi(tid + "-plan", ...)`），随后才执行 `openswarm run` 启动真实的执行器。这导致了双重冷启动和额外的整轮大模型往返开销。
+     - 在 [`openswarm/bench/swebench/harness/arms.py`](file:///path/to/operator/.claude/openswarm-executor-candidate/lanes/A1/wt/openswarm/bench/swebench/harness/arms.py#L160-L179)，`PLANNER` 提示词模版将完整的 [`openswarm/SKILL.md`](file:///path/to/operator/.claude/openswarm-executor-candidate/lanes/A1/wt/openswarm/SKILL.md) 全量注入（数千 Token），并包含长篇工程任务说明。
+     - 在 [`openswarm/bench/swebench/harness/arms.py`](file:///path/to/operator/.claude/openswarm-executor-candidate/lanes/A1/wt/openswarm/bench/swebench/harness/arms.py#L183-L207) 的 `arm_openswarm` 中，流程被强制分为两段：先启动一个 300 秒超时的独立 Pi 会话生成 `executor-task.md` 与 `verify.txt`（L189: `run_pi(tid + "-plan", ...)`），随后才执行 `openswarm run` 启动真实的执行器。这导致了双重冷启动和额外的整轮大模型往返开销。
   2. **评测数据证据**：
-     - 在 [`openswarm/bench/swebench/results/deepseek/summary.json`](file:///Users/surlymo/.claude/openswarm-executor-candidate/lanes/A1/wt/openswarm/bench/swebench/results/deepseek/summary.json#L143-L165)，openswarm 中位耗时为 228.35s（baseline 为 124.45s，见 L11-L15）；总输入输出 Token 中位数为 105,651（baseline 为 78,779，见 L18）；单任务成本中位数高出 61.5%（$0.0377 vs $0.0234）。
+     - 在 [`openswarm/bench/swebench/results/deepseek/summary.json`](file:///path/to/operator/.claude/openswarm-executor-candidate/lanes/A1/wt/openswarm/bench/swebench/results/deepseek/summary.json#L143-L165)，openswarm 中位耗时为 228.35s（baseline 为 124.45s，见 L11-L15）；总输入输出 Token 中位数为 105,651（baseline 为 78,779，见 L18）；单任务成本中位数高出 61.5%（$0.0377 vs $0.0234）。
   3. **运行时流程与工作区开销**：
-     - 在 [`openswarm/bin/openswarm`](file:///Users/surlymo/.claude/openswarm-executor-candidate/lanes/A1/wt/openswarm/bin/openswarm#L5129-L5351) 中，`cmd_run` 虽通过 `--no-worktree`（`arms.py` L204）略过了二次工作树复制，但后续的 [`run_verify`](file:///Users/surlymo/.claude/openswarm-executor-candidate/lanes/A1/wt/openswarm/bin/openswarm#L4940-L4947) 宿主机检验直接调用 pytest/node，在大型测试套件下无局部裁剪，拖长总耗时。
+     - 在 [`openswarm/bin/openswarm`](file:///path/to/operator/.claude/openswarm-executor-candidate/lanes/A1/wt/openswarm/bin/openswarm#L5129-L5351) 中，`cmd_run` 虽通过 `--no-worktree`（`arms.py` L204）略过了二次工作树复制，但后续的 [`run_verify`](file:///path/to/operator/.claude/openswarm-executor-candidate/lanes/A1/wt/openswarm/bin/openswarm#L4940-L4947) 宿主机检验直接调用 pytest/node，在大型测试套件下无局部裁剪，拖长总耗时。
   4. **优化进展评估**：
-     - 代码库中目前 `openswarm run` 具备直接传入 `--prompt` 或 `--task-file` 的能力（[`openswarm/bin/openswarm`](file:///Users/surlymo/.claude/openswarm-executor-candidate/lanes/A1/wt/openswarm/bin/openswarm#L5116-L5120)），但 SWE-bench 评测体系尚未引入紧凑版任务计划或单会话直通模式（direct execution path），开销优化项仍处于完全开放（`open`）状态。
+     - 代码库中目前 `openswarm run` 具备直接传入 `--prompt` 或 `--task-file` 的能力（[`openswarm/bin/openswarm`](file:///path/to/operator/.claude/openswarm-executor-candidate/lanes/A1/wt/openswarm/bin/openswarm#L5116-L5120)），但 SWE-bench 评测体系尚未引入紧凑版任务计划或单会话直通模式（direct execution path），开销优化项仍处于完全开放（`open`）状态。
 - **下一步具体行动 (Next Concrete Step)**：
   1. **精简 Planner Prompt**：在 `openswarm/bench/swebench/harness/arms.py` 中移除完整 `SKILL.md`，换为专注于代码修复、目标文件识别与单行 verify 命令的精炼提示词（预计减少 40% 的 planner 输入 Token）。
   2. **支持轻量单轮 / 直通执行模式**：为 `arm_openswarm` 增加可选的直通执行分支（单会话合并 planner 与执行指令），针对单文件小改动跳过独立 planner 轮次。
@@ -53,15 +53,15 @@
 - **目标定义**：将 SWE-bench 的验证有效性判定、离线评分解析与数据流健康检查接入 CI，防止评测工具链回归。
 - **代码现状与证据**：
   1. **主线 CI 现状**：
-     - 查看 [`.github/workflows/phanes.yml`](file:///Users/surlymo/.claude/openswarm-executor-candidate/lanes/A1/wt/.github/workflows/phanes.yml#L1-L47)，CI 仅包含 `openswarm` 基础单元测试（L25: `python -m unittest discover -s tests -v`）、基于 demo-state 的离线 CLI 冒烟测试（L27-33: `openswarm status`, `openswarm route`），以及 openbot 的类型/i18n 检查（L34-47）。SWE-bench 相关组件未出现在任何工作流中。
+     - 查看 [`.github/workflows/phanes.yml`](file:///path/to/operator/.claude/openswarm-executor-candidate/lanes/A1/wt/.github/workflows/phanes.yml#L1-L47)，CI 仅包含 `openswarm` 基础单元测试（L25: `python -m unittest discover -s tests -v`）、基于 demo-state 的离线 CLI 冒烟测试（L27-33: `openswarm status`, `openswarm route`），以及 openbot 的类型/i18n 检查（L34-47）。SWE-bench 相关组件未出现在任何工作流中。
   2. **既有 Bench 测试局限**：
-     - 查看 [`openswarm/tests/test_bench.py`](file:///Users/surlymo/.claude/openswarm-executor-candidate/lanes/A1/wt/openswarm/tests/test_bench.py#L1-L60)，该测试仅校验合成路由基准测试（`make_trace.py`、`catalogue.json`、`trace.jsonl`），完全不涉及 `openswarm/bench/swebench/`。
+     - 查看 [`openswarm/tests/test_bench.py`](file:///path/to/operator/.claude/openswarm-executor-candidate/lanes/A1/wt/openswarm/tests/test_bench.py#L1-L60)，该测试仅校验合成路由基准测试（`make_trace.py`、`catalogue.json`、`trace.jsonl`），完全不涉及 `openswarm/bench/swebench/`。
   3. **离线测试资产未接入**：
-     - 在 [`openswarm/bench/swebench/test_validity.py`](file:///Users/surlymo/.claude/openswarm-executor-candidate/lanes/A1/wt/openswarm/bench/swebench/test_validity.py#L1-L150) 中，已实现了针对 MiniMax 运行有效性（`validity.py`）的 8 项单测，用于检测超时、网络泄露、空输出及异常运行。
+     - 在 [`openswarm/bench/swebench/test_validity.py`](file:///path/to/operator/.claude/openswarm-executor-candidate/lanes/A1/wt/openswarm/bench/swebench/test_validity.py#L1-L150) 中，已实现了针对 MiniMax 运行有效性（`validity.py`）的 8 项单测，用于检测超时、网络泄露、空输出及异常运行。
      - 本地实测表明：在设置 `PYTHONPATH=openswarm/bench/swebench` 时，这 8 项测试全部通过（`Ran 8 tests in 0.010s, OK`）；但由于其文件位于 `bench/swebench/` 且代码直接写 `import validity`（L11），导致默认的 `python -m unittest discover -s tests` 既无法扫描到它，直接执行也会产生 `ModuleNotFoundError: No module named 'validity'`。
   4. **其他未接入 CI 的工具**：
-     - [`openswarm/bench/swebench/harness/validate.py`](file:///Users/surlymo/.claude/openswarm-executor-candidate/lanes/A1/wt/openswarm/bench/swebench/harness/validate.py#L1-L80) 包含金标补丁（gold patch）离线验证逻辑；
-     - [`openswarm/bench/swebench/report.py`](file:///Users/surlymo/.claude/openswarm-executor-candidate/lanes/A1/wt/openswarm/bench/swebench/report.py#L29-L45) 包含数据泄露（leak scan）检查与统计报表汇总；这些离线工具均无自动化测试守卫。
+     - [`openswarm/bench/swebench/harness/validate.py`](file:///path/to/operator/.claude/openswarm-executor-candidate/lanes/A1/wt/openswarm/bench/swebench/harness/validate.py#L1-L80) 包含金标补丁（gold patch）离线验证逻辑；
+     - [`openswarm/bench/swebench/report.py`](file:///path/to/operator/.claude/openswarm-executor-candidate/lanes/A1/wt/openswarm/bench/swebench/report.py#L29-L45) 包含数据泄露（leak scan）检查与统计报表汇总；这些离线工具均无自动化测试守卫。
 - **下一步具体行动 (Next Concrete Step)**：
   1. **测试迁移与导入修复**：将 `openswarm/bench/swebench/test_validity.py` 修复导入路径（支持模块化 import 或在 `openswarm/tests/` 建立薄包装 `test_swebench_validity.py`），使 `unittest discover -s tests` 能直接自动发现并运行。
   2. **新增离线 Harness 单元测试**：在 `openswarm/tests/` 下新增 `test_swebench_harness.py`，覆盖：
@@ -78,17 +78,17 @@
 - **目标定义**：扩展 SWE-bench 评测至完整实例池、增加重复次数以消除统计噪声、解决 MiniMax 配额超限问题，并接入 Phanes 统一后端的更多模型。
 - **代码现状与证据**：
   1. **实例池定义与既有范围差距**：
-     - 在 [`openswarm/bench/swebench/instances.json`](file:///Users/surlymo/.claude/openswarm-executor-candidate/lanes/A1/wt/openswarm/bench/swebench/instances.json#L5-L20)，Round 2 已定义并选定了 12 个真实 GitHub 实例（覆盖 sympy 7 个、pytest 3 个、pylint 2 个在 1-4 小时和 >4 小时的全部 Verified 题）。
-     - 然而当前评测报告（[`openswarm/bench/swebench/README.md`](file:///Users/surlymo/.claude/openswarm-executor-candidate/lanes/A1/wt/openswarm/bench/swebench/README.md#L6-L8)）中仅跑了 6 个实例（`pylint-8898`, `pytest-10356`, `pytest-5787`, `pytest-6197`, `sympy-14248`, `sympy-17630`）。剩余的 6 个实例（`sympy-12489`, `sympy-13852`, `sympy-13878`, `sympy-16597`, `sympy-18199`, `pylint-4551`）尚未在 4 个 arm 上执行。
+     - 在 [`openswarm/bench/swebench/instances.json`](file:///path/to/operator/.claude/openswarm-executor-candidate/lanes/A1/wt/openswarm/bench/swebench/instances.json#L5-L20)，Round 2 已定义并选定了 12 个真实 GitHub 实例（覆盖 sympy 7 个、pytest 3 个、pylint 2 个在 1-4 小时和 >4 小时的全部 Verified 题）。
+     - 然而当前评测报告（[`openswarm/bench/swebench/README.md`](file:///path/to/operator/.claude/openswarm-executor-candidate/lanes/A1/wt/openswarm/bench/swebench/README.md#L6-L8)）中仅跑了 6 个实例（`pylint-8898`, `pytest-10356`, `pytest-5787`, `pytest-6197`, `sympy-14248`, `sympy-17630`）。剩余的 6 个实例（`sympy-12489`, `sympy-13852`, `sympy-13878`, `sympy-16597`, `sympy-18199`, `pylint-4551`）尚未在 4 个 arm 上执行。
   2. **样本重复度与置信度差距**：
-     - 在 [`openswarm/bench/swebench/README.md`](file:///Users/surlymo/.claude/openswarm-executor-candidate/lanes/A1/wt/openswarm/bench/swebench/README.md#L35-L43) 的 Caveats 中明确指明：“n = 1 run on 6 instances (not 3 repeats on 12); differences of one or two resolved runs are within noise”。需要扩展到 `reps 3` 才能提供具备统计学意义的对比。
+     - 在 [`openswarm/bench/swebench/README.md`](file:///path/to/operator/.claude/openswarm-executor-candidate/lanes/A1/wt/openswarm/bench/swebench/README.md#L35-L43) 的 Caveats 中明确指明：“n = 1 run on 6 instances (not 3 repeats on 12); differences of one or two resolved runs are within noise”。需要扩展到 `reps 3` 才能提供具备统计学意义的对比。
   3. **MiniMax 用量超限未闭环**：
-     - 在 [`openswarm/bench/swebench/results/minimax/`](file:///Users/surlymo/.claude/openswarm-executor-candidate/lanes/A1/wt/openswarm/bench/swebench/results/minimax/) 与 README 中记录，MiniMax-M3.1-Flash-Preview 矩阵中 openswarm 和 openflow 因遭遇 API usage cap / 429 报错，没有产出任何干净的完成记录，导致仅有 baseline (3/4) 与 superpowers (2/4) 的不完整表。
+     - 在 [`openswarm/bench/swebench/results/minimax/`](file:///path/to/operator/.claude/openswarm-executor-candidate/lanes/A1/wt/openswarm/bench/swebench/results/minimax/) 与 README 中记录，MiniMax-M3.1-Flash-Preview 矩阵中 openswarm 和 openflow 因遭遇 API usage cap / 429 报错，没有产出任何干净的完成记录，导致仅有 baseline (3/4) 与 superpowers (2/4) 的不完整表。
   4. **执行器后端单一，未利用 Phanes 异构能力**：
-     - 当前 [`openswarm/bench/swebench/harness/arms.py`](file:///Users/surlymo/.claude/openswarm-executor-candidate/lanes/A1/wt/openswarm/bench/swebench/harness/arms.py#L11) 的所有模型调用均硬编码通过 `run_pi.sh`（Pi 代理），无法评测其他高阶模型。
-     - 而在当前 Phanes 仓库（[`HANDOFF.md`](file:///Users/surlymo/.claude/openswarm-executor-candidate/lanes/A1/wt/HANDOFF.md#L5-L17) 及 [`openswarm/backends/`](file:///Users/surlymo/.claude/openswarm-executor-candidate/lanes/A1/wt/openswarm/backends/)）中，已统一集成了 Codex (`gpt-6-luna`), Antigravity (`gemini-3.8-flash-medium`), GitHub Copilot (`claude-sonnet-5.5` / `claude-haiku-5.5`) 等多种执行器后端，这些后端尚未接入 SWE-bench 进行评测。
+     - 当前 [`openswarm/bench/swebench/harness/arms.py`](file:///path/to/operator/.claude/openswarm-executor-candidate/lanes/A1/wt/openswarm/bench/swebench/harness/arms.py#L11) 的所有模型调用均硬编码通过 `run_pi.sh`（Pi 代理），无法评测其他高阶模型。
+     - 而在当前 Phanes 仓库（[`HANDOFF.md`](file:///path/to/operator/.claude/openswarm-executor-candidate/lanes/A1/wt/HANDOFF.md#L5-L17) 及 [`openswarm/backends/`](file:///path/to/operator/.claude/openswarm-executor-candidate/lanes/A1/wt/openswarm/backends/)）中，已统一集成了 Codex (`gpt-6-luna`), Antigravity (`gemini-3.8-flash-medium`), GitHub Copilot (`claude-sonnet-5.5` / `claude-haiku-5.5`) 等多种执行器后端，这些后端尚未接入 SWE-bench 进行评测。
   5. **运行器基础设施已完备**：
-     - [`openswarm/bench/swebench/run.py`](file:///Users/surlymo/.claude/openswarm-executor-candidate/lanes/A1/wt/openswarm/bench/swebench/run.py#L1-L120) 已经内建支持 `--arms`, `--reps`, `--jobs`, `--only` 以及断点续跑（resumable jsonl），具备立即扩展评测的能力。
+     - [`openswarm/bench/swebench/run.py`](file:///path/to/operator/.claude/openswarm-executor-candidate/lanes/A1/wt/openswarm/bench/swebench/run.py#L1-L120) 已经内建支持 `--arms`, `--reps`, `--jobs`, `--only` 以及断点续跑（resumable jsonl），具备立即扩展评测的能力。
 - **下一步具体行动 (Next Concrete Step)**：
   1. **放开 12 实例完整矩阵评测**：移除 `run.py` 的 `--only` 限制，对 `instances.json` 中全部 12 个 Round 2 实例发起评测。
   2. **执行多轮重复测试（reps=3）**：以 `--reps 3` 运行，获取每个 arm 在每个 instance 上的多次采样，计算稳定的成功率与四分位耗时（IQR）。

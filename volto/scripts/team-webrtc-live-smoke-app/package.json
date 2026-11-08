@@ -1,0 +1,5 @@
+{
+  "name": "volto-team-webrtc-live-smoke",
+  "private": true,
+  "main": "index.cjs"
+}

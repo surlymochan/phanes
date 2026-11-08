@@ -1,0 +1,203 @@
+.billing-lifecycle-panel {
+  container-type: inline-size;
+}
+
+.billing-lifecycle-card {
+  overflow: hidden;
+  border-radius: var(--volto-radius-lg);
+  background: var(--volto-bg-surface);
+  box-shadow: 0 0 0 1px var(--volto-border);
+}
+
+.billing-lifecycle-identity {
+  display: flex;
+  align-items: center;
+  gap: var(--volto-space-3);
+  padding: var(--volto-space-4);
+}
+
+.billing-lifecycle-server-icon,
+.billing-lifecycle-dialog-icon {
+  display: grid;
+  place-items: center;
+  flex-shrink: 0;
+  width: var(--volto-control-xl);
+  height: var(--volto-control-xl);
+  border-radius: var(--volto-radius-md);
+  color: var(--volto-text-secondary);
+  background: var(--volto-bg-control-hover);
+}
+
+.billing-lifecycle-server-icon svg,
+.billing-lifecycle-dialog-icon svg {
+  width: var(--volto-icon-lg);
+  height: var(--volto-icon-lg);
+}
+
+.billing-lifecycle-server-copy {
+  display: grid;
+  flex: 1;
+  min-width: 0;
+  gap: var(--volto-space-1);
+}
+
+.billing-lifecycle-billing {
+  display: flex;
+  align-items: center;
+  gap: var(--volto-space-3);
+  padding: var(--volto-space-4);
+  border-top: 1px solid var(--volto-border);
+}
+
+.billing-lifecycle-billing[data-scheduled] {
+  background: color-mix(in srgb, var(--volto-warning-soft) 35%, transparent);
+}
+
+.billing-lifecycle-billing-copy {
+  display: grid;
+  flex: 1;
+  min-width: 0;
+  gap: var(--volto-space-1);
+}
+
+.billing-lifecycle-calendar {
+  flex-shrink: 0;
+  width: var(--volto-icon-lg);
+  height: var(--volto-icon-lg);
+  color: var(--volto-warning-text);
+}
+
+.billing-lifecycle-receipt {
+  display: grid;
+  gap: var(--volto-space-3);
+  padding: var(--volto-space-4);
+  margin-bottom: var(--volto-space-4);
+  border-radius: var(--volto-radius-md);
+  background: var(--volto-bg-surface);
+}
+
+.billing-lifecycle-receipt > div {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--volto-space-4);
+}
+
+.billing-lifecycle-receipt > div > :last-child {
+  text-align: right;
+  text-wrap: pretty;
+}
+
+.billing-lifecycle-receipt > div > :first-child {
+  flex-shrink: 0;
+}
+
+@container (max-width: 450px) {
+  .billing-lifecycle-identity {
+    flex-wrap: wrap;
+    gap: var(--volto-space-2);
+  }
+
+  .billing-lifecycle-server-icon {
+    display: none;
+  }
+
+  .billing-lifecycle-server-copy {
+    flex-basis: 60%;
+  }
+
+  .billing-lifecycle-billing {
+    flex-wrap: wrap;
+  }
+
+  .billing-lifecycle-billing-copy {
+    flex-basis: 70%;
+  }
+}
+
+@media (max-width: 700px) {
+  .billing-lifecycle-receipt > div {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: var(--volto-space-1);
+  }
+
+  .billing-lifecycle-receipt > div > :last-child {
+    text-align: left;
+  }
+}
+
+.billing-lifecycle-menu.ui-action-menu {
+  z-index: var(--volto-layer-dialog-host);
+}
+
+.billing-lifecycle-list {
+  display: grid;
+  gap: var(--volto-space-3);
+}
+
+.billing-lifecycle-price {
+  display: grid;
+  justify-items: end;
+  gap: var(--volto-space-1);
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+
+.billing-lifecycle-timing {
+  display: grid;
+  gap: var(--volto-space-2);
+  margin-bottom: var(--volto-space-4);
+  font-size: var(--volto-text-sm);
+}
+
+.billing-lifecycle-timing-option {
+  display: flex;
+  align-items: center;
+  gap: var(--volto-space-2);
+  padding: var(--volto-space-3);
+  border: 1px solid var(--volto-border);
+  border-radius: var(--volto-radius-md);
+}
+
+.billing-lifecycle-timing-option[data-checked] {
+  border-color: var(--volto-accent);
+  background: var(--volto-bg-surface);
+}
+
+.billing-lifecycle-timing-option[data-focus-visible] {
+  outline: 1px solid var(--volto-accent);
+}
+
+.billing-lifecycle-timing-option label {
+  flex: 1;
+  cursor: pointer;
+}
+
+.billing-lifecycle-radio {
+  flex-shrink: 0;
+  width: var(--volto-icon-md);
+  height: var(--volto-icon-md);
+  border: 1px solid var(--volto-border-strong);
+  border-radius: var(--volto-radius-pill);
+}
+
+.billing-lifecycle-radio[data-checked] {
+  border-color: var(--volto-accent);
+  background: var(--volto-accent);
+  box-shadow: inset 0 0 0 var(--volto-space-1) var(--volto-bg-canvas);
+}
+
+@container (max-width: 450px) {
+  .billing-lifecycle-price {
+    order: 2;
+    width: 100%;
+    grid-template-columns: 1fr 1fr;
+    align-items: center;
+    justify-items: start;
+  }
+
+  .billing-lifecycle-price > :last-child {
+    justify-self: end;
+  }
+}

@@ -30,25 +30,25 @@ def main() -> None:
             "# Bus result delivery is idempotent\nlabels: p1,backend:pi\n"
             "Update the worker result path and tests. Cover successful delivery, "
             "a repeated identical result, and a conflicting result.\n"
-            "验收：`python3 -m unittest openswarm.tests.test_bus`\n"
+            "验收：`python3 -m unittest swrm.tests.test_bus`\n"
         ),
         "base-unavailable": (
             "# Reject unavailable repository bases before claim\nlabels: p1,backend:codex\n"
             "Update planner and worker checkout paths plus protocol tests. "
             "An unavailable base must fail before creating a branch or running verify; "
             "a reachable base must still complete normally.\n"
-            "验收：`python3 -m unittest openswarm.tests.test_github_issue_bus`\n"
+            "验收：`python3 -m unittest swrm.tests.test_github_issue_bus`\n"
         ),
         "invalid-result": (
             "# Ignore malformed result comments\nlabels: p1,backend:codex\n"
             "Validate result fields before accepting a terminal status. Test malformed "
             "comments followed by a valid winning result and confirm only the valid "
             "result is accepted.\n"
-            "验收：`python3 -m unittest openswarm.tests.test_github_issue_bus`\n"
+            "验收：`python3 -m unittest swrm.tests.test_github_issue_bus`\n"
         ),
     }
 
-    scratch_root = ROOT / ".openswarm-tmp"
+    scratch_root = ROOT / ".swrm-tmp"
     scratch_root.mkdir(exist_ok=True)
     with tempfile.TemporaryDirectory(dir=scratch_root) as raw:
         cards_dir = Path(raw)

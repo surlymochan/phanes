@@ -1,6 +1,6 @@
 # M10 #66: E2E for checking, downloading and relaunching for an update (tests 8)
 
-Repository: OpenBot desktop (Electron, Bun, TypeScript, SolidJS). Read AGENTS.md and the AGENTS.md of every
+Repository: Volto desktop (Electron, Bun, TypeScript, SolidJS). Read AGENTS.md and the AGENTS.md of every
 directory you change, and follow them.
 
 ## Scope
@@ -31,7 +31,7 @@ Add `scripts/update-service-e2e.ts`. It runs the real `UpdateService` with a fak
 answers like `electron-updater`. The file names the subset it needs at `src/main/update-service.ts:35`.
 The script checks: a check with no update, a check with an update, a download that fails, a download
 that succeeds, a relaunch that waits for an idle agent, and a cancel. It writes
-`.openbot-build/update-service-e2e/report.json`.
+`.volto-build/update-service-e2e/report.json`.
 
 **Size: M**
 
@@ -43,7 +43,7 @@ that succeeds, a relaunch that waits for an idle agent, and a cancel. It writes
 - First confirm each finding against the current code. If upstream already fixed or covered it, do not change it:
   report "already fixed" with the file and line that show it. That is a valid result.
 - Do every finding in scope before you finish; report each one as fixed / already fixed / not fixed (why).
-- Smallest change that fixes the behavior. No new dependency. User-visible text comes from `@openbot/i18n` catalog
+- Smallest change that fixes the behavior. No new dependency. User-visible text comes from `@volto/i18n` catalog
   keys (read docs/i18n.md before adding a key; add it to every locale). Errors that main/backend send use `sourceText(key)`.
 - Tests: E2E scripts under `scripts/` only (repository rule); vitest only for the protected areas named in AGENTS.md.
   Do not add a package.json script; run a new script with `bun scripts/<name>.ts`. Running this repository's own

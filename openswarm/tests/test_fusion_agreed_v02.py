@@ -16,7 +16,7 @@ import unittest
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-DOC = REPO_ROOT / "docs" / "fusion-openbot-openswarm-v0.2.md"
+DOC = REPO_ROOT / "docs" / "fusion-volto-openswarm-v0.2.md"
 
 
 def _text():
@@ -26,7 +26,7 @@ def _text():
 @unittest.skipUnless(DOC.exists(), "fusion agreement doc only exists in the phanes tree")
 class FusionAgreedV02DocTest(unittest.TestCase):
     def test_doc_exists(self):
-        self.assertTrue(DOC.is_file(), "docs/fusion-openbot-openswarm-v0.2.md missing")
+        self.assertTrue(DOC.is_file(), "docs/fusion-volto-openswarm-v0.2.md missing")
 
     def test_doc_has_at_least_80_lines(self):
         lines = _text().splitlines()

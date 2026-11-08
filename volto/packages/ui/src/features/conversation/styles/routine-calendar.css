@@ -1,0 +1,732 @@
+/* Routine calendar: the runs of every routine, by day, with the next runs beside them. */
+.routine-planner {
+  container-type: inline-size;
+  display: grid;
+  min-width: 0;
+  gap: var(--volto-space-4);
+  color: var(--volto-text-primary);
+}
+
+.routine-planner-header {
+  display: grid;
+  gap: var(--volto-space-3);
+}
+
+.routine-planner-title {
+  display: flex;
+  min-width: 0;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--volto-space-3);
+}
+
+.routine-planner-identity {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: var(--volto-space-2);
+}
+
+/* The arrow lines up with the content edge, not its hit area. */
+.routine-planner-identity .ui-icon-button {
+  margin-left: calc(-1 * var(--volto-space-2));
+}
+
+.routine-planner-title h2 {
+  font-size: var(--volto-text-lg);
+  font-weight: var(--volto-weight-semibold);
+}
+
+.routine-planner-title h2 span {
+  color: var(--volto-text-muted);
+  font-weight: var(--volto-weight-regular);
+}
+
+.routine-planner-title p,
+.routine-planner-note {
+  color: var(--volto-text-muted);
+  font-size: var(--volto-text-sm);
+}
+
+.routine-planner-toolbar {
+  display: flex;
+  min-width: 0;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--volto-space-2);
+}
+
+.routine-planner-nav {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: var(--volto-space-1);
+}
+
+.routine-planner-range {
+  margin-left: var(--volto-space-2);
+  font-size: var(--volto-text-md);
+  font-weight: var(--volto-weight-medium);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.routine-planner-clock-change {
+  border-radius: var(--volto-radius-md);
+  background: var(--volto-warning-soft);
+  padding: var(--volto-space-1-5) var(--volto-space-3);
+  color: var(--volto-warning-text);
+  font-size: var(--volto-text-sm);
+}
+
+.routine-planner-body {
+  display: grid;
+  min-width: 0;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 17rem);
+  align-items: start;
+  gap: var(--volto-space-4);
+}
+
+.routine-planner-grid {
+  display: grid;
+  min-width: 0;
+  gap: var(--volto-space-1);
+}
+
+.routine-planner-weekdays {
+  display: grid;
+  grid-template-columns: repeat(7, minmax(0, 1fr));
+  gap: var(--volto-space-1);
+  color: var(--volto-text-muted);
+  font-size: var(--volto-text-sm);
+}
+
+/* The day cell's border and padding, so that each head starts where its day starts. */
+.routine-planner-weekdays > * {
+  padding-inline: calc(1px + var(--volto-space-1-5));
+}
+
+/* Each day is a list, not a time grid: runs at the same minute stack and stay readable. */
+.routine-planner-week {
+  display: grid;
+  min-width: 0;
+  grid-template-columns: repeat(7, minmax(0, 1fr));
+  gap: var(--volto-space-1);
+}
+
+.routine-planner-day {
+  display: grid;
+  min-width: 0;
+  min-height: 12rem;
+  align-content: start;
+  gap: var(--volto-space-1);
+  border: 1px solid var(--volto-border-strong);
+  border-radius: var(--volto-radius-lg);
+  background: var(--volto-bg-surface);
+  padding: var(--volto-space-1-5);
+}
+
+.routine-planner-day[data-past] {
+  background: var(--volto-transparent);
+}
+
+.routine-planner-day[aria-current="date"] {
+  border-color: var(--volto-accent-strong);
+}
+
+.routine-planner-day-button.ui-button {
+  width: 100%;
+  justify-content: flex-start;
+  gap: var(--volto-space-1-5);
+  color: var(--volto-text-muted);
+}
+
+.routine-planner-day-button strong {
+  color: var(--volto-text-primary);
+  font-weight: var(--volto-weight-semibold);
+  font-variant-numeric: tabular-nums;
+}
+
+.routine-planner-day[aria-current="date"] .routine-planner-day-button strong {
+  color: var(--volto-accent-text);
+}
+
+.routine-planner-runs,
+.routine-planner-entries {
+  display: grid;
+  min-width: 0;
+  gap: var(--volto-space-0-5);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.routine-planner-status {
+  display: grid;
+  width: var(--volto-space-4);
+  height: var(--volto-space-4);
+  place-items: center;
+}
+
+.routine-planner-status > svg {
+  width: var(--volto-space-3);
+  height: var(--volto-space-3);
+  stroke-width: 2;
+}
+
+.routine-planner-status-dot {
+  width: var(--volto-space-2);
+  height: var(--volto-space-2);
+  border-radius: var(--volto-radius-pill);
+  background: var(--volto-accent);
+}
+
+.routine-planner-status[data-status="paused"] {
+  color: var(--volto-text-muted);
+}
+
+.routine-planner-status[data-status="failed"] {
+  color: var(--volto-danger-text);
+}
+
+.routine-planner-status[data-status="completed"] {
+  color: var(--volto-success-text);
+}
+
+.routine-planner-avatars {
+  display: flex;
+}
+
+.routine-planner-avatar.agent-avatar {
+  width: var(--volto-space-4);
+  height: var(--volto-space-4);
+}
+
+.routine-planner-avatars .routine-planner-avatar + .routine-planner-avatar {
+  margin-left: calc(var(--volto-space-1-5) * -1);
+}
+
+.routine-planner-run.ui-button {
+  display: grid;
+  width: 100%;
+  height: auto;
+  min-height: var(--volto-control-sm);
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  grid-template-areas:
+    "mark time avatars"
+    "name name name";
+  align-items: center;
+  gap: var(--volto-space-0-5) var(--volto-space-1);
+  border-radius: var(--volto-radius-sm);
+  background: var(--volto-bg-control);
+  padding: var(--volto-space-1) var(--volto-space-1-5);
+  text-align: left;
+  font-size: var(--volto-text-sm);
+}
+
+.routine-planner-run .routine-planner-status {
+  grid-area: mark;
+}
+
+.routine-planner-run-time {
+  grid-area: time;
+  color: var(--volto-text-muted);
+  font-variant-numeric: tabular-nums;
+}
+
+/* Two lines before an ellipsis: a day column is narrow, and the name is what tells runs apart. */
+.routine-planner-run-name {
+  display: -webkit-box;
+  grid-area: name;
+  min-width: 0;
+  overflow: hidden;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  line-height: 1.3;
+  overflow-wrap: break-word;
+  white-space: normal;
+}
+
+.routine-planner-run .routine-planner-avatars {
+  grid-area: avatars;
+}
+
+/* A paused run would happen if the routine resumed. It keeps its place but loses its weight. */
+.routine-planner-run[data-status="paused"],
+.routine-planner-entry[data-status="paused"] {
+  opacity: 0.6;
+}
+
+.routine-planner-run[data-status="paused"] {
+  outline: 1px dashed var(--volto-border-grouped);
+  outline-offset: -1px;
+  background: var(--volto-transparent);
+}
+
+.routine-planner-run[data-status="failed"] {
+  background: var(--volto-danger-soft);
+}
+
+.routine-planner-run[data-status="completed"] .routine-planner-run-name {
+  color: var(--volto-text-muted);
+}
+
+.routine-planner-more.ui-button {
+  justify-self: start;
+  color: var(--volto-text-muted);
+}
+
+/* A month has up to six rows of days: a run is one line, and the column heads name the weekdays. */
+.routine-planner[data-view="month"] .routine-planner-day {
+  min-height: 7rem;
+}
+
+.routine-planner[data-view="month"] .routine-planner-day-button > span {
+  display: none;
+}
+
+.routine-planner[data-view="month"] .routine-planner-run.ui-button {
+  grid-template-columns: auto auto minmax(0, 1fr);
+  grid-template-areas: "mark time name";
+}
+
+.routine-planner[data-view="month"] .routine-planner-run-name {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.routine-planner[data-view="month"] .routine-planner-run .routine-planner-avatars {
+  display: none;
+}
+
+/* Days of the months before and after only fill the rows. */
+.routine-planner-day[data-outside] {
+  border-color: var(--volto-border);
+  background: var(--volto-transparent);
+}
+
+.routine-planner-day[data-outside] .routine-planner-day-button strong {
+  color: var(--volto-text-muted);
+  font-weight: var(--volto-weight-regular);
+}
+
+.routine-planner-upcoming,
+.routine-planner-day-view {
+  display: grid;
+  min-width: 0;
+  align-content: start;
+  gap: var(--volto-space-2);
+}
+
+.routine-planner-upcoming {
+  border: 1px solid var(--volto-border-strong);
+  border-radius: var(--volto-radius-lg);
+  padding: var(--volto-space-3);
+}
+
+.routine-planner-upcoming h3,
+.routine-planner-hour h3 {
+  color: var(--volto-text-muted);
+  font-size: var(--volto-text-sm);
+  font-weight: var(--volto-weight-medium);
+}
+
+.routine-planner-hour {
+  display: grid;
+  grid-template-columns: 4rem minmax(0, 1fr);
+  align-items: start;
+  gap: var(--volto-space-2);
+  border-top: 1px solid var(--volto-border-strong);
+  padding-top: var(--volto-space-2);
+}
+
+.routine-planner-hour h3 {
+  padding-top: var(--volto-space-2);
+  font-variant-numeric: tabular-nums;
+}
+
+.routine-planner-entry {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: var(--volto-space-1);
+}
+
+.routine-planner-entry-main.ui-button {
+  display: flex;
+  min-width: 0;
+  height: auto;
+  flex: 1 1 auto;
+  align-items: center;
+  justify-content: flex-start;
+  gap: var(--volto-space-2);
+  border-radius: var(--volto-radius-md);
+  padding: var(--volto-space-1-5) var(--volto-space-2);
+  text-align: left;
+}
+
+.routine-planner-entry-text {
+  display: grid;
+  min-width: 0;
+}
+
+.routine-planner-entry-name,
+.routine-planner-entry-meta {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.routine-planner-entry-name {
+  font-size: var(--volto-text-md);
+}
+
+.routine-planner-entry-meta {
+  color: var(--volto-text-muted);
+  font-size: var(--volto-text-sm);
+  font-weight: var(--volto-weight-regular);
+}
+
+.routine-planner-entry[data-status="failed"] .routine-planner-entry-meta {
+  color: var(--volto-danger-text);
+}
+
+.routine-planner-entry-agents {
+  display: flex;
+  flex: 0 0 auto;
+}
+
+.routine-planner-agent .routine-planner-avatar.agent-avatar {
+  width: var(--volto-control-xs);
+  height: var(--volto-control-xs);
+}
+
+/*
+ * The calendar before its first routine: a faint month behind the pitch. The month and the pitch
+ * share one grid cell. Sample runs land on the month one at a time and write a note.
+ */
+.routine-planner-empty,
+.routine-planner-empty-board {
+  display: grid;
+  min-width: 0;
+}
+
+.routine-planner-empty > *,
+.routine-planner-empty-board > * {
+  grid-area: 1 / 1;
+}
+
+.routine-planner-empty-board {
+  pointer-events: none;
+  user-select: none;
+}
+
+.routine-planner-empty-cells,
+.routine-planner-empty-runs {
+  display: grid;
+  min-width: 0;
+  grid-template-columns: repeat(7, minmax(0, 1fr));
+  grid-auto-rows: 10rem;
+}
+
+/* Only hairlines. They clear behind the pitch and fade towards every edge. */
+.routine-planner-empty-cells {
+  mask-image:
+    radial-gradient(ellipse 36% 36% at 50% 50%, var(--volto-transparent) 68%, var(--volto-text-primary) 100%),
+    radial-gradient(ellipse 72% 78% at 50% 50%, var(--volto-text-primary) 50%, var(--volto-transparent) 100%);
+  mask-composite: intersect;
+}
+
+.routine-planner-empty-cell {
+  border-top: 1px solid var(--volto-border);
+  border-left: 1px solid var(--volto-border);
+  padding: var(--volto-space-2) var(--volto-space-3);
+  color: var(--volto-text-dim);
+  font-size: var(--volto-text-md);
+}
+
+.routine-planner-empty-cell[data-outside] {
+  opacity: 0.45;
+}
+
+.routine-planner-empty-cell[data-today] {
+  color: var(--volto-text-primary);
+  font-weight: var(--volto-weight-semibold);
+}
+
+/* A run lands, writes its note, holds, then fades. The animation is `LIFE` steps of `STEP_MS`. */
+.routine-planner-empty-run {
+  display: grid;
+  min-width: 0;
+  align-self: start;
+  justify-items: start;
+  gap: var(--volto-space-2);
+  grid-row: var(--routine-planner-empty-row);
+  grid-column: var(--routine-planner-empty-column);
+  margin-top: calc(var(--volto-space-8) + var(--volto-space-1));
+  padding-inline: var(--volto-space-2);
+  animation: routine-planner-empty-life var(--routine-planner-empty-life) var(--volto-ease-out) both;
+}
+
+.routine-planner-empty-run > .routine-planner-run {
+  width: 100%;
+}
+
+.routine-planner-empty-day {
+  display: none;
+}
+
+.routine-planner-empty-check {
+  stroke-dasharray: 24;
+  stroke-dashoffset: 24;
+  opacity: 0;
+  animation: routine-planner-empty-draw 420ms var(--volto-ease-out) 380ms forwards;
+}
+
+@keyframes routine-planner-empty-life {
+  0% {
+    opacity: 0;
+    filter: blur(4px);
+    transform: translateY(10px) scale(0.96);
+  }
+
+  8%,
+  88% {
+    opacity: 1;
+    filter: blur(0);
+    transform: none;
+  }
+
+  100% {
+    opacity: 0;
+    filter: blur(3px);
+    transform: translateY(-4px);
+  }
+}
+
+@keyframes routine-planner-empty-draw {
+  from {
+    opacity: 1;
+  }
+
+  to {
+    opacity: 1;
+    stroke-dashoffset: 0;
+  }
+}
+
+/* Handwriting. The app has no hand font, so it uses the one of the system. */
+.routine-planner-hand {
+  color: var(--volto-accent-text);
+  font-family: "Bradley Hand", "Noteworthy", "Segoe Print", cursive;
+  font-weight: var(--volto-weight-semibold);
+}
+
+.routine-planner-empty-note {
+  display: grid;
+  width: fit-content;
+  padding-inline: var(--volto-space-1);
+  font-size: var(--volto-text-xl);
+  line-height: 1.3;
+  transform: rotate(-1.5deg);
+  transform-origin: left top;
+}
+
+/* Each line writes itself from left to right, at the speed of its length. */
+.routine-planner-empty-line {
+  clip-path: inset(-0.4em 100% -0.4em -0.2em);
+  animation: routine-planner-empty-write var(--routine-planner-empty-length) linear var(--routine-planner-empty-delay)
+    forwards;
+}
+
+@keyframes routine-planner-empty-write {
+  to {
+    clip-path: inset(-0.4em -0.2em -0.4em -0.2em);
+  }
+}
+
+.routine-planner-empty-underline {
+  width: 100%;
+  height: var(--volto-space-2);
+  overflow: visible;
+}
+
+.routine-planner-empty-underline path {
+  fill: none;
+  stroke: currentColor;
+  stroke-dasharray: 1;
+  stroke-dashoffset: 1;
+  stroke-linecap: round;
+  opacity: 0;
+  stroke-width: 1.5;
+  vector-effect: non-scaling-stroke;
+  animation: routine-planner-empty-draw 520ms var(--volto-ease-out) var(--routine-planner-empty-delay) forwards;
+}
+
+.routine-planner-empty-pitch {
+  z-index: 1;
+  display: grid;
+  max-width: 34rem;
+  place-self: center;
+  justify-items: center;
+  gap: var(--volto-space-4);
+  padding: var(--volto-space-6);
+  text-align: center;
+}
+
+.routine-planner-empty-title {
+  display: grid;
+  font-size: var(--volto-text-display);
+  font-weight: var(--volto-weight-semibold);
+  letter-spacing: -0.01em;
+  line-height: 1.2;
+}
+
+.routine-planner-empty-title > .routine-planner-empty-lead {
+  color: var(--volto-text-muted);
+}
+
+/* The one handwritten word of the title. It writes itself once. */
+/* Inline, not inline-block: a reader then hears "done." with no space before the full stop. */
+.routine-planner-empty-done {
+  clip-path: inset(-0.4em 100% -0.4em -0.2em);
+  animation: routine-planner-empty-write 520ms linear 500ms forwards;
+}
+
+.routine-planner-empty-lines {
+  display: grid;
+  color: var(--volto-text-muted);
+  font-size: var(--volto-text-xl);
+  line-height: 1.5;
+}
+
+.routine-planner-empty-action.ui-button {
+  width: 100%;
+  max-width: 22rem;
+  height: var(--volto-control-lg);
+  margin-top: var(--volto-space-2);
+}
+
+.routine-planner-empty-menu {
+  min-width: 14rem;
+  max-height: min(520px, calc(100dvh - 16px), var(--kb-popper-content-available-height, 520px));
+  overflow-y: auto;
+}
+
+/* Less motion: one still frame with three runs and their notes. */
+.routine-planner-empty[data-still]
+:is(
+  .routine-planner-empty-run,
+  .routine-planner-empty-check,
+  .routine-planner-empty-line,
+  .routine-planner-empty-underline path,
+  .routine-planner-empty-done
+) {
+  animation: none;
+  clip-path: none;
+  stroke-dashoffset: 0;
+  opacity: 1;
+}
+
+.routine-planner-skeleton-heading {
+  height: var(--volto-control-xs);
+}
+
+.routine-planner-skeleton-run {
+  height: var(--volto-control-md);
+}
+
+/* Seven day columns need the full width: the next runs move below the week. */
+@container (max-width: 1160px) {
+  .routine-planner-body {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+/* A narrow pane, such as a phone or a side panel: the week becomes a list of days. */
+@container (max-width: 920px) {
+  .routine-planner-week {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .routine-planner-day {
+    min-height: 0;
+    grid-template-columns: 5rem minmax(0, 1fr);
+    align-items: start;
+  }
+
+  .routine-planner-day > :not(.routine-planner-day-heading) {
+    grid-column: 2;
+  }
+
+  .routine-planner-loading .routine-planner-day {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .routine-planner-loading .routine-planner-day > * {
+    grid-column: 1;
+  }
+
+  /* The month becomes a list of its own days: each day names its weekday again. */
+  .routine-planner-weekdays,
+  .routine-planner-day[data-outside] {
+    display: none;
+  }
+
+  .routine-planner[data-view="month"] .routine-planner-day {
+    min-height: 0;
+  }
+
+  .routine-planner[data-view="month"] .routine-planner-day-button > span {
+    display: inline;
+  }
+
+  /* The pitch comes first, then one row for each run on screen. */
+  .routine-planner-empty > .routine-planner-empty-board {
+    grid-area: 2 / 1;
+  }
+
+  .routine-planner-empty-pitch {
+    padding-inline: 0;
+  }
+
+  .routine-planner-empty-title {
+    font-size: var(--volto-text-3xl);
+  }
+
+  .routine-planner-empty-lines {
+    font-size: var(--volto-text-lg);
+  }
+
+  .routine-planner-empty-cells {
+    display: none;
+  }
+
+  .routine-planner-empty-runs {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: repeat(3, 8rem);
+    grid-auto-rows: 0;
+  }
+
+  .routine-planner-empty-run {
+    width: 100%;
+    grid-row: var(--routine-planner-empty-slot);
+    grid-column: 1;
+    margin-top: 0;
+    padding-inline: 0;
+  }
+
+  .routine-planner-empty-day {
+    display: block;
+    color: var(--volto-text-dim);
+    font-size: var(--volto-text-sm);
+  }
+
+  .routine-planner-empty-note {
+    font-size: var(--volto-text-lg);
+  }
+}
