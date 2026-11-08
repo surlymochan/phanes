@@ -172,7 +172,7 @@ class TickHarness:
 
     LANES = {"CX2": {"host": "h2", "backend": "codex"}, "CX10": {"host": "h10", "backend": "codex"}}
 
-    def run_tick(self, issues, lanes=None, state=None):
+    def run_tick(self, issues, lanes=None, state=None, available_memory_mb=None):
         """One tick with the GitHub/ssh/dispatch side effects faked; returns (dispatched, logs)."""
         dispatched, logs, edits = [], [], []
 
@@ -202,7 +202,12 @@ class TickHarness:
             with tempfile.TemporaryDirectory(dir=SCRATCH) as scratch:
                 AUTODISPATCH.D = scratch
                 AUTODISPATCH.gh = fake_gh
-                AUTODISPATCH.sh = lambda *a, **k: (0, "0" * 40 + "\n", "")
+                def fake_sh(args, *a, **k):
+                    command = " ".join(args)
+                    if available_memory_mb is not None and ("free -m" in command or "/proc/meminfo" in command):
+                        return 0, f"MemAvailable: {available_memory_mb * 1024} kB\n", ""
+                    return 0, "0" * 40 + "\n", ""
+                AUTODISPATCH.sh = fake_sh
                 AUTODISPATCH.log = lambda msg, brain=True: logs.append(msg)
                 AUTODISPATCH.host_ok = lambda h: True
                 AUTODISPATCH.host_fail = lambda h, why: None
@@ -342,6 +347,19 @@ class TickWorkClassCapTest(TickHarness, unittest.TestCase):
             lambda: self.run_tick([issue(1, VERIFY_BODY, ("lane-ready", "verify-intent"))],
                                    self.LANES, self.busy_work_state()))
         self.assertEqual(dispatched, [("CX2", 1)])  # the cap limits the work class only
+
+
+class TickMemoryPreflightTest(TickHarness, unittest.TestCase):
+    """A low-memory host must not start a codex session during tick dispatch."""
+
+    def test_codex_lane_skips_a_135mb_host_before_dispatch(self):
+        lanes = {"CX2": {"host": "gores2", "backend": "codex", "min_available_memory_mb": 400}}
+        card = issue(1712, "Codex session work", ("lane-ready", "backend:codex"))
+
+        dispatched, logs = self.run_tick([card], lanes=lanes, available_memory_mb=135)
+
+        self.assertEqual(dispatched, [], "a 135MB host must not start a codex session")
+        self.assertTrue(any("gores2" in line and "135" in line and "400" in line for line in logs), logs)
 
 
 if __name__ == "__main__":
