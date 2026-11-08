@@ -59,6 +59,11 @@ BASE_REPO_URL = f"https://github.com/{REPO}.git"  # the upstream the base commit
 DISPATCH_BASE_FETCH_ATTEMPTS = 3  # bounded attempts (check -> fetch -> check) when the base is missing
 DISPATCH_BASE_FETCH_DELAY = 5     # seconds between two attempts
 BASE_MISSING_RE = re.compile(r"Not a valid object name", re.I)
+DISPATCH_FETCH_FAILURE_WINDOW = 3600
+DISPATCH_FETCH_TRANSIENT_RE = re.compile(
+    r"gnutls_handshake|tls|SSL|Could not resolve host|unable to access|Connection reset|"
+    r"Connection timed out|timed out|unexpected disconnect|early eof|remote end hung up", re.I)
+DISPATCH_FETCH_FAILURES = {}  # host -> recent [{at, type}]; used by health and blocking diagnostics
 STALE_STRIPPED_N = 0  # stale search-index entries removed by this process
 STALE_LANE_FAILED_N = 0  # stale hits whose issue still carries both lane-failed and lane-ready (Refs #985)
 LABEL_CACHE = {}  # issue number -> (status, payload): authoritative label reads of the current tick
@@ -949,6 +954,7 @@ def status_snapshot(lanes, state, res, ready, blocked):
     status["_stale_stripped_n"] = STALE_STRIPPED_N
     status["_stale_search_skips"] = STALE_STRIPPED_N
     status["_stale_lane_failed_skips"] = STALE_LANE_FAILED_N
+    status["_fetch_failures"] = dispatch_fetch_health(lanes)
     idle_s, idle_reason, idle_open_s = idle_metrics(state)
     status["_idle_s"] = idle_s              # the last idle gap of every lane (run end -> dispatch)
     status["_idle_reason"] = idle_reason    # why that gap was long
@@ -956,6 +962,37 @@ def status_snapshot(lanes, state, res, ready, blocked):
     status["_idle_worst_s"] = max(idle_open_s.values(), default=0.0)
     status["_at"] = time.strftime("%F %T")
     return status
+
+def classify_dispatch_fetch_error(error):
+    """Return a useful network failure category for dispatch fetch diagnostics."""
+    if DISPATCH_FETCH_TRANSIENT_RE.search(error or ""): return "network_transient"
+    if re.search(r"Authentication failed|Permission denied \(publickey\)|403|repository not found", error or "", re.I):
+        return "authentication_or_access"
+    return "git_fetch_error"
+
+def record_dispatch_fetch_failure(host, error, at=None):
+    """Keep a bounded one-hour failure history for the target host."""
+    at = time.time() if at is None else at
+    records = DISPATCH_FETCH_FAILURES.setdefault(host, [])
+    records.append({"at": at, "type": classify_dispatch_fetch_error(error)})
+    cutoff = at - DISPATCH_FETCH_FAILURE_WINDOW
+    DISPATCH_FETCH_FAILURES[host] = [record for record in records if record["at"] >= cutoff]
+
+def dispatch_fetch_health(lanes, now=None):
+    """Health view of recent target-host fetch failures (one-hour rolling window)."""
+    now = time.time() if now is None else now
+    hosts = {cfg.get("host") for cfg in lanes.values() if cfg.get("host")}
+    result = {}
+    for host in sorted(hosts):
+        records = [r for r in DISPATCH_FETCH_FAILURES.get(host, [])
+                   if r["at"] >= now - DISPATCH_FETCH_FAILURE_WINDOW]
+        if records:
+            counts = {}
+            for record in records: counts[record["type"]] = counts.get(record["type"], 0) + 1
+            result[host] = {"recent_failures": len(records),
+                            "primary_error": max(counts, key=counts.get),
+                            "window_seconds": DISPATCH_FETCH_FAILURE_WINDOW}
+    return result
 
 def deps_met(item):
     """Body line `依赖：#12 #34` (or `Depends on: #12`) gates dispatch until those issues are CLOSED."""
@@ -977,6 +1014,11 @@ def base_fetch_command(repo_path, url, branch):
     """Remote snippet: fetch the base branch into the target repo."""
     return f"git -C {repo_path} fetch -q {url} {branch}"
 
+def base_seed_push_command(local_repo, host, repo_path, base):
+    """Push the already-fetched base object from the controller into a lane repo over SSH."""
+    return ["git", "-C", local_repo, "push", "-q", f"{host}:{repo_path}",
+            f"{base}:refs/fleet/seed/{base}"]
+
 def dispatch_failed(lane, cfg, item, error, busy=False):
     """Drop the claim; capacity denials wait quietly, host failures back off.
 
@@ -989,6 +1031,17 @@ def dispatch_failed(lane, cfg, item, error, busy=False):
     if CAPACITY_EXHAUSTED_RE.search(str(error)): return
     if busy:
         log(f"{lane} #{item['n']}: the host still calls the lane busy; no card assigned, the host is not backed off", brain=False)
+        return
+    if str(error).startswith("dispatch fetch failed:"):
+        health = dispatch_fetch_health({lane: cfg}).get(cfg["host"], {})
+        category = health.get("primary_error", "git_fetch_error")
+        b = BACKOFF.setdefault(cfg["host"], {"n": 0, "until": 0}); b["n"] += 1
+        wait = min(HOST_BACKOFF_MAX, HOST_BACKOFF_BASE * 2 ** (b["n"] - 1)); b["until"] = time.time() + wait
+        log(f"{cfg['host']} dispatch fetch failed ({category}; recent={health.get('recent_failures', 1)}; "
+            f"#{item['n']}: {str(error)[-100:]}); backing off {wait}s", brain=False)
+        return
+    if str(error).startswith("controller source fetch failed:"):
+        log(f"dispatch #{item['n']} controller source fetch failed; {cfg['host']} remains healthy ({str(error)[-120:]})", brain=False)
         return
     host_fail(cfg["host"], f"dispatch #{item['n']}: {error}")
 
@@ -1031,14 +1084,50 @@ def dispatch(lane, cfg, item, base):
         # fetch-on-miss: pull the base branch into the target repo, then check again. No AD-side
         # mutex guards the fetch, so concurrent ticks never block each other (git serializes its
         # own short-lived ref locks).
-        frc, _, ferr = sh(ssh_argv(ssh_opts(h), h, base_fetch_command(R, BASE_REPO_URL, BASE_BRANCH)), timeout=180)
+        fetch_errors = []
+        frc = 1
+        for fetch_attempt in range(1, DISPATCH_BASE_FETCH_ATTEMPTS + 1):
+            frc, _, ferr = sh(ssh_argv(ssh_opts(h), h, base_fetch_command(R, BASE_REPO_URL, BASE_BRANCH)), timeout=180)
+            if not frc: break
+            fetch_errors.append(ferr.strip()[-160:])
+            record_dispatch_fetch_failure(h, ferr)
+            category = classify_dispatch_fetch_error(ferr)
+            log(f"{h} dispatch fetch #{n} failed {fetch_attempt}/{DISPATCH_BASE_FETCH_ATTEMPTS} "
+                f"({category}); retrying" if fetch_attempt < DISPATCH_BASE_FETCH_ATTEMPTS else
+                f"{h} dispatch fetch #{n} failed {fetch_attempt}/{DISPATCH_BASE_FETCH_ATTEMPTS} ({category})",
+                brain=False)
+            if fetch_attempt < DISPATCH_BASE_FETCH_ATTEMPTS:
+                time.sleep(DISPATCH_BASE_FETCH_DELAY * fetch_attempt)
         if frc:
-            # A failing fetch aborts the dispatch right away: the base could not be validated, and
-            # a later successful check (e.g. a concurrent tick that fetched the object in the
-            # meantime) must never mask the fetch failure. The caller backs the host off as usual.
-            # The fetch failure ends the message: the host backoff log keeps the last 80 chars.
-            raise RuntimeError(f"base check: {(err or out).strip()[-120:]} | "
-                               f"base fetch failed rc={frc}: {ferr.strip()[-40:]}")
+            # The controller already fetched `base` from the canonical remote. After direct
+            # HTTPS retries are exhausted, seed the target repo over its working SSH route.
+            # The target-side cat-file check above remains the assignment gate.
+            log(f"{h} dispatch fetch #{n}: direct fetch threshold reached; falling back to controller seed push", brain=False)
+            controller_repo = cfg.get("controller_repo", LOCAL)
+            src_rc, _, src_err = sh(["git", "-C", controller_repo, "fetch", "-q", BASE_REPO_URL, base], timeout=180)
+            if src_rc:
+                # This failure belongs to the controller's GitHub route, not the target host.
+                frc, ferr = src_rc, f"controller source fetch failed: {src_err.strip()[-120:]}"
+                log(f"controller source fetch for dispatch #{n} failed; target host {h} is not backed off", brain=False)
+            else:
+                frc, _, ferr = sh(base_seed_push_command(controller_repo, h, R, base), timeout=180)
+            if frc:
+                # Some fleets publish a dedicated seed remote instead of permitting controller push.
+                seed_url = cfg.get("seed_url")
+                if seed_url:
+                    frc, _, ferr = sh(ssh_argv(ssh_opts(h), h, base_fetch_command(R, seed_url, BASE_BRANCH)), timeout=180)
+                if frc:
+                    fetch_errors.append(ferr.strip()[-160:])
+                    record_dispatch_fetch_failure(h, ferr)
+            if frc:
+                if str(ferr).startswith("controller source fetch failed:"):
+                    raise RuntimeError(ferr)
+                health = dispatch_fetch_health({lane: cfg}).get(h, {})
+                raise RuntimeError(f"dispatch fetch failed: base check: {(err or out).strip()[-100:]} | "
+                                   f"rc={frc}: {ferr.strip()[-120:]}; recent fetch failures="
+                                   f"{health.get('recent_failures', 0)}; primary error="
+                                   f"{health.get('primary_error', 'git_fetch_error')}")
+            log(f"{h} dispatch fetch #{n}: seed fallback succeeded; verifying base commit", brain=False)
         time.sleep(DISPATCH_BASE_FETCH_DELAY)
     raise RuntimeError(f"assign rc={rc}: {(err or out).strip()[-300:]}")
 

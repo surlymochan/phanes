@@ -198,6 +198,9 @@ def prepare(module, sandbox: Sandbox, state_dir="ad-state"):
     module.D = str(sandbox.root / state_dir)
     os.makedirs(module.D, exist_ok=True)
     module.BRAIN_LOG = str(sandbox.root / f"{state_dir}-brain-log.md")
+    # The controller has a local clone of the advertised base, allowing the fallback to
+    # exercise the SSH seed push independently of the target host's HTTPS fetch failure.
+    module.LOCAL = str(sandbox.origin)
     module.sh = sandbox.sh
     module.gh = sandbox.gh
     module.remote = lambda L, cfg, run="": {"lane": "idle"}
@@ -286,7 +289,7 @@ def check_tick_fetch_failure(module, sandbox: Sandbox):
     assert not sandbox.assigned(), "the lane must not be assigned when the fetch failed"
     assert not module.host_ok(HOST), "a failing fetch must back the host off"
     assert "in-progress" not in sandbox.labels(), sandbox.labels()
-    assert "base fetch failed" in log, log
+    assert "dispatch fetch failed" in log, log
     print("  tick: fetch failed (network): reported, no assign, host backed off: OK")
 
 
@@ -301,7 +304,7 @@ def check_tick_fetch_failure_not_masked(module, sandbox: Sandbox):
     assert not sandbox.assigned(), "a failing fetch must not let the dispatch pass"
     assert not module.host_ok(HOST), "a failing fetch must back the host off"
     assert "in-progress" not in sandbox.labels(), sandbox.labels()
-    assert "base fetch failed" in log, log
+    assert "dispatch fetch failed" in log, log
     print("  tick: fetch failed while the base arrived: dispatch aborted, host backed off: OK")
 
 
