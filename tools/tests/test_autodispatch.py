@@ -74,6 +74,7 @@ class ReplenishTriggerTests(unittest.TestCase):
         self.addCleanup(environment.stop)
         autodispatch.MINT_EVIDENCE.clear()
         self.filed = []
+        self.real_file_issue = autodispatch.file_issue
         self.patch("file_issue", lambda text, extra=(): self.filed.append(text.splitlines()[0]) or "#501")
         self.patch("gh", self.fake_gh)
         self.patch("sh", lambda *args, **kwargs: (0, "", ""))
@@ -187,6 +188,7 @@ class ReplenishTriggerTests(unittest.TestCase):
             "# Title\nlabels: p1\nImplement the path.\nNo acceptance.\n",
             "# Title\nlabels: p1\n验收：python3 check.py\n",
             "# Title\nlabels: p1\nImplement the bounded refill path.\n验收：python3 check.py\n",
+            "# Title\n\nlabels: p1\nBody\n验收：test\n",
         ]
         for text in samples:
             self.assertEqual(autodispatch.card_defect(text, strict=True) is None,
@@ -199,6 +201,50 @@ class ReplenishTriggerTests(unittest.TestCase):
         self.assertIsNone(autodispatch.card_defect(f"# 标题\nlabels: p1\n{body}\n"))
         self.assertIsNotNone(autodispatch.card_defect("# 标题\nlabels: p1\n"))
         self.assertIsNotNone(autodispatch.card_defect("not a card\n"))
+
+    def test_file_issue_accepts_blank_header_lines_and_preserves_the_body(self):
+        created = []
+        self.patch("gh", lambda args: created.append(args) or (0, "https://example.com/issues/501", ""))
+        body = "Body\n\n```python\n    pass\n```\n\n验收：test\n"
+        for header in ("# Title\n\nlabels: p1\n", "\n \n# Title\n\t\n  labels: p1  \n"):
+            with self.subTest(header=header):
+                text = header + body
+                self.assertIsNone(autodispatch.card_defect(text, strict=True))
+                self.assertEqual(self.real_file_issue(text, extra=("planner",)), "#501")
+                self.assertEqual(created[-1], ["issue", "create", "-t", "Title", "-b", body,
+                                               "-l", "lane-ready", "-l", "p1", "-l", "planner"])
+
+    def test_replenish_mints_a_local_card_with_blank_header_lines(self):
+        text = "# Title\n\nlabels: p1\nBody\n验收：test\n"
+        backlog = self.backlog(good=text)
+        self.patch("file_issue", self.real_file_issue)
+        created = []
+        self.patch("gh", lambda args: created.append(args) or (0, "https://example.com/issues/501", ""))
+
+        self.assertEqual(autodispatch.replenish(1, {}), ["#501"])
+        self.assertEqual(len(created), 1)
+        self.assertEqual((backlog / "filed" / "good.md").read_text(encoding="utf-8"), text)
+
+    def test_replenish_imports_a_repo_card_with_blank_header_lines_once(self):
+        text = "# Title\n\nlabels: p1\nBody\n验收：test\n"
+        path = "docs/backlog/next/good.md"
+        self.patch("file_issue", self.real_file_issue)
+        self.patch("sh", lambda args, **kwargs: (0, text if "show" in args else path, ""))
+        created = []
+
+        def gh(args):
+            if args[:2] == ["issue", "create"]:
+                created.append(args)
+                return 0, "https://example.com/issues/501", ""
+            return self.fake_gh(args)
+
+        self.patch("gh", gh)
+        state = {}
+
+        self.assertEqual(autodispatch.replenish(1, state), ["#501"])
+        self.assertEqual(state["_imported"], [path])
+        self.assertEqual(autodispatch.replenish(1, state), [])
+        self.assertEqual(len(created), 1)
 
 
 class ReplenishUnreadableQueueTests(unittest.TestCase):

@@ -1657,6 +1657,15 @@ def refill_need(ready, low=None, target=None, starved=0):
     if ready < low: return max(target - ready, low - ready, starved, 0)
     return max(starved, 0)
 
+def card_lines(text):
+    """Read the first two nonempty header lines, keeping the body formatting intact."""
+    lines = text.splitlines(); header = []
+    for index, line in enumerate(lines):
+        if not line.strip(): continue
+        header.append(line.strip())
+        if len(header) == 2: return header + lines[index + 1:]
+    return header
+
 def card_defect(text, strict=False):
     """Why a card cannot be minted as a lane-ready issue (None when it can).
 
@@ -1669,7 +1678,7 @@ def card_defect(text, strict=False):
     convention of the planner cards and not of the local ones.  A card without any of that
     can never be run by a lane, so minting it only fills the pool with dead cards
     (Refs #1662)."""
-    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    lines = [line.strip() for line in card_lines(text) if line.strip()]
     if len(lines) < 2: return "thin card: needs a title and a labels line"
     if not lines[0].startswith("# "): return "thin card: the first line is not a '# ' title"
     if not lines[1].startswith("labels:"): return "thin card: the second line is not a 'labels:' line"
@@ -1743,7 +1752,7 @@ def refill_on_unreadable_queue(state):
     return filed
 
 def file_issue(text, extra=()):
-    lines = text.splitlines()
+    lines = card_lines(text)
     title = lines[0].lstrip("# ").strip(); labels = [l.strip() for l in lines[1].split(":", 1)[1].split(",") if l.strip()]
     body = "\n".join(lines[2:]).strip() + "\n"
     args = ["issue", "create", "-t", title, "-b", body]
