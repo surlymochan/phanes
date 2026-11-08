@@ -170,7 +170,7 @@ class BrokerLogSummaryTests(unittest.TestCase):
 
     def test_invalid_durations_are_missing_in_slow_reports(self):
         pauses = bls.parse_pause_lines([json.dumps(PAUSE_RECORD)])
-        for ms in (float("nan"), float("inf"), -1, 1e100):
+        for ms in (float("nan"), float("inf"), -1, 1e100, 1e14):
             with self.subTest(ms=ms):
                 records = [bls.parse_line(slow_line("2026-11-01T23:40:00Z", status, lane, ms))
                            for status, lane in ((502, "failed"), (200, "healthy"))]
@@ -187,7 +187,7 @@ class BrokerLogSummaryTests(unittest.TestCase):
 
     def test_invalid_durations_do_not_break_pause_only_reports(self):
         pauses = bls.parse_pause_lines([json.dumps(PAUSE_RECORD)])
-        for ms in (float("nan"), float("-inf"), -1, 1e100):
+        for ms in (float("nan"), float("-inf"), -1, 1e100, 1e14):
             with self.subTest(ms=ms):
                 record = bls.parse_line(slow_line("2026-11-01T23:40:00Z", 502, "M1", ms))
                 report = bls.build_report([record], 0, bls.timezone.utc, "minute", 10.0,

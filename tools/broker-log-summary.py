@@ -77,12 +77,12 @@ def classify(status, err):
     return "other"
 
 
-def valid_duration(ms):
+def valid_duration(ms, end=None):
     """Return True when ``ms`` is a usable request duration.
 
     A duration must be a finite, non-negative number that still fits in a
-    timedelta; NaN, the infinities, negative values and absurdly large values
-    are missing values, not durations.
+    timedelta and, when an end timestamp is supplied, can be subtracted from
+    it. NaN, infinities, negative and out-of-range values are missing values.
     """
     if isinstance(ms, bool) or not isinstance(ms, (int, float)):
         return False
@@ -91,15 +91,17 @@ def valid_duration(ms):
     if ms < 0:
         return False
     try:
-        timedelta(milliseconds=ms)
+        duration = timedelta(milliseconds=ms)
+        if end is not None:
+            end - duration
     except (OverflowError, ValueError):
         return False
     return True
 
 
-def duration_or_none(ms):
+def duration_or_none(ms, end=None):
     """Return the duration of a request, or None when it is not usable."""
-    return ms if valid_duration(ms) else None
+    return ms if valid_duration(ms, end) else None
 
 
 def parse_line(line):
@@ -119,7 +121,7 @@ def parse_line(line):
     lane = obj.get("lane") if isinstance(obj.get("lane"), str) else "-"
     rid = obj.get("id") if isinstance(obj.get("id"), str) else None
     err = obj.get("err") if isinstance(obj.get("err"), str) else ""
-    ms = duration_or_none(obj.get("ms"))
+    ms = duration_or_none(obj.get("ms"), when)
     return {"ts": when, "lane": lane, "status": status, "cls": classify(status, err),
             "id": rid, "ms": ms, "err": err}
 
@@ -251,7 +253,7 @@ def request_span(record):
     A request without a usable duration spans the instant of its timestamp.
     """
     end = record["ts"]
-    ms = duration_or_none(record.get("ms"))
+    ms = duration_or_none(record.get("ms"), end)
     return (end - timedelta(milliseconds=ms) if ms else end), end
 
 
@@ -259,7 +261,7 @@ def slow_requests(records, threshold_ms):
     """Return the requests that took at least ``threshold_ms`` or answered non-200."""
     picked = []
     for record in records:
-        ms = duration_or_none(record.get("ms"))
+        ms = duration_or_none(record.get("ms"), record["ts"])
         if (ms is not None and ms >= threshold_ms) or record["status"] != 200:
             picked.append(record)
     return sorted(picked, key=lambda record: record["ts"])
@@ -306,7 +308,7 @@ def slow_entries(records, threshold_ms, pauses, tz):
             "status": record["status"],
             "err": err[:ERR_CHARS],
             "err_truncated": len(err) > ERR_CHARS,
-            "ms": duration_or_none(record.get("ms")),
+            "ms": duration_or_none(record.get("ms"), record["ts"]),
             "during_pause": pause_window_text(pause) if pause else None,
         })
     return rows
