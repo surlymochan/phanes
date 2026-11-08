@@ -370,21 +370,23 @@ class LaneTests(unittest.TestCase):
 
         from swrm.tests._load import load
         swrm = load()
+        pathlib.Path(swrm.DATA, "policy.local.json").write_text(json.dumps(
+            {"codex": {"network_access": False}}))
         child = RecordingChild()
         for worktree in worktrees:
             swrm.lane_begin_turn({"backend": "codex", "model": "fake-model", "effort": "xhigh"},
                                  child, "test", str(worktree), None, {})
-        starts = {request["params"]["cwd"]: request["params"] for request in child.requests
-                  if request.get("method") == "thread/start"}
+        turns = [request["params"] for request in child.requests if request.get("method") == "turn/start"]
         gitdirs = {str(wt): subprocess.run(
             ["git", "-C", str(wt), "rev-parse", "--absolute-git-dir"],
             check=True, capture_output=True, text=True).stdout.strip() for wt in worktrees}
         self.assertEqual(len(set(gitdirs.values())), 2)
-        for worktree in worktrees:
-            params = starts[str(worktree)]
-            sandbox = params["sandbox"]
+        for worktree, params in zip(worktrees, turns):
+            sandbox = params["sandboxPolicy"]
             self.assertIsInstance(sandbox, dict)
+            self.assertEqual(sandbox["type"], "workspaceWrite")
             self.assertIn(gitdirs[str(worktree)], sandbox["writableRoots"])
+            self.assertFalse(sandbox["networkAccess"])
 
     def test_pi_session_leak_is_excluded_even_when_staged(self):
         self.set_config("pi")

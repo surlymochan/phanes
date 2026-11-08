@@ -7327,6 +7327,19 @@ def lane_git(args, cwd, timeout=60):
     return rc, out.strip(), err.strip()
 
 
+def lane_codex_sandbox_policy(worktree):
+    """Build the turn sandbox policy with this worktree's actual gitdir writable."""
+    policy = load_policy().get("codex", {})
+    mode = policy.get("sandbox", "workspace-write")
+    if mode != "workspace-write":
+        return mode
+    rc, gitdir, err = lane_git(["rev-parse", "--absolute-git-dir"], worktree)
+    if rc:
+        raise RuntimeError(f"cannot resolve lane worktree gitdir: {err[:250]}")
+    network_access = policy.get("network_access", policy.get("networkAccess", False))
+    return {"type": "workspaceWrite", "writableRoots": [gitdir], "networkAccess": network_access is True}
+
+
 def lane_worktree_matches(repo, wt):
     if not os.path.isdir(wt) or os.path.islink(wt):
         return False
@@ -7950,7 +7963,8 @@ def lane_begin_turn(lane, child, prompt, worktree, event_file, turn):
         req_id = "turn-" + uuid.uuid4().hex
         child.send({"jsonrpc": "2.0", "id": req_id, "method": "turn/start",
                     "params": {"threadId": turn["thread_id"], "input": [{"type": "text", "text": prompt}],
-                               "effort": lane["effort"], "outputSchema": RESULT_SCHEMA}})
+                               "effort": lane["effort"], "outputSchema": RESULT_SCHEMA,
+                               "sandboxPolicy": lane_codex_sandbox_policy(worktree)}})
         reply = child.wait_response(req_id, 60, event_file)
         if reply.get("error"):
             raise RuntimeError(f"codex turn/start failed: {short(reply['error'], 300)}")
