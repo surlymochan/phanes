@@ -153,6 +153,53 @@ class EvalidOverheadTests(unittest.TestCase):
         self.assertEqual(report["stages"]["red"]["budget_seconds"], 30)
         self.assertEqual(report["data_quality_errors"], [])
 
+    def test_lane_without_attempt_started_excludes_verification_and_finalization(self):
+        cases = ((None, 30), (1, 30), (0.25, 15))
+        for index, (allowance, expected) in enumerate(cases):
+            with self.subTest(budget_minutes=allowance):
+                run_id = f"lane-{index}"
+                stage = ("Spec", "red", "Review")[index]
+                # lane_do_run writes execution_started, but no attempt_started.
+                # Execution ends at 150; verification and cleanup end at 210.
+                self.write_run(run_id, stage=stage, queued_at=100, started=120,
+                               execution_started=120, finished=210,
+                               queued_seconds=20, budget_minutes=allowance)
+                (self.runs / run_id / "result.json").write_text(json.dumps({
+                    "seconds": 30, "error_class": None,
+                    "attempts": [{"seconds": 30, "error_class": None,
+                                  "meta": {"usage": {"input_tokens": 5}}}],
+                }), encoding="utf-8")
+
+                report = overhead.build_report(self.runs)
+
+                self.assertEqual(report["stages"][stage], {
+                    "run_count": 1, "queued_seconds": 20.0,
+                    "execution_seconds": 30.0, "budget_seconds": expected,
+                    "usage": {"input_tokens": 5},
+                })
+                self.assertTrue(report["budget_excludes_queue_seconds"])
+                self.assertEqual(report["data_quality_errors"], [])
+                self.assertEqual(overhead.render_report(report),
+                                 overhead.render_report(overhead.build_report(self.runs)))
+
+    def test_runs_without_retry_backoff_use_recorded_execution_for_budget(self):
+        for index, attempts in enumerate((None, [], [{"seconds": 30}],
+                                          [{"seconds": 10, "error_class": "model_unavailable"},
+                                           {"seconds": 20, "error_class": None}])):
+            with self.subTest(attempts=attempts):
+                run_id = f"finished-{index}"
+                self.write_run(run_id, stage="green", queued_at=100, started=120,
+                               finished=210, queued_seconds=20)
+                (self.runs / run_id / "result.json").write_text(json.dumps({
+                    "seconds": 30, "attempts": attempts,
+                }), encoding="utf-8")
+
+                report = overhead.build_report(self.runs)
+
+                self.assertEqual(report["stages"]["green"]["budget_seconds"],
+                                 30 * (index + 1))
+                self.assertEqual(report["data_quality_errors"], [])
+
     def test_rate_limit_wait_consumes_budget_without_charging_capacity_queue(self):
         cases = (("red", None, 90), ("green", 2, 90), ("Review", 1, 60))
         for index, (stage, allowance, expected) in enumerate(cases):

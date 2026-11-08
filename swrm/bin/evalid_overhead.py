@@ -9,11 +9,12 @@ into run counts, queue seconds, execution seconds, budget seconds and usage.
 Two rules drive the numbers:
 
 * Queue time is capacity wait, not work. ``queued_seconds`` is reported on its
-  own and never enters ``budget_seconds``: a run's budget is derived from its
-  queue-adjusted ``started`` timestamp, including rate-limit backoff between
-  execution attempts. An interrupted capacity wait is excluded separately
-  because swrm shifts ``started`` only after admission. Queue time is never
-  charged and never deducted twice.
+  own and never enters ``budget_seconds``. Without retry backoff, the recorded
+  execution duration excludes verification and cleanup even when the lane has
+  no ``attempt_started`` timestamp. Rate-limit backoff consumes budget; its
+  elapsed window uses the queue-adjusted ``started`` timestamp. An interrupted
+  capacity wait is excluded separately because swrm shifts ``started`` only
+  after admission. Queue time is never charged and never deducted twice.
 * Extra runs are the overhead of the L2 pipeline. The legacy flow already spent
   one run each on red, green, holdout and Review per change; every further run
   -- the Spec and spec-check runs, plus retries -- is extra quota and extra
@@ -269,18 +270,27 @@ def _run_record(run_dir: pathlib.Path) -> Optional[dict]:
     attempts = result.get("attempts")
     last = attempts[-1] if isinstance(attempts, list) and attempts else None
     attempt_started = _parse_timestamp(status.get("attempt_started"))
+    # An expired/stopped run may have spent its remaining time in backoff
+    # after the last executor returned. Its finish window includes that wait.
+    interrupted = (result.get("error_class") in ("budget_exceeded", "stopped")
+                   or isinstance(last, dict)
+                   and last.get("error_class") in ("budget_exceeded", "stopped"))
+    backoff = isinstance(attempts, list) and any(
+        isinstance(attempt, dict) and attempt.get("error_class") == "rate_limit"
+        for attempt in attempts[:-1])
+    # lane_do_run does not write attempt_started. When no retry backoff needs
+    # accounting, seconds is the execution endpoint; finished also includes
+    # verification and cleanup. It already excludes admitted capacity queues.
+    if execution is not None and not backoff and not interrupted and not unshifted_queue:
+        elapsed = execution
     if isinstance(last, dict) and attempt_started is not None and started is not None:
         last_seconds = _number(last.get("seconds"))
-        # An expired/stopped run may have spent its remaining time in backoff
-        # after the last executor returned. Its finish window includes that wait.
-        interrupted = (result.get("error_class") in ("budget_exceeded", "stopped")
-                       or last.get("error_class") in ("budget_exceeded", "stopped"))
         if (last_seconds is not None and last_seconds >= 0
                 and not interrupted and not unshifted_queue):
             attempt_end = (attempt_started - started).total_seconds() + last_seconds
             if attempt_end >= 0 and (window is None or attempt_end <= window):
                 elapsed = attempt_end
-    # Without an attempt endpoint, finished is the best available wall window;
+    # Backoff without an attempt endpoint retains the available wall window;
     # without a wall window, retain the recorded execution duration fallback.
     # A run killed at its deadline cannot consume more than its allowance.
     budget_minutes = _number(status.get("budget_minutes"))
