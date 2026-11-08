@@ -747,8 +747,26 @@ def can_take(backend, item, lane=None, verify_gate=True):
 DEFAULT_CODEX_MIN_MEMORY_MB = 400
 
 def available_memory_mb(host):
-    """Read MemAvailable on an executor host through the normal SSH shim."""
-    command = "awk '/^MemAvailable:/ {print $2; found=1} END {if (!found) exit 1}' /proc/meminfo"
+    """Read available memory on a Linux or macOS executor through the normal SSH shim."""
+    # vm_stat reports pages, with the host's page size in its header (4K or 16K).
+    # Count free/reclaimable pages without adding purgeable pages a second time.
+    # Both platform branches emit KiB; a missing/incomplete probe stays unavailable.
+    command = """case "$(uname -s)" in
+Linux)
+    awk '/^MemAvailable:/ {print $2; found=1} END {if (!found) exit 1}' /proc/meminfo ;;
+Darwin)
+    vm_stat | awk '
+        /^Mach Virtual Memory Statistics:/ {
+            for (i=1; i<NF; i++) if ($i == "of") pagesize=$(i+1)
+        }
+        /^(Pages free|Pages inactive|Pages speculative):/ {
+            sub(/\\.$/, "", $NF)
+            if ($NF !~ /^[0-9]+$/) exit 1
+            pages+=$NF; found++
+        }
+        END {if (pagesize > 0 && found == 3) printf "%.0f\\n", pages*pagesize/1024; else exit 1}' ;;
+*) exit 1 ;;
+esac"""
     # SSH joins remote arguments with spaces; keep the entire script as one -c argument.
     try: rc, out, _ = sh(ssh_argv(ssh_opts(host), host, "sh", "-lc", shlex.quote(command)), timeout=30)
     except (OSError, subprocess.TimeoutExpired): return None
