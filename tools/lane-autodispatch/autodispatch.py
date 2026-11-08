@@ -649,6 +649,118 @@ if R:
     except Exception: out["run_state"]="missing"
 print(json.dumps(out))
 '''
+
+# Kill only after the executor has independently confirmed the ledger, event, queue and
+# process evidence. The two process snapshots rule out a transient RPC wait; all errors
+# are fail-closed. Runs are counted from the executor's own ledger, not AD health state.
+REMOTE_STUCK_CLEANUP = REMOTE_STATE_HOME + r'''
+import glob,json,os,signal,sys,time
+L=sys.argv[1]; N=3
+PROC_ROOT=os.environ.get("AD_PROC_ROOT", "/proc")
+def read(path):
+  try:
+    with open(path) as f: return json.load(f)
+  except Exception: return None
+def event_count(run):
+  paths=glob.glob(os.path.join(O,"runs",run,"events*.jsonl"))
+  if not paths: return None
+  count=0
+  for path in paths:
+    try:
+      with open(path) as f: count += sum(1 for line in f if line.strip())
+    except OSError: return None
+  return count
+def children(pid):
+  found=[]; todo=[pid]
+  while todo:
+    parent=todo.pop()
+    try: kids=[int(x) for x in open(f"{PROC_ROOT}/{parent}/task/{parent}/children").read().split()]
+    except Exception: return None
+    found.extend(kids); todo.extend(kids)
+  return found
+def proc(pid):
+  try:
+    raw=open(f"{PROC_ROOT}/{pid}/stat").read(); rest=raw[raw.rfind(")")+2:].split()
+    wchan=open(f"{PROC_ROOT}/{pid}/wchan").read().strip()
+    syscall=open(f"{PROC_ROOT}/{pid}/syscall").read().strip()
+    cmd=open(f"{PROC_ROOT}/{pid}/cmdline","rb").read().replace(b"\0",b" ").decode(errors="replace")
+    return {"pid":pid,"state":rest[0],"ticks":(rest[11],rest[12]),"wchan":wchan,"syscall":syscall,"cmd":cmd}
+  except Exception: return None
+def snapshot(pids):
+  rows=[proc(pid) for pid in pids]
+  if any(row is None for row in rows): return None
+  return rows
+ledger=[]
+try:
+  with open(os.path.join(O,"ledger.jsonl")) as f:
+    for line in f:
+      try:
+        row=json.loads(line)
+        if isinstance(row,dict) and row.get("lane")==L: ledger.append(row)
+      except ValueError: pass
+except OSError: print(json.dumps({"cleaned":False,"reason":"ledger-unreadable"})); sys.exit(0)
+tail=ledger[-N:]
+if len(tail)!=N or any(r.get("status")!="budget_exceeded" or not r.get("id") for r in tail):
+  print(json.dumps({"cleaned":False,"reason":"not-three-budget-runs"})); sys.exit(0)
+ids=[str(r["id"]) for r in tail]
+for run in ids:
+  if event_count(run)!=0:
+    print(json.dumps({"cleaned":False,"reason":"events-unknown-or-nonzero"})); sys.exit(0)
+  status=read(os.path.join(O,"runs",run,"status.json"))
+  if not isinstance(status,dict) or status.get("queue_reason") or not status.get("attempt_started"):
+    print(json.dumps({"cleaned":False,"reason":"queued-or-status-unknown"})); sys.exit(0)
+lane=read(os.path.join(O,"lanes",L,"state.json"))
+pid=(lane or {}).get("child_pid") if isinstance(lane,dict) else None
+if isinstance(pid,bool) or not isinstance(pid,int) or pid<=1:
+  print(json.dumps({"cleaned":False,"reason":"rpc-pid-unknown"})); sys.exit(0)
+tree=children(pid)
+if tree is None: print(json.dumps({"cleaned":False,"reason":"process-tree-unknown"})); sys.exit(0)
+pids=[pid]+tree; first=snapshot(pids)
+if first is None or "pi" not in first[0]["cmd"].lower() or first[0]["wchan"]!="do_wait":
+  print(json.dumps({"cleaned":False,"reason":"rpc-not-waiting"})); sys.exit(0)
+bwrap=[row for row in first[1:] if "bwrap" in row["cmd"]]
+if not bwrap: print(json.dumps({"cleaned":False,"reason":"bwrap-not-found"})); sys.exit(0)
+time.sleep(2)
+tree2=children(pid)
+second=snapshot([pid]+tree2) if tree2 is not None else None
+if second is None or [r["pid"] for r in first] != [r["pid"] for r in second]:
+  print(json.dumps({"cleaned":False,"reason":"process-tree-changed"})); sys.exit(0)
+if any(a["ticks"]!=b["ticks"] or a["wchan"]!=b["wchan"] or a["syscall"]!=b["syscall"]
+       for a,b in zip(first[1:],second[1:])):
+  print(json.dumps({"cleaned":False,"reason":"sandbox-active"})); sys.exit(0)
+# Recheck the RPC wait channel and identity immediately before signaling.
+if second[0]["wchan"]!="do_wait" or second[0]["cmd"]!=first[0]["cmd"]:
+  print(json.dumps({"cleaned":False,"reason":"rpc-state-changed"})); sys.exit(0)
+sent=[]
+for target in reversed([pid]+tree2):
+  try: os.kill(target,signal.SIGTERM); sent.append(target)
+  except ProcessLookupError: pass
+  except OSError: print(json.dumps({"cleaned":False,"reason":"term-failed","sent":sent})); sys.exit(0)
+if pid not in sent: print(json.dumps({"cleaned":False,"reason":"rpc-term-unconfirmed","sent":sent})); sys.exit(0)
+deadline=time.time()+2
+while time.time()<deadline:
+  state=proc(pid)
+  if state is None or state["state"]=="Z": break
+  time.sleep(0.1)
+else: print(json.dumps({"cleaned":False,"reason":"rpc-term-not-confirmed","sent":sent})); sys.exit(0)
+audit={"at":time.strftime("%F %T"),"lane":L,"runs":ids,"pids":sent,"action":"SIGTERM","confirmed":True}
+try:
+  with open(os.path.join(O,"lane-stuck-audit.jsonl"),"a") as f: f.write(json.dumps(audit)+"\n")
+except OSError: pass
+print(json.dumps({"cleaned":True,"runs":ids,"pids":sent}))
+'''
+
+def cleanup_lane_stuck(lane, cfg):
+    """Ask the lane host to verify actual ledger/events and terminate a proven stuck Pi tree."""
+    try:
+        rc, out, err = sh(ssh_argv(ssh_opts(cfg.get("host")), cfg.get("host"),
+                                  "python3", "-", lane), timeout=15, inp=REMOTE_STUCK_CLEANUP)
+        if rc:
+            return {"cleaned": False, "reason": f"ssh-failed: {(err or out).strip()[-120:]}"}
+        result = json.loads(out.strip().splitlines()[-1])
+        return result if isinstance(result, dict) else {"cleaned": False, "reason": "invalid-response"}
+    except Exception as error:
+        return {"cleaned": False, "reason": f"probe-failed: {error!r}"}
 def remote(lane, cfg, run=""):
     try: rc, out, err = sh(ssh_argv(ssh_opts(cfg["host"]), cfg["host"], "python3", "-", lane, run), timeout=60, inp=REMOTE_STATUS)
     except subprocess.TimeoutExpired: return {"error": "ssh status timeout"}
@@ -1284,6 +1396,15 @@ def finish(lane, cfg, st, info, state):
         log(f"{lane} finished #{n} (run {run}, {info.get('status')}) → {url}"); mark_done(state, n)
         return {"done": True, "status": "pr-created", "error": None, "missing": []}
     else:
+        if info.get("status") == "budget_exceeded":
+            cleanup = cleanup_lane_stuck(lane, cfg)
+            if cleanup.get("cleaned"):
+                audit = (f"auto:stuck {time.strftime('%F %T')} lane={lane} "
+                         f"runs={','.join(cleanup.get('runs', []))} pids={','.join(map(str, cleanup.get('pids', [])))}")
+                with open(f"{D}/health.alert", "a") as stream: stream.write(audit + "\n")
+                log(audit)
+            else:
+                log(f"{lane} run {run}: stuck cleanup not performed ({cleanup.get('reason', 'unknown')})", brain=False)
         label_lane_failed(n, f"Lane {lane} ({cfg['host']}, run `{run}`) ended `{info.get('status')}` without a commit "
             f"(error_class `{info.get('error_class')}`).\n\nExecutor summary: {info.get('summary')}\n\nLabel `lane-failed`; re-add `lane-ready` to retry.")
         mark_done(state, n); log(f"{lane} ended #{n} without a commit (run {run}, {info.get('status')}/{info.get('error_class')}) → labelled lane-failed")
