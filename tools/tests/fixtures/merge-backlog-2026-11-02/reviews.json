@@ -1,0 +1,38 @@
+{
+  "1632": {
+    "sha": "c15cacc51d9b5d908ba5e35888f51ad3bcc5939b",
+    "verdict": "CHANGES",
+    "lane": "CX2",
+    "at": "2026-11-01 18:34:11",
+    "rounds": 1,
+    "fails": 2,
+    "fails_sha": "c15cacc51d9b5d908ba5e35888f51ad3bcc5939b",
+    "needs_human_reason": "fails",
+    "needs_human_sha": "c15cacc51d9b5d908ba5e35888f51ad3bcc5939b",
+    "needs_human_at": "2026-11-01 19:02:47"
+  },
+  "1633": {
+    "sha": "4dd9cb694f40b8e31684275e27c173d86b39a04f",
+    "verdict": "APPROVE",
+    "lane": "M2",
+    "at": "2026-11-02 18:04:12",
+    "rounds": 0,
+    "fails": 0
+  },
+  "1638": {
+    "sha": "cb958519919e86d2f02e190a1258a818cb39be2f",
+    "verdict": "APPROVE",
+    "lane": "CX1",
+    "at": "2026-11-02 15:58:00",
+    "rounds": 0,
+    "fails": 0
+  },
+  "1639": {
+    "sha": "240526deac476cfa16ba509641d8c3ebc96ec719",
+    "verdict": "APPROVE",
+    "lane": "CX2",
+    "at": "2026-11-02 18:05:00",
+    "rounds": 0,
+    "fails": 0
+  }
+}

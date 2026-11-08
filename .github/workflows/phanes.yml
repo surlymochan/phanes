@@ -37,7 +37,7 @@ jobs:
           scenario=false
           while IFS= read -r path; do
             case "$path" in
-              swrm/*|tools/lane-autodispatch/*|tools/tests/*|tools/ci-swrm.*|.github/*) swrm=true ;;
+              swrm/*|tools/lane-autodispatch/*|tools/tests/*|tools/ci-swrm.*|tools/ci-openswarm.*|.github/*) swrm=true ;;
             esac
             case "$path" in
               volto/*|.github/*) volto=true ;;
