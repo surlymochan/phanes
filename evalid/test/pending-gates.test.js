@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, resolve } from 'node:path';
 import { afterEach, describe, test } from 'node:test';
@@ -56,6 +56,25 @@ describe('ackPendingGate', () => {
       assert.equal(readFileSync(nestedGate, 'utf8'), original);
     });
   }
+
+  test('rejects traversal without creating the pending-gates directory', () => {
+    const projectRoot = makeProject();
+
+    assert.throws(() => ackPendingGate(projectRoot, '../outside'), /Invalid pending gate phase/);
+    assert.equal(existsSync(resolve(projectRoot, '.as-xflow', 'pending-gates')), false);
+  });
+
+  test('rejects an invalid phase without touching the pending-gates directory', () => {
+    const projectRoot = makeProject();
+    const gateFile = resolve(projectRoot, '.as-xflow', 'pending-gates', 'review.json');
+    writeGate(gateFile);
+    const before = readdirSync(dirname(gateFile)).sort();
+
+    assert.throws(() => ackPendingGate(projectRoot, '..'), /Invalid pending gate phase/);
+    assert.throws(() => ackPendingGate(projectRoot, ''), /non-empty string/);
+    assert.deepEqual(readdirSync(dirname(gateFile)).sort(), before);
+    assert.equal(JSON.parse(readFileSync(gateFile, 'utf8')).status, 'pending');
+  });
 
   test('acknowledges a normal gate', () => {
     const projectRoot = makeProject();
