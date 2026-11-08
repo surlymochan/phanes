@@ -15,9 +15,10 @@ Two rules drive the numbers:
 * Extra runs are the overhead of the L2 pipeline. The legacy flow already spent
   one run each on red, green, holdout and Review per change; every further run
   -- the Spec and spec-check runs, plus retries -- is extra quota and extra
-  concurrency. ``change_id`` in status or result identifies a change. Legacy
-  runs without it share a single baseline group; separate experiments must
-  supply distinct change IDs (or be reported from separate runs directories).
+  concurrency. ``change_id`` in status, result or the saved ``task.md`` header
+  identifies a change. Legacy runs without it share a single baseline group;
+  separate experiments must supply distinct change IDs (or be reported from
+  separate runs directories).
 
 Missing timestamps and negative durations are reported as deterministic data
 quality errors instead of silently skewing the totals. The same input always
@@ -34,6 +35,7 @@ import json
 import math
 import os
 import pathlib
+import re
 import sys
 from datetime import datetime, timezone
 from typing import Any, Optional, Sequence
@@ -150,6 +152,51 @@ def _percentile(samples: Sequence[float], percent: float) -> float:
     return float(samples[index])
 
 
+def _task_change_id(run_dir: pathlib.Path) -> Optional[str]:
+    """Read the change ID swrm persists in the controlled task card header."""
+    try:
+        lines = (run_dir / "task.md").read_text(encoding="utf-8").splitlines()
+    except (OSError, UnicodeError):
+        return None
+    if not lines or lines[0].strip() != "---":
+        return None
+    end = next((i for i in range(1, len(lines)) if lines[i].strip() == "---"), None)
+    if end is None:
+        return None
+    for line in lines[1:end]:
+        key, separator, value = line.partition(":")
+        if separator and key.strip() == "change_id":
+            # Match the string scalar and ID contract in evalid_roles.py.
+            change_id = value.strip().strip("\"'")
+            return change_id if re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]*", change_id) else None
+    return None
+
+
+def _usage_of(status: dict, result: dict) -> dict:
+    """Sum attempt usage; swrm's top-level usage describes only the last attempt."""
+    attempts = result.get("attempts")
+    usages = []
+    if isinstance(attempts, list):
+        for attempt in attempts:
+            meta = attempt.get("meta") if isinstance(attempt, dict) else None
+            usage = meta.get("usage") if isinstance(meta, dict) else None
+            if isinstance(usage, dict):
+                usages.append(usage)
+    if not usages:
+        usage = status.get("usage")
+        if not isinstance(usage, dict) or not usage:
+            usage = result.get("usage")
+        if isinstance(usage, dict):
+            usages.append(usage)
+    total: dict[str, Any] = {}
+    for usage in usages:
+        for key, value in usage.items():
+            number = _number(value)
+            if number is not None:
+                total[str(key)] = total.get(str(key), 0) + number
+    return total
+
+
 def _run_record(run_dir: pathlib.Path) -> Optional[dict]:
     """Read one run directory into stage, durations, queue time and usage."""
     status_path = run_dir / "status.json"
@@ -218,21 +265,13 @@ def _run_record(run_dir: pathlib.Path) -> Optional[dict]:
     else:
         budget = min(execution, allowance)
 
-    usage_raw = status.get("usage")
-    if not isinstance(usage_raw, dict) or not usage_raw:
-        usage_raw = result.get("usage")
-    usage: dict[str, Any] = {}
-    if isinstance(usage_raw, dict):
-        for key, value in usage_raw.items():
-            number = _number(value)
-            if number is not None:
-                usage[str(key)] = number
-
     change_id = status.get("change_id") or result.get("change_id")
+    if change_id is None:
+        change_id = _task_change_id(run_dir)
     return {"run_id": name, "stage": stage, "errors": errors,
             "change_id": str(change_id) if change_id is not None else None,
             "queued_seconds": float(queued), "execution_seconds": execution,
-            "budget_seconds": budget, "usage": usage}
+            "budget_seconds": budget, "usage": _usage_of(status, result)}
 
 
 def _empty_bucket() -> dict:

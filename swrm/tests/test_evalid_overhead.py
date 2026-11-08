@@ -202,6 +202,73 @@ class EvalidOverheadTests(unittest.TestCase):
         self.assertEqual(overhead.render_report(report),
                          overhead.render_report(overhead.build_report(self.runs)))
 
+    def test_swrm_task_cards_identify_changes_without_json_change_id(self):
+        common = {"queued_at": 100, "started": 110, "finished": 140,
+                  "queued_seconds": 10}
+
+        def write_role_run(run_id, change):
+            self.write_run(run_id, **common)
+            run = self.runs / run_id
+            (run / "task.md").write_text(
+                "---\nevalid_version: 1\nrole: evalid-tdd\n"
+                f"change_id: {change}\ninput_evidence: []\n---\n"
+                "Build it.\nchange_id: body-is-not-metadata\n", encoding="utf-8")
+            (run / "result.json").write_text(json.dumps({
+                "evalid_stage": "red", "seconds": 30,
+            }), encoding="utf-8")
+
+        write_role_run("red-a", "issue-a")
+        write_role_run("red-b", '"issue-b"')
+        report = overhead.build_report(self.runs)
+        self.assertEqual(report["baseline_run_count"], 2)
+        self.assertEqual(report["extra_run_count"], 0)
+        self.assertEqual(report["data_quality_errors"], [])
+
+        write_role_run("red-b-retry", "'issue-b'")
+        report = overhead.build_report(self.runs)
+        self.assertEqual(report["stages"]["red"]["run_count"], 3)
+        self.assertEqual(report["baseline_run_count"], 2)
+        self.assertEqual(report["extra_run_count"], 1)
+        self.assertEqual(overhead.render_report(report),
+                         overhead.render_report(overhead.build_report(self.runs)))
+
+    def test_swrm_attempt_usage_includes_retries_without_double_counting(self):
+        for run_id in ("red-a", "red-b"):
+            self.write_run(run_id, queued_at=100, started=110, finished=140,
+                           usage={"input_tokens": 7})
+            (self.runs / run_id / "result.json").write_text(json.dumps({
+                "evalid_stage": "red", "seconds": 30,
+                "usage": {"input_tokens": 7, "output_tokens": 3, "cost_usd": 0.2},
+                "attempts": [
+                    {"seconds": 10, "meta": {"usage": {
+                        "input_tokens": 5, "output_tokens": 2, "cost_usd": 0.1}}},
+                    {"seconds": 20, "meta": {"usage": {
+                        "input_tokens": 7, "output_tokens": 3, "cost_usd": 0.2}}},
+                ],
+            }), encoding="utf-8")
+
+        report = overhead.build_report(self.runs)
+
+        self.assertEqual(report["stages"]["red"]["run_count"], 2)
+        self.assertEqual(report["totals"]["usage"]["input_tokens"], 24)
+        self.assertEqual(report["totals"]["usage"]["output_tokens"], 10)
+        self.assertAlmostEqual(report["totals"]["usage"]["cost_usd"], 0.6)
+        self.assertEqual(report["stages"]["red"]["usage"], report["totals"]["usage"])
+        self.assertEqual(report["stages"]["red"]["execution_seconds"], 60)
+
+    def test_usage_falls_back_to_top_level_without_attempt_usage(self):
+        for index, attempts in enumerate((None, [], [{"seconds": 30}],
+                                           [None, {"meta": None}, {"meta": {"usage": None}}])):
+            with self.subTest(attempts=attempts):
+                run_id = f"red-{index}"
+                self.write_run(run_id, stage="red", queued_at=100,
+                               started=110, finished=140)
+                (self.runs / run_id / "result.json").write_text(json.dumps({
+                    "usage": {"input_tokens": 7}, "attempts": attempts,
+                }), encoding="utf-8")
+                report = overhead.build_report(self.runs)
+                self.assertEqual(report["totals"]["usage"], {"input_tokens": 7 * (index + 1)})
+
     def test_budget_is_capped_at_the_allowance_and_never_charges_queue(self):
         self.write_run(
             "over-budget",
