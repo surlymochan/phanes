@@ -46,9 +46,10 @@
    - 若连接持续失败，重试间隔按阶梯或指数退避倍增（30s → 60s → 120s → 240s → 600s），单次最大重试等待上限封顶为 **600 秒**（600s / 10 分钟）。
 
 2. **调用超时与 Fail-Closed 保证**：
-   - 依据 `swrm/bin/swrm:3345-3354`，单次 `fleet_guard_call` 设定了 15 秒（`timeout=15`）硬超时。
-   - 一旦协调器不可达或超时，立即捕获异常抛出 `fleet capacity coordinator unavailable`，采取严格的 **fail-closed** 策略。
-   - 任务保留在排队或重试状态，绝不会在未取得协调器 reservation 的情况下误启动执行器。
+   - `fleet_guard_call` 对每次协调器调用设置 8 秒硬超时；acquire 最多连续尝试 3 次，按 0.2s、0.4s 退避。
+   - 连续失败时 run 保持 `queued`，状态写入 `queue_reason: capacity-unreachable`、`capacity_unreachable: true` 与最后错误；stderr 记录 acquire 失败次数。
+   - acquire 仅在确认获得 reservation 后启动执行器，协调器不可达不会误判为容量不足。
+   - release 最多尝试 3 次；仍失败时保留 reservation，并在 run 目录写入 `fleet-release-pending.json` 供后续补发/清扫处理。
 
 3. **TTL 超时回收对齐（600s）**：
    - 依据 `swrm/bin/swrm:3370-3375`，协调器保留预约的默认恢复 TTL 为 `recovery_ttl_seconds = 600`（600 秒）。

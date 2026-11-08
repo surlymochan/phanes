@@ -3848,13 +3848,17 @@ def fleet_guard_command():
 
 
 def fleet_guard_call(command, payload):
+    started = time.monotonic()
     try:
-        result = subprocess.run(_spawnable(command), input=json.dumps(payload), text=True, capture_output=True, timeout=15)
+        result = subprocess.run(_spawnable(command), input=json.dumps(payload), text=True, capture_output=True, timeout=8)
         answer = json.loads(result.stdout)
         if result.returncode != 0 or not answer.get("ok"):
             raise ValueError(answer.get("error") or "coordinator rejected request")
         return answer
     except (OSError, ValueError, subprocess.TimeoutExpired) as error:
+        elapsed = time.monotonic() - started
+        print(f"fleet capacity {payload.get('op', 'unknown')} failed after {elapsed:.2f}s: {error}",
+              file=sys.stderr)
         raise RuntimeError(f"fleet capacity coordinator unavailable: {error}")
 
 
@@ -3869,7 +3873,13 @@ def release_fleet_slot(rdir):
             break
         except RuntimeError as error:
             if attempt == 2:
-                set_status(rdir, fleet_reservation_error=str(error))
+                pending = {"command": command, "payload": {"op": "release", "run_id": payload["run_id"],
+                                                               "token": payload["token"]},
+                           "attempts": attempt + 1, "error": str(error), "created": NOW()}
+                jsave(os.path.join(rdir, "fleet-release-pending.json"), pending)
+                set_status(rdir, fleet_reservation_error=str(error), fleet_release_pending=True)
+                print(f"fleet capacity release failed after {attempt + 1} attempts; queued retry: {rdir}",
+                      file=sys.stderr)
                 return False
             time.sleep(0.2 * (attempt + 1))
     _FLEET_RESERVATIONS.pop(os.path.realpath(rdir), None)
@@ -3889,6 +3899,7 @@ def reserve_provider_slot(rdir, backend, provider, policy, lane_name=None, keep_
     token = uuid.uuid4().hex
     payload = {"op": "acquire", "token": token, "run_id": os.path.basename(rdir),
                "backend": backend, "provider": provider}
+    coordinator_failures = 0
     while True:
         with open(lock_path, "a") as lock:
             _flock(lock, LOCK_EX)
@@ -3925,8 +3936,27 @@ def reserve_provider_slot(rdir, backend, provider, policy, lane_name=None, keep_
                     try:
                         admitted = bool(fleet_guard_call(command, payload).get("admitted"))
                     except RuntimeError as error:
+                        coordinator_failures += 1
                         admitted = False
-                        set_status(rdir, fleet_reservation_error=str(error))
+                        set_status(rdir, fleet_reservation_error=str(error),
+                                   capacity_unreachable=coordinator_failures >= 3)
+                        print(f"fleet capacity acquire failed after coordinator call ({coordinator_failures}/3): {error}",
+                              file=sys.stderr)
+                        if coordinator_failures >= 3:
+                            set_status(rdir, state="queued", backend=backend, provider=provider,
+                                       concurrency_keys=keys, queue_reason="capacity-unreachable",
+                                       capacity_unreachable=True,
+                                       fleet_reservation_error=f"{error} (3 attempts; capacity-unreachable)",
+                                       **({"lane": lane_name} if lane_name else {}))
+                            if lane_name:
+                                lane_write_state(lane_name, turn_state="queued", concurrency_keys=keys,
+                                                 queue_reason="capacity-unreachable",
+                                                 capacity_unreachable=True)
+                            return False
+                        time.sleep(0.2 * (2 ** (coordinator_failures - 1)))
+                        continue
+                    else:
+                        coordinator_failures = 0
                 if admitted and command:
                     _FLEET_RESERVATIONS[reservation_key] = (command, payload)
             else:

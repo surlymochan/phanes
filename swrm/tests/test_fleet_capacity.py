@@ -83,6 +83,8 @@ class FleetCapacityTests(unittest.TestCase):
         self.assertEqual(call.call_count, 3)
         status = json.loads((rdir / 'status.json').read_text())
         self.assertEqual(status['state'], 'queued')
+        self.assertEqual(status['queue_reason'], 'capacity-unreachable')
+        self.assertTrue(status['capacity_unreachable'])
         self.assertIn('coordinator timeout', status['fleet_reservation_error'])
 
     def test_required_missing_configuration_fails_closed(self):
@@ -110,6 +112,8 @@ class FleetCapacityTests(unittest.TestCase):
             self.assertFalse(xs.release_fleet_slot(rdir))
         self.assertEqual(call.call_count, 3)
         self.assertIn(rdir, xs._FLEET_RESERVATIONS)
+        pending = pathlib.Path(rdir, 'fleet-release-pending.json')
+        self.assertEqual(json.loads(pending.read_text())['payload']['op'], 'release')
 
     def test_remote_review_assignment_passes_read_only_to_lane(self):
         root = pathlib.Path(self.temp.name)
