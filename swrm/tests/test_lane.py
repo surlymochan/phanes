@@ -944,7 +944,7 @@ class AgyStartupRegressionTests(unittest.TestCase):
         self.addCleanup(self.tmp.cleanup)
         self.lane = {"name": "L1", "backend": "agy", "model": "test"}
 
-    def run_turn(self, second_error, late=False, drained=False):
+    def run_turn(self, second_error, late=False, drained=False, early=False):
         xs, mock = self.xs, self.mock
         clock = [100.0]
         child = mock.Mock(pid=123)
@@ -961,6 +961,12 @@ class AgyStartupRegressionTests(unittest.TestCase):
         if drained:
             events = iter([None, False, {"type": "init", "conversation_id": "conv-1"}, None])
             child.alive.return_value = False
+        if early:
+            events = iter([{"type": "init"}, None, {"type": "init"}, None])
+            # Reaping must not turn an early EOF into a late running-turn failure.
+            def reap():
+                clock[0] += 6
+            child.reap_after_stdout_eof.side_effect = reap
         child.next_event.side_effect = next_event
         spec = {"started": 100, "budget_minutes": 1}
         with mock.patch.object(xs, "NOW", side_effect=lambda: clock[0]), \
@@ -993,6 +999,81 @@ class AgyStartupRegressionTests(unittest.TestCase):
         self.assertEqual(result[5].count("exit code 2"), 2)
         self.assertIn("first startup crash", result[5])
         self.assertIn("second startup crash", result[5])
+
+    def test_early_event_crash_uses_eof_time_before_reaping(self):
+        result = self.run_turn("second startup crash", early=True)
+        self.assertEqual(result[2], "executor_start_failed")
+
+    def test_stdout_eof_reaps_each_child_before_restart_and_diagnosis(self):
+        xs, mock = self.xs, self.mock
+        child = mock.Mock(pid=123)
+        child.proc.poll.return_value = None
+        child.stderr_text.return_value = ""
+        child.next_event.side_effect = [None, None]
+
+        def start(*args, **kwargs):
+            if child.start.call_count == 2:
+                self.assertEqual(child.proc.poll(), 2, "previous child is still running")
+            child.proc.poll.return_value = None
+            child.stderr_text.return_value = ""
+
+        def reap():
+            child.proc.poll.return_value = 2
+            child.stderr_text.return_value = f"startup crash {child.start.call_count}"
+
+        child.start.side_effect = start
+        child.reap_after_stdout_eof.side_effect = reap
+        with mock.patch.object(xs, "NOW", return_value=100), \
+             mock.patch.object(xs, "set_status"), \
+             mock.patch.object(xs, "load_policy", return_value={}), \
+             mock.patch.object(xs, "lane_control_messages"):
+            result = xs.lane_run_turn(self.lane, child, {"started": 100, "budget_minutes": 1},
+                                      "same prompt", {"path": self.tmp.name}, self.tmp.name, None, {}, [])
+        self.assertEqual(child.reap_after_stdout_eof.call_count, 2)
+        self.assertEqual(result[2], "executor_start_failed")
+        self.assertEqual(result[5].count("exit code 2"), 2)
+        self.assertIn("startup crash 1", result[5])
+        self.assertIn("startup crash 2", result[5])
+
+    def test_reap_after_stdout_eof_waits_for_exit_and_stderr(self):
+        xs = self.xs
+        # Exercise the real readers: stdout EOF can precede both stderr and exit.
+        child = xs.AgyChild.__new__(xs.AgyChild)
+        child.events, child.stderr_lines = xs.queue.Queue(), []
+        child.proc = subprocess.Popen(
+            [sys.executable, "-c", "import os, sys; os.close(1); sys.stdin.readline(); "
+             "sys.stderr.write('late startup diagnostic\\n'); sys.exit(2)"],
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            text=True, start_new_session=True)
+        self.addCleanup(child.close)
+        self.addCleanup(child.proc.stdin.close)
+        xs.threading.Thread(target=child._read_stdout, args=(child.proc, child.events), daemon=True).start()
+        child.stderr_thread = xs.threading.Thread(
+            target=child._read_stderr, args=(child.proc, child.stderr_lines), daemon=True)
+        child.stderr_thread.start()
+        self.assertIsNone(child.next_event(5))
+        self.assertIsNone(child.proc.poll())
+        child.proc.stdin.write("\n")
+        child.proc.stdin.flush()
+        child.reap_after_stdout_eof()
+        self.assertEqual(child.proc.poll(), 2)
+        self.assertEqual(child.stderr_text(), "late startup diagnostic\n")
+        self.assertFalse(child.stderr_thread.is_alive())
+
+    def test_reap_after_stdout_eof_terminates_child_that_does_not_exit(self):
+        xs, mock = self.xs, self.mock
+        child = xs.AgyChild.__new__(xs.AgyChild)
+        child.proc = mock.Mock(pid=123)
+        child.proc.wait.side_effect = [subprocess.TimeoutExpired("agy", 3), -9]
+        child.proc.poll.return_value = None
+        child.stderr_thread = mock.Mock()
+        with mock.patch.object(xs, "kill_tree") as kill:
+            child.reap_after_stdout_eof()
+        kill.assert_called_once_with(123, grace=1)
+        child.proc.kill.assert_called_once_with()
+        self.assertEqual(child.proc.wait.call_args_list, [mock.call(timeout=3), mock.call(timeout=3)])
+        child.stderr_thread.join.assert_called_once_with(timeout=3)
+        child.proc.stderr.close.assert_called_once_with()
 
     def test_start_crash_releases_empty_fleet_reservation(self):
         xs, mock = self.xs, self.mock

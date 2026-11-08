@@ -7563,6 +7563,7 @@ class AgyChild:
         self.boundary = procboundary.CgroupBoundary.create()
         self.events = queue.Queue()
         self.stderr_lines = []
+        self.stderr_thread = None
 
     def start(self, prompt, model=None, effort=None, conversation=None):
         """Run one headless agy turn; events land in self.events as they arrive."""
@@ -7585,7 +7586,8 @@ class AgyChild:
         events, stderr_lines = queue.Queue(), []
         self.proc, self.events, self.stderr_lines = proc, events, stderr_lines
         threading.Thread(target=self._read_stdout, args=(proc, events), daemon=True).start()
-        threading.Thread(target=self._read_stderr, args=(proc, stderr_lines), daemon=True).start()
+        self.stderr_thread = threading.Thread(target=self._read_stderr, args=(proc, stderr_lines), daemon=True)
+        self.stderr_thread.start()
         return proc.pid
 
     def _read_stdout(self, proc, events):
@@ -7627,6 +7629,24 @@ class AgyChild:
 
     def stderr_text(self):
         return "".join(self.stderr_lines)
+
+    def reap_after_stdout_eof(self):
+        """Finish the old process and its stderr reader before diagnosing or restarting it."""
+        if self.proc is None:
+            return
+        try:
+            self.proc.wait(timeout=3)
+        except subprocess.TimeoutExpired:
+            # Closing stdout does not imply exit. Never overlap it with a retry.
+            kill_tree(self.proc.pid, grace=1)
+            if self.proc.poll() is None:
+                self.proc.kill()
+            self.proc.wait(timeout=3)
+        if self.stderr_thread is not None:
+            self.stderr_thread.join(timeout=3)
+        for stream in (self.proc.stdout, self.proc.stderr):
+            if stream is not None:
+                stream.close()
 
     def close(self):
         if self.proc is None:
@@ -7671,7 +7691,8 @@ class CursorHeadlessChild(AgyChild):
         events, stderr_lines = queue.Queue(), []
         self.proc, self.events, self.stderr_lines = proc, events, stderr_lines
         threading.Thread(target=self._read_stdout, args=(proc, events), daemon=True).start()
-        threading.Thread(target=self._read_stderr, args=(proc, stderr_lines), daemon=True).start()
+        self.stderr_thread = threading.Thread(target=self._read_stderr, args=(proc, stderr_lines), daemon=True)
+        self.stderr_thread.start()
         return proc.pid
 
     def _read_stdout(self, proc, events):
@@ -8156,11 +8177,11 @@ def lane_run_turn(lane, child, spec, prompt, ws, rdir, server, turn, pending, at
             return "rate_limit", text
         return ("risk_blocked" if spec.get("risk_blocks") else "exec_error"), text
 
-    def retry_agy_start(detail):
+    def retry_agy_start(detail, exited_at):
         """Restart a headless agy process once when it exits before a stable turn starts."""
         nonlocal agy_started_at, agy_saw_executor_event, agy_start_restarts
         if (not lane_headless(lane) or spec.get("risk_blocks")
-                or (agy_saw_executor_event and NOW() - agy_started_at >= agy_start_grace_s)):
+                or (agy_saw_executor_event and exited_at - agy_started_at >= agy_start_grace_s)):
             return False
         proc = getattr(child, "proc", None)
         exit_code = proc.poll() if proc else None
@@ -8214,9 +8235,11 @@ def lane_run_turn(lane, child, spec, prompt, ws, rdir, server, turn, pending, at
                 if lane_headless(lane):
                     msg = child.next_event(1.0)  # a finished process may still have events in its pipe
                     if msg is False:
+                        exited_at = NOW()
+                        child.reap_after_stdout_eof()
                         if agy_resume_steer():
                             continue
-                        if retry_agy_start("resident executor process exited"):
+                        if retry_agy_start("resident executor process exited", exited_at):
                             continue
                         error_class, detail = lane_failure("resident executor process exited")
                         return None, usage, error_class, 1, event_file, detail
@@ -8226,9 +8249,11 @@ def lane_run_turn(lane, child, spec, prompt, ws, rdir, server, turn, pending, at
                 continue
         if msg is None:
             if lane_headless(lane):
+                exited_at = NOW()
+                child.reap_after_stdout_eof()
                 if agy_resume_steer():
                     continue
-                if retry_agy_start("resident executor stdout closed"):
+                if retry_agy_start("resident executor stdout closed", exited_at):
                     continue
                 error_class, detail = lane_failure("resident executor stdout closed")
                 return None, usage, error_class, 1, event_file, detail
