@@ -21,6 +21,7 @@ const logs: string[] = [];
 const starts: number[] = [];
 let persistDir: string | undefined;
 let stateLink: string | undefined;
+let stateLinkCreated = false;
 let cleaned = false;
 let persistentSessionRead = false;
 let accountReadable = false;
@@ -166,6 +167,7 @@ try {
   }
   await mkdir(join(APP, ".wrangler"), { recursive: true });
   await symlink(persistDir, stateLink, "dir");
+  stateLinkCreated = true;
   // Build the local D1 schema before starting workerd. This uses Wrangler's local SQLite state only.
   // Wrangler 4.x has no `--yes` flag here: it skips the confirmation when the command runs without
   // a terminal, which the piped output of this script already is.
@@ -254,7 +256,7 @@ try {
 } finally {
   await stopWorker();
   let cleanupFailed = false;
-  if (stateLink) {
+  if (stateLink && stateLinkCreated) {
     try {
       await unlink(stateLink);
     } catch (cause) {
