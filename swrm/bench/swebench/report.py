@@ -38,12 +38,12 @@ def rate_limit_stats(raw_dir, arm, instance_id, rep):
 
     retries: assistant `message_end` events whose message.errorMessage mentions 429 / rate_limit.
     ended_in_error: True if the LAST assistant `message_end` of any events file has stopReason "error".
+    The last event is the globally last one: event files in name order, events in file order.
     """
     d = Path(raw_dir) / arm / instance_id / ("r%d" % rep)
     retries = 0
-    ended_in_error = False
+    last = None
     for f in sorted(d.glob("*-events.jsonl")):
-        last = None
         with f.open(errors="replace") as fh:
             for line in fh:
                 if '"message_end"' not in line:
@@ -61,8 +61,7 @@ def rate_limit_stats(raw_dir, arm, instance_id, rep):
                 if "429" in err or "rate_limit" in err.lower():
                     retries += 1
                 last = msg
-        if last is not None and last.get("stopReason") == "error":
-            ended_in_error = True
+    ended_in_error = last is not None and last.get("stopReason") == "error"
     return {"retries": retries, "ended_in_error": ended_in_error}
 
 
