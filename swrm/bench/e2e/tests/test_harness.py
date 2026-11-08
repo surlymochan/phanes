@@ -83,6 +83,18 @@ class MetricsTests(unittest.TestCase):
         blob = "noise\n" + json.dumps({"ok": True}) + "\n" + json.dumps(result)
         self.assertEqual(extract_result_object(blob)["id"], "abc")
 
+    def test_receipt_ignores_unrelated_trailing_json_object(self):
+        receipt = {
+            "id": "run-123",
+            "status": "done",
+            "workspace": {"mode": "worktree", "path": "/tmp/run-123"},
+            "run_dir": "/tmp/swrm/runs/run-123",
+        }
+        telemetry = {"id": "metrics-456", "event": "usage", "count": 7}
+        stdout = "starting run\n" + json.dumps(receipt) + "\n" + json.dumps(telemetry)
+
+        self.assertEqual(extract_result_object(stdout), receipt)
+
 
 class PipelineTests(unittest.TestCase):
     def test_fake_agent_records_tokens_and_hidden_tests(self):
