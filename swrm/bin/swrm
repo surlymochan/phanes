@@ -9745,7 +9745,7 @@ def fleet_snapshot():
 
 def lanes_health_probe():
     """Load the control-plane reader shared with the standalone health probe."""
-    path = Path(__file__).resolve().parents[2] / "tools" / "check-lanes-status-stall.py"
+    path = Path(__file__).resolve().with_name("swrm_lanes_health.py")
     spec = importlib.util.spec_from_file_location("lanes_health_probe", path)
     probe = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(probe)

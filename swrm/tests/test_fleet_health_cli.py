@@ -26,6 +26,7 @@ import io
 import json
 import os
 import pathlib
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -299,6 +300,60 @@ class FleetHealthIntegrationTest(unittest.TestCase):
         self.assertEqual(second["snapshot"]["status"], "stale")
         self.assertEqual(second["writer"]["status"], "dead")
         self.assertEqual(calls, [60, 60])
+
+
+class StandaloneFleetHealthTest(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.tmp = tempfile.TemporaryDirectory(dir=REPO_ROOT)
+        cls.addClassCleanup(cls.tmp.cleanup)
+        cls.root = pathlib.Path(cls.tmp.name)
+        install = cls.root / "standalone"
+        shutil.copytree(REPO_ROOT / "swrm", install,
+                        ignore=shutil.ignore_patterns("__pycache__", ".pytest_cache"))
+        cls.binary = cls.root / "swrm"
+        cls.binary.symlink_to(install / "bin" / "swrm")
+
+    def test_installed_fleet_commands_without_repository_tools(self):
+        self.assertFalse((self.root / "tools").exists())
+        for status in ("fresh", "stale", "dead", "missing"):
+            with self.subTest(status=status), tempfile.TemporaryDirectory(dir=self.root) as directory:
+                stamp = STALLED_AT if status == "stale" else time.strftime("%F %T")
+                home, snapshot = fixture(directory, stamp)
+                if status == "missing":
+                    snapshot.unlink()
+                if status == "dead":
+                    (snapshot.parent / "autodispatch.pid").write_text(f"{dead_pid()}\n")
+                runtime = home / "runtime"
+                runtime.mkdir()
+                (runtime / "fleet.json").write_text('{"hosts": []}')
+                environment = {name: value for name, value in os.environ.items()
+                               if not name.startswith(("OPENSWARM_", "XSWARM_", "SWRM_", "PYTHONPATH"))}
+                environment.update(HOME=str(home), TMPDIR=str(home), OPENSWARM_HOME=str(runtime))
+                for command in ("health", "status"):
+                    for as_json in (False, True):
+                        with self.subTest(command=command, json=as_json):
+                            argv = [sys.executable, str(self.binary), "fleet", command]
+                            if as_json:
+                                argv.append("--json")
+                            result = subprocess.run(argv, env=environment, cwd=home,
+                                                    capture_output=True, text=True, timeout=30)
+                            expected_code = int(status != "fresh") if command == "health" else 0
+                            self.assertEqual(result.returncode, expected_code, result.stderr)
+                            self.assertNotIn("Traceback", result.stderr)
+                            if as_json:
+                                report = json.loads(result.stdout)
+                                self.assertEqual(report["ok"], status == "fresh")
+                                control = report if command == "health" else report["control_plane"]
+                                expected_snapshot = "fresh" if status == "dead" else status
+                                self.assertEqual(control["snapshot"]["status"], expected_snapshot)
+                                if status == "dead":
+                                    self.assertEqual(control["writer"]["status"], "dead")
+                            elif status in ("stale", "dead"):
+                                self.assertIn("WARNING", result.stdout)
+                                self.assertIn(status, result.stdout)
+                                if status == "stale":
+                                    self.assertIn(STALLED_AT, result.stdout)
 
 
 class mock_environ:
