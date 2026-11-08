@@ -1,4 +1,6 @@
+import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
 import { describe, expect, test } from "vitest";
 
 const script = readFileSync(new URL("./agent-threads-upgrade-e2e.ts", import.meta.url), "utf8");
@@ -23,5 +25,16 @@ describe("agent thread upgrade host E2E", () => {
     expect(workflow).toContain("bun test scripts/agent-threads-upgrade-e2e.ts");
     expect(workflow).toContain("agent-threads-upgrade-e2e/report.json");
     expect(workflow).toContain("actions/upload-artifact");
+  });
+
+  test("runs the real host upgrade and restart against nonempty upstream data", () => {
+    const output = execFileSync(
+      "bun",
+      [resolve(import.meta.dirname, "agent-threads-upgrade-e2e.ts"), "--run-e2e"],
+      { cwd: resolve(import.meta.dirname, ".."), encoding: "utf8" },
+    );
+    expect(output).toContain('"passed": true');
+    expect(output).toContain('"hostRestarted": true');
+    expect(output).toContain('"retainedSessions": 1');
   });
 });

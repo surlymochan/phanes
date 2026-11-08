@@ -374,6 +374,10 @@ jobs:
         if: ${{ !cancelled() }}
         run: bun run test:agent-hide-restore
 
+      - name: Run the agent threads database upgrade E2E test
+        if: ${{ !cancelled() }}
+        run: bun test scripts/agent-threads-upgrade-e2e.ts scripts/ci-agent-threads-upgrade.test.ts
+
       - name: Run the messaging pause and resume E2E test
         if: ${{ !cancelled() }}
         run: bun run test:messaging-pause-resume
@@ -606,6 +610,7 @@ jobs:
             .volto-build/routine-overnight-window-e2e/
             .volto-build/agent-waits-tools-e2e/
             .volto-build/agent-hide-restore-e2e/
+            .volto-build/agent-threads-upgrade-e2e/report.json
             .volto-build/messaging-pause-resume-e2e/
             .volto-build/messaging-discord-access-e2e/
             .volto-build/turn-input-e2e/
