@@ -6,11 +6,11 @@ is still running (the 05:12 box pause accident behind #1403), so the decision
 is taken from the lease of the issue, from the lanes that still hold it and
 from the grace window that follows the last box resume.
 
-`openswarm/lib/dispatch/leak_sweep.py` is the module this suite covers.  It does
+`swrm/lib/dispatch/leak_sweep.py` is the module this suite covers.  It does
 not exist on this baseline, so the suite is red until the fix lane adds it
 (Refs #1493).
 
-Acceptance: `cd openswarm && python3 -m unittest discover -s tests -p 'test_dispatch_leak_sweep.py'`
+Acceptance: `cd swrm && python3 -m unittest discover -s tests -p 'test_dispatch_leak_sweep.py'`
 
 Mapping (the review blockers of #1493 → the test that reproduces them):
 
@@ -32,7 +32,7 @@ SWEEP_MODULE = HERE.parent / "lib" / "dispatch" / "leak_sweep.py"
 
 
 def _load(name, path):
-    """Load a module by path: `openswarm/lib/dispatch/` is a namespace package."""
+    """Load a module by path: `swrm/lib/dispatch/` is a namespace package."""
     spec = importlib.util.spec_from_file_location(name, path)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
@@ -56,7 +56,7 @@ class LeakSweepTests(unittest.TestCase):
     """Every `in-progress` label is either kept with a reason or stripped."""
 
     def setUp(self):
-        self.tmp = tempfile.TemporaryDirectory(prefix="openswarm-leak-sweep-")
+        self.tmp = tempfile.TemporaryDirectory(prefix="swrm-leak-sweep-")
         self.addCleanup(self.tmp.cleanup)
         self.leases = lease.LeaseStore(self.tmp.name)
         self.label = row(1403, 1000)

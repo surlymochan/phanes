@@ -111,7 +111,7 @@ def merge_branch(repo: Path, result: dict) -> tuple[bool, str]:
     run_id = result.get("id")
     if not run_id:
         return False, "result has no id"
-    branch = f"openswarm/{run_id}"
+    branch = f"swrm/{run_id}"
     mode = ((result.get("workspace") or {}).get("mode")) or ""
     exists = _git(repo, "rev-parse", "--verify", "--quiet", branch).returncode == 0
     if mode == "in-place":

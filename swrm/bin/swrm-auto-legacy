@@ -11,8 +11,8 @@ import shlex
 import time
 
 home = Path.home()
-cli = os.environ.get('OPENSWARM_AUTO_CLI', str(home / '.local/bin/openswarm'))
-ssh = ['/usr/bin/ssh', '-T', '-F', str(home / '.ssh/openswarm-fleet/config'), 'openswarm-pi-broker']
+cli = os.environ.get('OPENSWARM_AUTO_CLI', str(home / '.local/bin/swrm'))
+ssh = ['/usr/bin/ssh', '-T', '-F', str(home / '.ssh/swrm-fleet/config'), 'swrm-pi-broker']
 
 class LaneBusy(RuntimeError):
     pass
