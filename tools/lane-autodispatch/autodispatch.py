@@ -980,7 +980,8 @@ class StatusPublisher:
     hung `gh` call or a long refill froze `_at` while the dispatcher kept dispatching
     (Refs #1697).  The publisher is called at every step of the tick and a refresher thread
     republishes it while a slow step runs, so `_at` follows the dispatch rhythm; the queue
-    counters keep their last known value until the current tick measured them again.
+    counters keep their last known value until the current tick measured them again,
+    then every successful assignment updates the busy and ready counts together.
     """
 
     def __init__(self, lanes, state, path=None, logger=None, heartbeat=None, refresh=None):
@@ -996,7 +997,7 @@ class StatusPublisher:
         self.refresh = STATUS_REFRESH_SECONDS if refresh is None else float(refresh)
         self.phase = "start"
         self.tick_at = time.strftime("%F %T")
-        self._lock = threading.Lock()
+        self._lock = threading.RLock()
         self._stop = threading.Event()
         self._thread = None
 
@@ -1054,6 +1055,16 @@ class StatusPublisher:
                                         name="lanes-status-refresh", daemon=True)
         self._thread.start()
         return self
+
+    def record_dispatch(self, lane, record):
+        """Publish an assignment and its queue decrement before any slow save or logging.
+
+        The refresher shares this lock, so it cannot publish a new busy lane with the
+        ready count from before the assignment.
+        """
+        with self._lock:
+            self.state[lane] = record
+            return self.publish(ready=max(0, (self.ready or 0) - 1), phase="dispatch")
 
     def _refresh(self, every):
         while not self._stop.wait(every):
@@ -1415,9 +1426,11 @@ def run_tick(lanes, state, last_warn, publisher):
     except Exception as e:
         log(f"queue error: {e}", brain=False); publisher.publish(res=res, phase="queue"); return last_warn
     for i in q: i["deps_ok"] = deps_met(i)
-    publisher.publish(res=res, phase="deps")  # the (slow) dependency check is done
     # one authoritative read per issue per tick, shared by the dispatch candidates and the count
     prefetch_labels([i["n"] for i in q])
+    q = freshen_queue(q, state)
+    blocked = sum(not i["deps_ok"] for i in q)
+    publisher.publish(res=res, ready=len(q) - blocked, blocked=blocked, phase="deps")
     base = None
     for L, cfg in lanes.items():
         r = res[L]
@@ -1454,17 +1467,18 @@ def run_tick(lanes, state, last_warn, publisher):
             # never count it as a stale skip and never dispatch on unverified labels
             log_unverified(c["n"], status, detail, "kept in queue (not dispatched this tick)")
         if not pick: continue
-        publisher.publish(res=res, phase="dispatch")  # a slow label read must not freeze `_at`
+        blocked = sum(not i["deps_ok"] for i in q)
+        publisher.publish(res=res, ready=len(q) - blocked, blocked=blocked, phase="dispatch")
         if base is None:
             _, out, _ = sh(["git", "ls-remote", BASE_REPO_URL, f"refs/heads/{BASE_BRANCH}"]); base = out.split()[0]
         gh(["issue", "edit", str(pick["n"]), "--add-label", "in-progress"])
         try: run, ver = dispatch(L, cfg, pick, base)
         except Exception as e:
             dispatch_failed(L, cfg, pick, e); publisher.publish(res=res, phase="dispatch"); continue
-        q.remove(pick); state[L] = {"issue": pick["n"], "run": run, "host": cfg["host"], "base": base, "at": time.strftime("%F %T"), "verify": ver, "class": "verify" if pick.get("verify") else "work"}
+        q.remove(pick)
+        publisher.record_dispatch(L, {"issue": pick["n"], "run": run, "host": cfg["host"], "base": base, "at": time.strftime("%F %T"), "verify": ver, "class": "verify" if pick.get("verify") else "work"})
         if AD_VERIFY_SHARE_ENABLED: log(f"queue share: dispatched {state[L]['class']} #{pick['n']} on {L}", brain=False)
         save_state(state); log(f"dispatched #{pick['n']} → {L} ({cfg['host']}) run {run} base {base[:8]}")
-        publisher.publish(res=res, phase="dispatch")  # every dispatch refreshes `_at`
     # stale search rows are not dispatchable: drop them (and log the skip) before counting
     q = freshen_queue(q, state)
     blocked = sum(not i["deps_ok"] for i in q)

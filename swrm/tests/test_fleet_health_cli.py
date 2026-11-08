@@ -152,6 +152,21 @@ class LanesStatusHealthProbeTest(unittest.TestCase):
             self.assertNotEqual(done.returncode, 0, f"a missing snapshot must raise an alarm: {output}")
             self.assertIn("missing", output.lower(), f"the missing snapshot is not reported: {output}")
 
+    def test_plain_text_pid_is_checked_even_with_a_fresh_heartbeat(self):
+        for pid, status in ((dead_pid(), "dead"), (os.getpid(), "alive")):
+            with self.subTest(status=status), tempfile.TemporaryDirectory() as directory:
+                home, snapshot = fixture(directory, time.strftime("%F %T"))
+                pid_file = snapshot.parent / "autodispatch.pid"
+                pid_file.write_text(f"{pid}\n", encoding="utf-8")
+                done = run_probe(["--json"], home)
+                report = json.loads(done.stdout)
+                self.assertEqual(report["writer"]["pid"], pid)
+                self.assertIs(report["writer"]["pid_alive"], status == "alive")
+                self.assertEqual(report["writer"]["status"], status)
+                self.assertEqual(done.returncode, int(status == "dead"))
+                self.assertEqual([alert["kind"] for alert in report["alerts"]],
+                                 ["autodispatch-writer-dead"] if status == "dead" else [])
+
     def test_the_json_verdict_carries_the_snapshot_and_the_writer(self):
         """The verdict is machine readable: a monitor consumes the same judgement."""
         with tempfile.TemporaryDirectory() as directory:
@@ -250,6 +265,17 @@ class FleetHealthIntegrationTest(unittest.TestCase):
         report = json.loads(result.stdout)
         self.assertFalse(report["ok"])
         self.assertEqual(report["writer"]["status"], "dead")
+
+    def test_health_cli_detects_plain_text_dead_pid_with_fresh_heartbeat(self):
+        self.snapshot.write_text(json.dumps({"_at": time.strftime("%F %T")}))
+        (self.state / "autodispatch.pid").write_text(f"{dead_pid()}\n")
+        with contextlib.redirect_stdout(io.StringIO()) as output, self.assertRaises(SystemExit) as exit_status:
+            self.swrm.cmd_fleet(argparse.Namespace(fleet_cmd="health", json=True, watch=None))
+        self.assertEqual(exit_status.exception.code, 1)
+        report = json.loads(output.getvalue())
+        self.assertFalse(report["ok"])
+        self.assertIs(report["writer"]["pid_alive"], False)
+        self.assertEqual(report["alerts"][0]["kind"], "autodispatch-writer-dead")
 
     def test_periodic_health_rechecks_after_snapshot_stalls_and_writer_exits(self):
         self.snapshot.write_text(json.dumps({"_at": time.strftime("%F %T")}))

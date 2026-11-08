@@ -392,6 +392,42 @@ class TenMinuteConsistencyTests(unittest.TestCase):
         self.assertGreater(max(ages), STALE_AFTER)
         self.assertEqual(set(statuses), {"stale"})
 
+    def test_dispatch_updates_queue_counts_before_slow_save_and_next_dispatch(self):
+        """A fresh stamp must carry the remaining queue, including during slow I/O."""
+        clock = FakeClock(1700000000.0)
+        fixture = DispatcherFixture(self.ad, self.tmp.name, clock)
+        fixture.path.write_text(json.dumps({"_at": STALLED_AT, "_ready": 99}))
+        state = {}
+        observed = []
+        patches = fixture.patches()
+
+        def check_counts():
+            snapshot = json.loads(fixture.path.read_text())
+            busy = len([lane for lane in fixture.LANES if state.get(lane)])
+            observed.append((busy, snapshot))
+
+        def dispatch(lane, cfg, item, base):
+            check_counts()  # includes the second assignment while the loop is still running
+            clock.advance(240)
+            check_counts()
+            return f"run-{lane}", None
+
+        for patch in patches:
+            patch.start()
+        try:
+            with mock.patch.object(self.ad, "time", clock), \
+                    mock.patch.object(self.ad, "dispatch", dispatch), \
+                    mock.patch.object(self.ad, "save_state", side_effect=lambda state: check_counts()):
+                self.ad.tick(dict(fixture.LANES), state, 0)
+        finally:
+            for patch in reversed(patches):
+                patch.stop()
+        self.assertEqual({busy for busy, snapshot in observed}, {0, 1, 2})
+        for busy, snapshot in observed:
+            self.assertEqual(snapshot["_busy"], busy)
+            self.assertEqual(snapshot["_ready"], 3 - busy)
+            self.assertEqual(snapshot["_blocked"], 0)
+
 
 class SlowStepTests(unittest.TestCase):
     """A step that blocks longer than the threshold must not freeze `_at` (Refs #1697)."""

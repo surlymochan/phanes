@@ -207,8 +207,12 @@ def writer_report(state=None, control=None, moment=None, stale_seconds=600) -> d
         report["pid_path"] = str(candidate)
         try:
             record = json.loads(candidate.read_text(encoding="utf-8"))
-            pid = int(record["pid"])
-            started_at = float(record.get("started_at") or 0) or None
+            if isinstance(record, int) and not isinstance(record, bool):
+                # Production ctl-loop writes a plain-text PID, not the helper's JSON object.
+                pid, started_at = record, None
+            else:
+                pid = int(record["pid"])
+                started_at = float(record.get("started_at") or 0) or None
         except (OSError, ValueError, KeyError, TypeError):
             report["pid_error"] = f"the pid file {candidate} is unreadable"
             continue
