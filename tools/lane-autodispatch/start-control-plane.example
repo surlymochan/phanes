@@ -16,6 +16,10 @@ start_one ib-refresh-loop   "$HOME/phanes-ctl/bin/ctl-loop"
 start_one lane-autodispatch "$HOME/phanes-ctl/bin/lane-autodispatch"
 start_one lane-merge        "$HOME/phanes-ctl/bin/lane-merge"
 start_one bus-worker-loop   "$HOME/phanes-ctl/bin/bus-worker-loop"
+# disk watermark guard (Refs #1666): the resident loop of the lane host disk guard.
+# It pauses a lane host whose disk is too full (PAUSE-HOST-<host>) and writes the
+# alert into the brain log; the dispatcher reads the pause and holds the lane.
+start_one disk-watermark    "$HOME/phanes-ctl/bin/disk-watermark-guard.py --loop --pause-dir $HOME/phanes-ctl/autodispatch --brain-log $HOME/phanes-ctl/brain.log --host govpn2"
 echo "status:"
 ~/phanes-ctl/bin/lane-autodispatch-status 2>/dev/null | head -5 || true
-pgrep -af 'lane-autodispatch|bus-worker-loop|lane-merge|ctl-loop' | head -20 || true
+pgrep -af 'lane-autodispatch|bus-worker-loop|lane-merge|ctl-loop|disk-watermark' | head -20 || true
