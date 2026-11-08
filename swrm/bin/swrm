@@ -82,6 +82,7 @@ from typing import Callable, Optional, Sequence
 sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
 
 import evalid_roles
+import procboundary
 
 
 def build_evalid_command(xflow_bin: str, *, request_file: str, output_file: str,
@@ -4064,23 +4065,35 @@ def run_executor_with_rate_limit(backend, decision, state, prompt, wd, rdir, bud
                    execution_started=status.get("execution_started") or admitted_at, workspace=wd)
         started = NOW()
         timeout = max(0, budget_deadline - NOW())
-        rc, final, meta, err_text = EXECUTORS[backend](call_decision, state, current_prompt, wd,
-                                                       rdir, timeout, event_file)
+        boundary = procboundary.CgroupBoundary.create()
+        with procboundary.track(boundary):
+            rc, final, meta, err_text = EXECUTORS[backend](call_decision, state, current_prompt, wd,
+                                                           rdir, timeout, event_file)
         seconds = round(NOW() - started, 3)
         error_class = executor_error_class(rc, final, err_text, backend)
+        boundary_safe, remaining = boundary.finish() if boundary else (False, None)
+        reservation_active = os.path.realpath(rdir) in _FLEET_RESERVATIONS
+        if reservation_active and boundary and not boundary_safe:
+            reason = ("executor descendants remain in the boundary" if remaining else
+                      "executor boundary could not be read" if remaining is None else
+                      "executor did not run inside a verifiable descendant boundary")
+            set_status(rdir, fleet_reservation_error="retained: " + reason)
         # run_proc has reaped a normal 403 or reported early-result exit.
-        if error_class in (None, "rate_limit", "risk_blocked") or (
+        if (not reservation_active or boundary_safe) and (error_class in (None, "rate_limit", "risk_blocked") or (
                 backend == "agy" and rc == 1 and (error_class == "upstream_forbidden"
-                                                   or (meta or {}).get("finished_reason"))):
+                                                   or (meta or {}).get("finished_reason")))):
             release_fleet_slot(rdir)
-        elif os.path.realpath(rdir) in _FLEET_RESERVATIONS:
-            set_status(rdir, fleet_reservation_error="retained after abnormal executor exit; inspect descendants")
+        elif reservation_active and boundary is None:
+            set_status(rdir, fleet_reservation_error=(
+                "retained: executor descendant boundary is unavailable or could not prove the cgroup empty"))
         set_status(rdir, state="routing", concurrency_keys=[])
         attempt = {"backend": backend, "model": decision.get("model"), "effort": decision.get("effort"),
                    "rc": rc, "seconds": seconds, "error_class": error_class, "meta": meta,
                    "events": event_file, "error_tail": (err_text or "")[-600:] if error_class else None,
                    "quota_before": before}
         attempts.append(attempt)
+        if reservation_active and not boundary_safe:
+            return attempts, final, error_class
         if error_class != "rate_limit":
             return attempts, final, error_class
 
@@ -4556,7 +4569,8 @@ def _run_proc(cmd, cwd, env, timeout, out_path, abort_re=None):
     rdir = os.path.dirname(out_path)
     with open(out_path, "w") as out, open(out_path + ".err", "w") as err:
         p = subprocess.Popen(_spawnable(cmd), cwd=cwd, env=env, stdout=out, stderr=err, stdin=subprocess.DEVNULL,
-                             start_new_session=True)
+                             start_new_session=True, **procboundary.popen_kwargs())
+        procboundary.observe_spawn()
         set_status(rdir, executor_pid=p.pid, events=out_path, attempt_started=NOW())
         end = NOW() + timeout
         policy = load_policy()
