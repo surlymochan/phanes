@@ -923,9 +923,11 @@ def dispatch(lane, cfg, item, base):
     # labels, so impl is the default. Explicit non-impl markers take precedence,
     # including when an old impl label or title prefix remains on the card.
     excluded_labels = {prefix + kind for kind in NON_IMPL_CARD_TYPES for prefix in ("", "card:", "type:")}
+    excluded_labels.add("upstream(swrm)")
     excluded_title = re.match(r"(?i)^(?:upstream|ops|follow-up|planner|verify-intent)(?:\s*[:：]|\s+|$)", item["title"])
     is_impl = not (labels & excluded_labels or excluded_title)
-    if is_impl and "## Impl card delivery requirements" not in body:
+    # A heading mention or a partial block must not suppress either requirement.
+    if is_impl and IMPL_CARD_TASK_BOOK.rstrip() not in body:
         body = f"{body.rstrip()}\n\n{IMPL_CARD_TASK_BOOK}"
     task = f"# #{n} {item['title']}\n\n{body}\n\n{RULES.format(n=n)}\n"
     path = f"{D}/tasks/{lane}-{n}.md"; os.makedirs(f"{D}/tasks", exist_ok=True); open(path, "w").write(task)

@@ -283,6 +283,33 @@ class ImplCardTaskBookTests(unittest.TestCase):
                                           labels="p1,backend:codex,impl")
                     self.assertNotIn(MODULE.IMPL_CARD_TASK_BOOK, task)
 
+    def test_real_upstream_label_excludes_an_ordinary_chinese_title(self):
+        fixture = json.loads((ROOT / "tools/tests/fixtures/tester-risk-issue-1392.json").read_text())
+        upstream_label = next(label["name"] for label in fixture["labels"]
+                              if label["name"].startswith("upstream"))
+        for impl_label in ("", ",impl"):
+            with self.subTest(impl_label=impl_label):
+                task = self.task_book("upstream", title="增加远端主机保护",
+                                      labels=f"p1,backend:codex,{upstream_label}{impl_label}")
+                self.assertFalse(has_requirement_one(task))
+                self.assertFalse(has_requirement_two(task))
+
+    def test_a_heading_mention_or_incomplete_template_does_not_skip_requirements(self):
+        heading, first, second = MODULE.IMPL_CARD_TASK_BOOK.splitlines()
+        for body in ("请处理标题 ## Impl card delivery requirements 的兼容问题",
+                     heading, f"{heading}\n{first}", f"{heading}\n{second}"):
+            with self.subTest(body=body):
+                task = self.task_book(IMPL, body=body)
+                self.assertIn(body, task)
+                self.assertEqual(task.count(MODULE.IMPL_CARD_TASK_BOOK), 1)
+                repeated = self.task_book(IMPL, body=task)
+                self.assertEqual(repeated.count(MODULE.IMPL_CARD_TASK_BOOK), 1)
+
+    def test_a_complete_template_without_a_trailing_newline_is_not_injected_twice(self):
+        task = self.task_book(IMPL, body=MODULE.IMPL_CARD_TASK_BOOK.rstrip())
+        self.assertEqual(task.count("调用链"), 1)
+        self.assertEqual(task.count("至少补一个 tick/集成级测试"), 1)
+
     def test_the_requirements_are_not_injected_twice(self):
         first = self.task_book(IMPL)
         self.assertTrue(has_requirement_one(first),
