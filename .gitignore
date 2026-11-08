@@ -17,9 +17,14 @@ phanes/evalid/bench/results/llm-*.jsonl
 # feature, so they must never be tracked.
 swrm/tests/.*.so
 
+# The same build artifact lands in openswarm/tests/ (Refs #1697): the hidden shared
+# objects are generated binaries, not sources, and must never be committed.
+openswarm/tests/.*.so
+
 # Local caches of the test runs: never part of a change.
 __pycache__/
 *.pyc
+.pytest_cache/
 
 # Local temporary test fixtures.
 /.t/
