@@ -10456,6 +10456,9 @@ class WatchMessages:
             if tool_id:
                 self.tools.add(tool_id)
         kind, text = summarize_event(event)
+        if kind == "msg":
+            # Buffered chunks precede this message in the event stream.
+            rows.extend(self.flush())
         return rows + ([(kind, text)] if kind else [])
 
 
