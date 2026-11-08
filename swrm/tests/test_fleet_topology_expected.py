@@ -30,9 +30,9 @@ BASELINE_HOSTS = (
     "gocc",
 )
 
-# The retired Instabox hosts, spelled as raw `ib1`-`ib5` aliases and as the
-# `node-1.example.invalid`-`node-5.example.invalid` names this tree uses.
-RETIRED_HOST = re.compile(r"\bib\d+\b|node-[1-5]\.example\.invalid")
+# Reject any ib+digits substring in hosts and limits, including suffixed keys,
+# as well as the retired node aliases this tree uses.
+RETIRED_HOST = re.compile(r"ib\d+|node-[1-5]\.example\.invalid")
 
 
 class FleetTopologyExpectedTests(unittest.TestCase):
@@ -52,7 +52,7 @@ class FleetTopologyExpectedTests(unittest.TestCase):
             self.assertIn(host, self.topology["hosts"])
 
     def test_guard_rejects_retired_hosts_and_all_limit_key_forms(self):
-        for host in ("ib0", "ib6", "ib123"):
+        for host in ("ib0", "ib6", "ib123", "ib6_worker", "worker_ib123", "prefixib42suffix"):
             with self.subTest(host=host):
                 self.topology["hosts"].append(host)
                 with self.assertRaises(AssertionError):

@@ -83,6 +83,31 @@ class HubBridgeTests(unittest.TestCase):
         db.close()
         legacy.assert_not_called()
 
+    def test_recorded_fleet_route_fails_closed_after_configuration_changes(self):
+        db = MOD['db_open']()
+        db.execute('INSERT INTO handoffs VALUES (?,?,?,?,?,?)',
+                   ('request','accepted','remote-run','gores2',0,'fleet'))
+        db.close()
+        legacy = mock.Mock(side_effect=AssertionError('recorded fleet handoff changed routes'))
+        command = mock.Mock(side_effect=AssertionError('unconfigured route executed a command'))
+        changes = [
+            {'OPENSWARM_HUB_LOCAL_ROUTER':'0', 'OPENSWARM_AUTO_FLEET_HOSTS':'["gores1","gores2"]'},
+            {'OPENSWARM_HUB_LOCAL_ROUTER':'1', 'OPENSWARM_AUTO_FLEET_HOSTS':'["gores1"]'},
+            {'OPENSWARM_HUB_LOCAL_ROUTER':'1', 'OPENSWARM_AUTO_FLEET_HOSTS':'[]'},
+        ]
+        for env in changes:
+            with self.subTest(env=env), \
+                 mock.patch.dict(os.environ, dict(env, OPENSWARM_AUTO_LOCAL_HOST='box')), \
+                 mock.patch.dict(G, {'gateway':legacy, 'local_command':command}):
+                for op in ('info', 'stop'):
+                    with self.subTest(op=op), self.assertRaises(RuntimeError):
+                        MOD['mapped']('remote-run', op)
+                with self.assertRaises(RuntimeError):
+                    MOD['fetch_result']('remote-run', 'gores2',
+                                        {'branch':'swrm/remote-run', 'commit':'f' * 40}, 'fleet')
+        legacy.assert_not_called()
+        command.assert_not_called()
+
     def test_direct_rejection_allows_retry_but_lost_ack_keeps_pending(self):
         env = {'OPENSWARM_HUB_LOCAL_ROUTER':'1', 'OPENSWARM_AUTO_LOCAL_HOST':'box',
                'OPENSWARM_AUTO_FLEET_HOSTS':'["gores1","gores2"]'}
