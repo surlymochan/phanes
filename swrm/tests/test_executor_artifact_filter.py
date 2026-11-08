@@ -15,6 +15,10 @@ class ExecutorArtifactFilterTests(unittest.TestCase):
             SWARM["executor_artifact"](leaked_card, SWARM["NEVER_COMMIT"]),
             "executor artifact filter must exclude the leaked issue-card sample",
         )
+        self.assertFalse(
+            SWARM["executor_artifact"]("swrm/tests/test_executor_artifact_filter.py", SWARM["NEVER_COMMIT"]),
+            "executor artifact filter must keep real tests",
+        )
 
 
 if __name__ == "__main__":
