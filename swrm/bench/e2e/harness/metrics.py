@@ -98,7 +98,12 @@ def parse_agent_stream(text: str, source: str) -> dict:
             saw_result = True
             session_id = event.get("session_id") or session_id
             if looks_like_usage(event.get("usage")):
-                usage = normalize_usage(event["usage"])
+                try:
+                    usage = normalize_usage(event["usage"])
+                except (TypeError, ValueError, OverflowError):
+                    # Usage is external JSON. Ignore this result's counters and
+                    # keep scanning so a later result can provide valid usage.
+                    continue
     return {
         "source": source,
         "session_id": session_id,
