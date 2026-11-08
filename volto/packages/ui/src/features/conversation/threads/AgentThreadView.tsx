@@ -22,6 +22,7 @@ const HOLD_TEXT = {
 
 /** The list stays at its end while new text comes in, when the user has not scrolled up. */
 const STICK_DISTANCE = 48;
+const COMPLETED_GOAL_COMPLETION = "100%";
 
 /**
  * Whether the thread shows this message. A stopped turn can leave an agent message with no text and
@@ -52,6 +53,8 @@ export function agentThreadHoldText(task: AgentTask, limit: number, t: TextValue
 export interface AgentThreadViewProps {
   /** Null for a new thread: its first message starts it. */
   task: AgentTask | null;
+  /** The task snapshot, including closed tasks, when the host has it. */
+  tasks?: readonly AgentTask[] | undefined;
   /** How many threads of the agent can run at the same time. */
   limit: number;
   agent: AgentProfile;
@@ -75,6 +78,7 @@ export interface AgentThreadViewProps {
  */
 export function AgentThreadView(props: AgentThreadViewProps) {
   const { t } = useText();
+  const [goalGroup, setGoalGroup] = createSignal<"active" | "completed">("active");
   const [draft, setDraft] = createSignal("");
   const [sending, setSending] = createSignal(false);
   let scroller: HTMLElement | undefined;
@@ -141,8 +145,61 @@ export function AgentThreadView(props: AgentThreadViewProps) {
   const running = () => (props.task?.state === "running" && !props.approval ? props.task : undefined);
   const queued = () => (props.task && props.task.queuedMessages.length > 0 ? props.task : undefined);
   const hold = () => (props.task ? agentThreadHoldText(props.task, props.limit, t) : null);
+  const goals = () => props.tasks ?? (props.task ? [props.task] : []);
+  const activeGoals = () => goals().filter((goal) => goal.state !== "closed");
+  const completedGoals = () => goals().filter((goal) => goal.state === "closed");
+  const goalCompletion = (goal: AgentTask) => {
+    if (goal.state === "closed") return 100;
+    const value = goal.progress?.match(/(?:^|\s)(\d{1,3})\s*%/)?.[1];
+    return value === undefined ? 0 : Math.max(0, Math.min(100, Number(value)));
+  };
+  const switchGoalGroup = (event: KeyboardEvent) => {
+    if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
+    event.preventDefault();
+    const next = goalGroup() === "active" ? "completed" : "active";
+    setGoalGroup(next);
+    requestAnimationFrame(() => document.getElementById(`agent-goals-${next}`)?.focus());
+  };
   return (
     <>
+      <section class="agent-goals-view" aria-label="Goals">
+        <div role="tablist" aria-label="Goal groups">
+          <button
+            id="agent-goals-active"
+            type="button"
+            role="tab"
+            tabIndex={goalGroup() === "active" ? 0 : -1}
+            aria-selected={goalGroup() === "active"}
+            onKeyDown={switchGoalGroup}
+            onClick={() => setGoalGroup("active")}
+          >
+            进行中 / Active goals ({activeGoals().length})
+          </button>
+          <button
+            id="agent-goals-completed"
+            type="button"
+            role="tab"
+            tabIndex={goalGroup() === "completed" ? 0 : -1}
+            aria-selected={goalGroup() === "completed"}
+            onKeyDown={switchGoalGroup}
+            onClick={() => setGoalGroup("completed")}
+          >
+            已完成 / Completed goals ({completedGoals().length})
+          </button>
+        </div>
+        <div role="tabpanel">
+          <For each={goalGroup() === "active" ? activeGoals() : completedGoals()} keyed={(goal) => goal.id}>
+            {(goal) => (
+              <article class="agent-goal">
+                <span>{goal.title}</span>
+                <span aria-label={`Completion ${goal.state === "closed" ? COMPLETED_GOAL_COMPLETION : `${goalCompletion(goal)}%`}`}>
+                  {goal.state === "closed" ? COMPLETED_GOAL_COMPLETION : `${goalCompletion(goal)}%`}
+                </span>
+              </article>
+            )}
+          </For>
+        </div>
+      </section>
       <section
         ref={(element: HTMLElement) => {
           scroller = element;
