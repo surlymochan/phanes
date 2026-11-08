@@ -76,7 +76,14 @@ def main():
             forbidden = True
     elif any(path.decode("utf-8", errors="surrogateescape") == LEGACY_PATH
              for _, path in entries):
-        added = Counter(legacy_lines(args.head)) - Counter(legacy_lines(args.base))
+        def entries_of(lines):
+            return Counter(l.strip() for l in lines if l.strip() and not l.strip().startswith("#"))
+        base_lines = legacy_lines(args.base)
+        added = entries_of(legacy_lines(args.head)) - entries_of(base_lines)
+        if not git("ls-tree", "--name-only", args.base, "--", LEGACY_PATH).strip():
+            # Bootstrap: the list may only name files that already exist on the base.
+            base_tree = set(git("ls-tree", "-r", "--name-only", args.base, "--", "openswarm").decode().splitlines())
+            added = Counter({l: n for l, n in added.items() if l not in base_tree})
         for line in sorted(added.elements()):
             print(f"LEGACY-GROWN {line}")
             forbidden = True

@@ -21,8 +21,7 @@ jobs:
         env:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
         run: python3 tools/ci/forbidden_paths.py --base "$BASE_SHA" --head HEAD
-      - name: Check main tree
-        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+      - name: Check tree (stale legacy entries, residue)
         run: python3 tools/ci/forbidden_paths.py --tree --head HEAD
   changes:
     name: Detect changed components
