@@ -1213,8 +1213,10 @@ def finish(lane, cfg, st, info, state):
     "missing": [...]}. `done` means the lane slot is free again; `error` carries the
     explicit reason back to the caller (Refs #1704)."""
     n, run = st["issue"], st["run"]
+    # A commit resets the streak independently of branch availability for harvesting.
+    note_lane_failure(lane, n, info.get("error_class") or info.get("status"),
+                      seconds=info.get("seconds"), committed=bool(info.get("commit")), run=run)
     if info.get("branch") and info["branch"] != "None" and info.get("commit"):
-        note_lane_failure(lane, n, "", seconds=info.get("seconds"), committed=True)
         b = f"fleet/{lane}-issue{n}-{run}"
         fetch = git_fetch_command(ssh_opts(cfg["host"]), LOCAL, f"{cfg['host']}:{info['repo']}", info["branch"], lane)
         ok, err, failures = harvest_fetch(lane, n, fetch, st)
@@ -1254,8 +1256,6 @@ def finish(lane, cfg, st, info, state):
         log(f"{lane} finished #{n} (run {run}, {info.get('status')}) → {url}"); mark_done(state, n)
         return {"done": True, "status": "pr-created", "error": None, "missing": []}
     else:
-        note_lane_failure(lane, n, info.get("error_class") or info.get("status"),
-                          seconds=info.get("seconds"), committed=False, run=run)
         label_lane_failed(n, f"Lane {lane} ({cfg['host']}, run `{run}`) ended `{info.get('status')}` without a commit "
             f"(error_class `{info.get('error_class')}`).\n\nExecutor summary: {info.get('summary')}\n\nLabel `lane-failed`; re-add `lane-ready` to retry.")
         mark_done(state, n); log(f"{lane} ended #{n} without a commit (run {run}, {info.get('status')}/{info.get('error_class')}) → labelled lane-failed")

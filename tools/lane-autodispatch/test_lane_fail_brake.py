@@ -149,6 +149,28 @@ def test_success_without_counter_does_not_create_state_directory(tmp_path, monke
     assert not (tmp_path / "absent").exists()
 
 
+@pytest.mark.parametrize("branch", [None, "", "None"])
+@pytest.mark.parametrize("prior_failures", [1, 2])
+def test_finish_commit_without_branch_resets_counter(tmp_path, monkeypatch, branch, prior_failures):
+    """A commit breaks the failure streak even when its branch cannot be harvested."""
+    setup_brake(tmp_path, monkeypatch)
+    monkeypatch.setattr(AD, "label_lane_failed", lambda *args: None)
+    for number in range(prior_failures):
+        AD.note_lane_failure("CX9", number, "exec_error", seconds=45)
+    info = {"status": "done", "commit": "abc123", "branch": branch, "seconds": 45}
+    result = AD.finish("CX9", {"host": "test-host"}, {"issue": 1711, "run": "committed"}, info, {})
+    assert result["done"]
+    assert AD.load_lane_failures() == {}
+    assert not (tmp_path / "PAUSE-CX9").exists()
+
+    for number in range(1, 4):
+        st = {"issue": 1711 + number, "run": f"failed-{number}"}
+        info = {"status": "failed", "error_class": "exec_error", "seconds": 45}
+        assert AD.finish("CX9", {"host": "test-host"}, st, info, {})["done"]
+        assert len(AD.load_lane_failures()["CX9"]["runs"]) == number
+        assert (tmp_path / "PAUSE-CX9").exists() == (number == 3)
+
+
 @pytest.mark.parametrize("prior_failures", [0, 2])
 def test_finish_label_timeout_counts_run_once_after_state_reload(tmp_path, monkeypatch, prior_failures):
     """A retried GitHub update must not turn one failed run into three failures."""
@@ -231,3 +253,7 @@ def test_distinct_runs_of_same_issue_count_separately(tmp_path, monkeypatch):
 # These two tests cover tools/lane-autodispatch/autodispatch.py; the timeout regression
 # failed on baseline 94ce9a6e1166b4583671f198d7acedc5cbdb2d39 before this fix.
 # No commit or GitHub comment is created under the execution task's explicit restrictions.
+# Fourth-review B1 (commit without branch): autodispatch.py:1217 ->
+# test_finish_commit_without_branch_resets_counter: PASS (6 cases); all six failed
+# on baseline 844d85a3cc90bbb9e91ad7b1567a96c5c09e1175. Commit presence now resets
+# the streak; only three subsequent no-commit failures can write PAUSE-CX9.
