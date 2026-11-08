@@ -155,6 +155,7 @@ function startWorker(port: number, environment: NodeJS.ProcessEnv): void {
 
 let passed = false;
 try {
+  await mkdir(join(ROOT, ".volto-build"), { recursive: true });
   persistDir = await mkdtemp(join(ROOT, ".volto-build/issue-9-workerd-state-"));
   // Wrangler and the Vite plugin use .wrangler/state by default. Point that path at this run's
   // isolated directory so the migration and both Worker processes use the same database.
@@ -237,7 +238,6 @@ try {
   const sessionToken = stringField(session, "sessionToken");
   assert.ok(sessionToken);
   await stopWorker();
-  if (stateLink) await unlink(stateLink).catch(() => undefined);
   startWorker(port, environment);
   await waitForWorker(base);
 
