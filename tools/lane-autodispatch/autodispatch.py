@@ -79,6 +79,10 @@ def env_number(name, default, cast=float):
     except (TypeError, ValueError):
         return default
 
+# Refs #1711: only measured, short, no-commit runs count toward the lane brake.
+LANE_FAILURE_LIMIT = env_number("AD_LANE_FAILURE_LIMIT", 3, int)
+LANE_FAILURE_WINDOW = env_number("AD_LANE_FAILURE_WINDOW", 180, int)
+
 AD_VERIFY_SHARE_ENABLED = os.environ.get("AD_VERIFY_SHARE_ENABLED", "0").lower() in {"1", "true", "yes"}
 VERIFY_SHARE = env_number("AD_VERIFY_SHARE", 0.2)
 VERIFY_MIN = env_number("AD_VERIFY_MIN", 1, int)
@@ -167,6 +171,65 @@ SWITCH_PREFIXES = ("PAUSE", "EXCLUDE")
 # health loop writes into its own switches (docs/ctl-boot.md).
 AUTHORIZATION_RE = re.compile(r"用户.*令|user order|auto:")
 AUTHORIZATION_TAIL_LINES = 30
+
+def lane_failures_path():
+    return os.path.join(D, "lane-failures.json")
+
+def load_lane_failures():
+    try:
+        with open(lane_failures_path(), encoding="utf-8") as stream: data = json.load(stream)
+        return data if isinstance(data, dict) else {}
+    except (OSError, ValueError): return {}
+
+def save_lane_failures(data):
+    temporary = lane_failures_path() + ".tmp"
+    with open(temporary, "w", encoding="utf-8") as stream: json.dump(data, stream, ensure_ascii=False, indent=1)
+    os.replace(temporary, lane_failures_path())
+
+def note_lane_failure(lane, issue, reason, seconds=None, committed=False, now=None):
+    """Track measured quick no-commit runs and brake a lane after N consecutive failures (Refs #1711)."""
+    failures = load_lane_failures()
+    if committed:
+        failures.pop(lane, None)
+        save_lane_failures(failures)
+        return 0
+    # Missing runtime data is not evidence of a quick failure; never guess from an unknown duration.
+    if isinstance(seconds, bool) or not isinstance(seconds, (int, float)) or seconds < 0 or seconds > LANE_FAILURE_WINDOW:
+        if lane in failures:
+            failures.pop(lane, None)
+            save_lane_failures(failures)
+        return len(failures.get(lane, {}).get("runs", []))
+    now = time.time() if now is None else now
+    previous = failures.get(lane, {})
+    runs = previous.get("runs", []) if isinstance(previous, dict) else []
+    if not runs or now - runs[-1].get("at", now) > LANE_FAILURE_WINDOW: runs = []
+    runs = [*runs, {"at": now, "issue": int(issue), "reason": str(reason or "unknown"), "seconds": seconds}]
+    failures[lane] = {"runs": runs}
+    save_lane_failures(failures)
+    if len(runs) >= max(1, LANE_FAILURE_LIMIT):
+        marker = os.path.join(D, f"PAUSE-{lane}")
+        if not os.path.exists(marker):
+            with open(marker, "w", encoding="utf-8") as stream:
+                stream.write(f"auto: #1711 {len(runs)} consecutive quick no-commit failures; latest #{issue}: {reason}\n")
+            try: log(f"lane brake {lane}: {len(runs)} consecutive quick failures; latest #{issue}: {reason}")
+            except OSError: pass  # the pause switch remains authoritative if the brain log is unavailable
+    return len(runs)
+
+def lane_brake_status():
+    return {lane: {"count": len(value.get("runs", [])), "latest": value.get("runs", [])[-1] if value.get("runs") else None,
+                   "paused": os.path.exists(os.path.join(D, f"PAUSE-{lane}"))}
+            for lane, value in load_lane_failures().items()}
+
+def release_lane_brakes():
+    """Treat manual removal of an automatic pause marker as operator recovery (Refs #1711)."""
+    failures = load_lane_failures()
+    changed = False
+    for lane in list(failures):
+        if len(failures[lane].get("runs", [])) >= max(1, LANE_FAILURE_LIMIT) and not os.path.exists(os.path.join(D, f"PAUSE-{lane}")):
+            del failures[lane]
+            changed = True
+            log(f"lane brake {lane} manually cleared; failure counter reset")
+    if changed: save_lane_failures(failures)
 
 def switch_audit_log(message):
     """Write one line to the AD log; the audit never raises (Refs #1827)."""
@@ -630,7 +693,7 @@ if R:
     with open(p) as stream: r=json.load(stream)
     res=r.get("result") or {}
     out["run"]={"status":r.get("status"),"branch":r.get("branch"),"commit":r.get("commit"),"repo":(r.get("workspace") or {}).get("repo"),
-      "backend":r.get("backend"),"model":r.get("model"),"error_class":r.get("error_class"),"summary":(str(res.get("summary") or "") if isinstance(res,dict) else str(res or ""))[:1200],
+      "backend":r.get("backend"),"model":r.get("model"),"error_class":r.get("error_class"),"seconds":r.get("seconds"),"summary":(str(res.get("summary") or "") if isinstance(res,dict) else str(res or ""))[:1200],
       "tests":(str(res.get("tests") or "") if isinstance(res,dict) else "")[:400],
       "verify_rc":(r.get("verify") or {}).get("rc") if isinstance(r.get("verify"),dict) else None}
   else:
@@ -875,7 +938,7 @@ def freshen_queue(q, state, cache=None):
     return fresh
 
 def status_snapshot(lanes, state, res, ready, blocked):
-    """Build the observable lane status row, including this process's stale skips."""
+    """Build observable status, including lane brakes. B1→runtime projection/test_remote_seconds_projection; B2→health status/test_brake_status_is_supervisor_readable; B3→no binary artifacts/git status verification."""
     status = {L: ("busy #%s" % state[L]["issue"]) if state.get(L) else (res[L].get("error") or res[L].get("lane") or "?") for L in lanes}
     status["_busy"] = sum(1 for L in lanes if state.get(L))
     status["_ready"] = ready
@@ -884,6 +947,7 @@ def status_snapshot(lanes, state, res, ready, blocked):
     status["_stale_search_skips"] = STALE_STRIPPED_N
     status["_stale_lane_failed_skips"] = STALE_LANE_FAILED_N
     status["_at"] = time.strftime("%F %T")
+    status["lane_brakes"] = lane_brake_status()
     return status
 
 def deps_met(item):
@@ -1140,6 +1204,7 @@ def finish(lane, cfg, st, info, state):
     explicit reason back to the caller (Refs #1704)."""
     n, run = st["issue"], st["run"]
     if info.get("branch") and info["branch"] != "None" and info.get("commit"):
+        note_lane_failure(lane, n, "", seconds=info.get("seconds"), committed=True)
         b = f"fleet/{lane}-issue{n}-{run}"
         fetch = git_fetch_command(ssh_opts(cfg["host"]), LOCAL, f"{cfg['host']}:{info['repo']}", info["branch"], lane)
         ok, err, failures = harvest_fetch(lane, n, fetch, st)
@@ -1179,6 +1244,8 @@ def finish(lane, cfg, st, info, state):
         log(f"{lane} finished #{n} (run {run}, {info.get('status')}) → {url}"); mark_done(state, n)
         return {"done": True, "status": "pr-created", "error": None, "missing": []}
     else:
+        note_lane_failure(lane, n, info.get("error_class") or info.get("status"),
+                          seconds=info.get("seconds"), committed=False)
         label_lane_failed(n, f"Lane {lane} ({cfg['host']}, run `{run}`) ended `{info.get('status')}` without a commit "
             f"(error_class `{info.get('error_class')}`).\n\nExecutor summary: {info.get('summary')}\n\nLabel `lane-failed`; re-add `lane-ready` to retry.")
         mark_done(state, n); log(f"{lane} ended #{n} without a commit (run {run}, {info.get('status')}/{info.get('error_class')}) → labelled lane-failed")
@@ -1186,6 +1253,7 @@ def finish(lane, cfg, st, info, state):
 
 def tick(lanes, state, last_warn):
     audit_switches()  # the switch audit runs every tick, also when the loop itself is paused (Refs #1827)
+    release_lane_brakes()
     scopes = paused_scopes()  # the swrm pause store and the legacy PAUSE markers (Refs #1366)
     if "all" in scopes: return last_warn
     label_cache_reset()  # authoritative label reads are cached for one tick only
