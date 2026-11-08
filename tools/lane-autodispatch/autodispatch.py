@@ -81,6 +81,7 @@ def env_number(name, default, cast=float):
 
 # Refs #1711: only measured, short, no-commit runs count toward the lane brake.
 LANE_FAILURE_LIMIT = env_number("AD_LANE_FAILURE_LIMIT", 3, int)
+# Maximum duration of each run, independent of the wait between dispatched cards.
 LANE_FAILURE_WINDOW = env_number("AD_LANE_FAILURE_WINDOW", 180, int)
 
 AD_VERIFY_SHARE_ENABLED = os.environ.get("AD_VERIFY_SHARE_ENABLED", "0").lower() in {"1", "true", "yes"}
@@ -203,7 +204,7 @@ def note_lane_failure(lane, issue, reason, seconds=None, committed=False, now=No
     now = time.time() if now is None else now
     previous = failures.get(lane, {})
     runs = previous.get("runs", []) if isinstance(previous, dict) else []
-    if not runs or now - runs[-1].get("at", now) > LANE_FAILURE_WINDOW: runs = []
+    # Dispatch waits do not break consecutive failures; only the completed run is timed.
     runs = [*runs, {"at": now, "issue": int(issue), "reason": str(reason or "unknown"), "seconds": seconds}]
     failures[lane] = {"runs": runs}
     save_lane_failures(failures)

@@ -30,6 +30,17 @@ def test_three_quick_no_commit_failures_brake_lane(tmp_path, monkeypatch):
     assert row["issue"] == 3 and row["reason"] == "exec_error"
 
 
+@pytest.mark.parametrize("dispatch_interval", [190, 3600])
+def test_dispatch_intervals_do_not_reset_consecutive_failures(tmp_path, monkeypatch, dispatch_interval):
+    """Each run is short; time spent waiting for the next card cannot erase failures."""
+    setup_brake(tmp_path, monkeypatch)
+    for count in range(1, 4):
+        assert AD.note_lane_failure("CX9", count, "exec_error", seconds=120,
+                                    now=1000 + (count - 1) * dispatch_interval) == count
+        assert (tmp_path / "PAUSE-CX9").exists() == (count == 3)
+    assert AD.lane_brake_status()["CX9"]["count"] == 3
+
+
 def test_long_or_unknown_runtime_does_not_count(tmp_path, monkeypatch):
     setup_brake(tmp_path, monkeypatch)
     AD.note_lane_failure("CX9", 1, "slow", seconds=181, now=1000)
@@ -115,9 +126,10 @@ def test_third_failure_blocks_fourth_card_in_same_tick_and_manual_resume(tmp_pat
     lanes = {"CX9": {"host": "test-host", "backend": "codex"}}
     state = {"CX9": {"issue": 3, "run": "run-3"}}
     monkeypatch.setattr(AD, "remote", lambda *a: {"lane": "idle", "run": {
-        "status": "failed", "seconds": 45, "error_class": "exec_error"}})
-    for number in (1, 2):
-        AD.note_lane_failure("CX9", number, "exec_error", seconds=45)
+        "status": "failed", "seconds": 120, "error_class": "exec_error"}})
+    for number, ended in ((1, 1000), (2, 1190)):
+        AD.note_lane_failure("CX9", number, "exec_error", seconds=120, now=ended)
+    monkeypatch.setattr(AD.time, "time", lambda: 1380)
     AD.tick(lanes, state, 0)
     assert (tmp_path / "PAUSE-CX9").exists()
     assert dispatched == []
@@ -138,13 +150,13 @@ def test_success_without_counter_does_not_create_state_directory(tmp_path, monke
 
 
 # #1711 review evidence (paths relative to the repository; results: PASS):
-# B1 (runtime): tools/lane-autodispatch/autodispatch.py:701 ->
+# B1 (runtime): tools/lane-autodispatch/autodispatch.py:702 ->
 # test_remote_seconds_projection (45s / 181s / unknown): PASS, real SSH-reader projection.
-# B2 (health): tools/lane-autodispatch/autodispatch.py:215 ->
+# B2 (health): tools/lane-autodispatch/autodispatch.py:216 ->
 # test_brake_status_exposes_lane_count_and_recent_failure: PASS, health.alert + brain log.
 # B3 (binaries): git diff a4a49b8318883ff6e122f7ab08223d6d368f984c --name-only
 # -- '*.so' -> empty: PASS; no unrelated binary files are part of this delivery.
-# R1 (same tick): tools/lane-autodispatch/autodispatch.py:1288 ->
+# R1 (same tick): tools/lane-autodispatch/autodispatch.py:1289 ->
 # test_third_failure_blocks_fourth_card_in_same_tick_and_manual_resume: PASS.
 # R2 (migration): openswarm/tests/test_lane_fail_brake.py -> this tools/ module;
 # test_three_quick_no_commit_failures_brake_lane: PASS; original reproduction remains
@@ -159,4 +171,10 @@ def test_success_without_counter_does_not_create_state_directory(tmp_path, monke
 # test_finish_with_only_artifacts_pushes_nothing: PASS.
 # R4 (health output): B2 above. R5 / delivery B1 (mapping): these actual file:line ->
 # test -> result entries replace the previous nonexistent test references.
+# Second-review BLOCKER (dispatch gaps): tools/lane-autodispatch/autodispatch.py:207 ->
+# test_dispatch_intervals_do_not_reset_consecutive_failures (190s / 3600s gaps) and
+# test_third_failure_blocks_fourth_card_in_same_tick_and_manual_resume: PASS;
+# 120s failures ending at 1000 / 1190 / 1380 count 1 / 2 / 3 and block card 4.
+# FOLLOW-UP: health.alert is covered by B2; the external health-loop's health.json
+# aggregation and the supervisor's choice of health input need host verification.
 # No commit or GitHub comment is created under the execution task's explicit restrictions.
