@@ -47,7 +47,7 @@ class LaneTests(unittest.TestCase):
                 pass
         self.tmp.cleanup()
 
-    def set_config(self, backend=None, model=None, fallback_models=None):
+    def set_config(self, backend=None, model=None, fallback_models=None, thinking=None):
         if backend:
             self.backend = backend
         fixture = {"codex": "fake_app_server.py", "cursor": "fake_cursor_acp.py",
@@ -62,6 +62,7 @@ class LaneTests(unittest.TestCase):
             **({"fallback_models": fallback_models} if fallback_models is not None else {}),
             **({"effort": "xhigh"} if self.backend == "codex" else
                ({"provider": "fake-provider"} if self.backend == "pi" else {})),
+            **({"thinking": thinking} if thinking is not None else {}),
             "repo": str(self.repo), "binary": str(binary),
         }]}))
         if self.backend == "cursor":
@@ -244,6 +245,30 @@ class LaneTests(unittest.TestCase):
         result = json.loads((self.data / "runs" / run_id / "result.json").read_text())
         self.assertEqual(result["workspace"]["base"], expected_head)
         self.assertTrue(wt.is_dir())
+
+    def child_command(self):
+        """The command line of the lane's resident executor process (what `ps` shows)."""
+        pid = self.lane_state().get("child_pid")
+        self.assertTrue(pid, "the lane has no resident executor process")
+        command = subprocess.run(["ps", "-o", "command=", "-p", str(pid)], text=True,
+                                 capture_output=True, check=False).stdout
+        self.assertTrue(command.strip(), f"no process command line for pid {pid}")
+        return command
+
+    def test_pi_lane_starts_pi_at_the_thinking_level_of_its_lane(self):
+        """A lane with a thinking level starts pi with it (Refs #1847)."""
+        self.set_config("pi", thinking="high")
+        self.start_lane()
+        self.wait_for(lambda: self.lane_state().get("child_pid"), description="the lane child to start")
+        self.assertIn("--thinking high", self.child_command())
+
+    def test_pi_run_uses_the_thinking_level_of_the_run(self):
+        """A run that asks for a thinking level starts pi with it (Refs #1847)."""
+        self.set_config("pi")
+        self.start_lane()
+        run_id = self.assign("LANE_TEST_WAIT_SHORT pi thinking level", "--thinking", "high")
+        self.assertEqual(self.wait_run(run_id)["status"], "done")
+        self.assertIn("--thinking high", self.child_command())
 
     def test_pi_rate_limit_retries_in_session_and_watch_shows_alert(self):
         self.set_config("pi")
