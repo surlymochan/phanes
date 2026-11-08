@@ -27,7 +27,7 @@ describe('buildMemoryMount limit', () => {
     assert.equal(buildMemoryMount(makeState(5), { limit: '3' }).total, 3);
   });
 
-  for (const limit of [-1, 0, Number.NaN, Number.POSITIVE_INFINITY, 1.5, '0', 'abc']) {
+  for (const limit of [-1, 0, Number.NaN, Number.POSITIVE_INFINITY, 1.5, '0', '', '  ', 'abc']) {
     test(`rejects invalid limit ${String(limit)}`, () => {
       assert.throws(
         () => buildMemoryMount(makeState(5), { limit }),
