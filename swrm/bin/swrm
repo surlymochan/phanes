@@ -10048,8 +10048,12 @@ def fleet_health_write_marker(host, reason):
     path = fleet_health_marker_path(host)
     try:
         os.makedirs(os.path.dirname(path), exist_ok=True)
-        with open(path, "w", encoding="utf-8") as stream:
+        # A marker may belong to an operator. Create ours only when no marker
+        # exists; the independent pause-store hold still protects a sick host.
+        with open(path, "x", encoding="utf-8") as stream:
             stream.write(f"{FLEET_HEALTH_REASON}: {reason}\n")
+    except FileExistsError:
+        return
     except OSError as error:
         raise ValueError(f"cannot write the pause marker of {host}: {error}")
 
@@ -10251,9 +10255,8 @@ def fleet_health_check(host, hosts, limits, paused, streak):
 
     Every probe stands on its own: a probe that fails (the memory probe) never hides a
     fault another probe measured (the disk over the hard threshold) - the sick host is
-    still paused. Only a failed transport means the host is unreachable: it keeps
-    counting its SSH failures, and the streak reaches the pause threshold before the
-    host is paused.
+    still paused. A failed transport also counts toward the SSH failure streak;
+    that streak can pause a host even when no pressure measurement is available.
     """
     measurements, errors = {}, {}
     unreachable = None
@@ -10270,25 +10273,26 @@ def fleet_health_check(host, hosts, limits, paused, streak):
             measurements[field] = fleet_health_measure(field, output)
         except ValueError as error:
             errors[field] = str(error)
-    if unreachable is not None:
-        streak += 1
-        decision, reason = fleet_health_evaluate({"host": host, "ssh_fail_streak": streak}, limits, paused)
-        return {"host": host, "status": "unreachable", "decision": decision, "reason": reason,
-                "error": unreachable, "metrics": {"ssh_fail_streak": streak},
-                "triggers": ["ssh_fail_streak"] if decision == "pause" else []}
-    probe = {"host": host, "ssh_fail_streak": 0}
+    streak = streak + 1 if unreachable is not None else 0
+    probe = {"host": host, "ssh_fail_streak": streak}
     probe.update(measurements)
-    decision, reason = fleet_health_evaluate(probe, limits, paused, failed=bool(errors))
+    decision, reason = fleet_health_evaluate(probe, limits, paused,
+                                           failed=bool(errors) or unreachable is not None)
     levels = fleet_health_levels(probe, limits)
     triggers = [row["field"] for row in levels if row["over_pause"]]
     pending = [row["field"] for row in levels if not row["over_pause"] and row["over_resume"]]
     metrics = {row["field"]: row["value"] for row in levels}
-    metrics["ssh_fail_streak"] = 0
+    metrics["ssh_fail_streak"] = streak
+    if streak >= limits["ssh_fail_pause_streak"]:
+        triggers.append("ssh_fail_streak")
+    if unreachable is not None:
+        errors["ssh"] = unreachable
     if errors and not triggers:
         reason = f"{host}: health probe failed: " + "; ".join(errors.values())
         if paused:
             reason += "; still paused; recovery not established"
-    status = "hard" if triggers else ("soft" if pending else ("error" if errors else "ok"))
+    status = "hard" if triggers else ("unreachable" if unreachable is not None else
+                                      ("soft" if pending else ("error" if errors else "ok")))
     return {"host": host, "status": status, "decision": decision, "reason": reason,
             "error": "; ".join(errors.values()) if errors else None,
             "metrics": metrics, "triggers": triggers}

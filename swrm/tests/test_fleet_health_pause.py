@@ -332,6 +332,57 @@ class FleetHealthPauseTests(unittest.TestCase):
         self.assertTrue(self.scheduler_pauses_host(),
                         "the scheduler would dispatch a lane to the unreachable host")
 
+    def test_a_later_transport_failure_preserves_measured_disk_fault(self):
+        """A memory SSH failure must not discard the successful disk measurement."""
+        self.write_fake(disk_pct=99, mem_rc=255)
+        report = self.health("--apply")
+        row = self.row(report)
+        self.assertEqual(row["status"], "hard", report)
+        self.assertEqual(row["decision"], "pause", report)
+        self.assertEqual(row["metrics"]["disk_pct"], 99, report)
+        self.assertEqual(row["metrics"]["ssh_fail_streak"], 1, report)
+        self.assertTrue(row["paused"], report)
+        self.assertTrue(self.scheduler_pauses_host())
+        # A failed probe also cannot establish recovery of the existing hold.
+        self.write_fake(disk_pct=10, mem_rc=255)
+        report = self.health("--apply")
+        self.assertEqual(self.row(report)["decision"], "none", report)
+        self.assertTrue(self.scheduler_pauses_host())
+        self.write_fake(disk_pct=10)
+        self.health("--apply")
+        self.assertFalse(self.scheduler_pauses_host())
+
+    def test_operator_marker_survives_health_pause_and_recovery(self):
+        """Health keeps its own record without touching an external marker."""
+        directory = self.home / "pauses"
+        directory.mkdir()
+        marker = directory / f"PAUSE-HOST-{HOST}"
+        body = "operator maintenance\n"
+        marker.write_text(body)
+        self.health("--apply")
+        self.assertEqual(marker.read_text(), body)
+        self.write_fake(disk_pct=10)
+        self.health("--apply")
+        self.assertEqual(marker.read_text(), body)
+        self.assertFalse(self.active_records())
+        self.assertTrue(self.scheduler_pauses_host())
+
+    def test_health_hold_survives_operator_marker_removal(self):
+        """Removing an external marker cannot release the independent health hold."""
+        directory = self.home / "pauses"
+        directory.mkdir()
+        marker = directory / f"PAUSE-HOST-{HOST}"
+        marker.write_text("operator maintenance\n")
+        self.health("--apply")
+        marker.unlink()
+        self.assertTrue(self.scheduler_pauses_host())
+        self.assertTrue(any(self.holds_host(record["scope"])
+                            for record in self.active_records()))
+        self.write_fake(disk_pct=10)
+        self.health("--apply")
+        self.assertFalse(self.scheduler_pauses_host())
+        self.assertFalse(self.active_records())
+
     def test_the_health_pause_does_not_expire_before_the_host_recovers(self):
         """The hold of a sick host stays valid until the host recovers."""
         self.health("--apply")
