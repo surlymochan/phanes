@@ -3555,6 +3555,43 @@ def pi_bin():
     return None
 
 
+def pi_quota_from_balance(payload):
+    """Summarize a provider balance payload into the Pi quota.
+
+    The provider lists one balance per currency, so the account holds funds when any of them
+    is funded; reading the first entry alone reports an empty balance for a funded account.
+    """
+    balances = []
+    for entry in payload.get("balance_infos") or []:
+        try:
+            amount = float(entry.get("total_balance") or 0)
+        except (TypeError, ValueError):
+            continue
+        balances.append({"currency": entry.get("currency"), "balance": amount})
+    funded = next((b for b in balances if b["balance"] > 0), balances[0] if balances else None)
+    return {"balance": funded["balance"] if funded else 0.0,
+            "currency": funded["currency"] if funded else None,
+            "available": payload.get("is_available"),
+            "balances": balances}
+
+
+def pi_quota_exhausted(quota):
+    """Whether the provider account is spent: the provider says so, or no currency holds funds."""
+    if quota.get("available") is False:
+        return True
+    balances = quota.get("balances")
+    if balances:
+        funded = False
+        for entry in balances:
+            try:
+                funded = funded or float(entry.get("balance") or 0) > 0
+            except (TypeError, ValueError):
+                continue
+        return not funded
+    balance = quota.get("balance")
+    return balance is not None and balance <= 0
+
+
 def probe_pi(policy):
     """Pi is an opt-in executor. Its quota is unknown unless the provider publishes a balance
     endpoint (DeepSeek does), so routing can tell an exhausted Pi provider from a healthy one."""
@@ -3572,9 +3609,7 @@ def probe_pi(policy):
     try:
         hdr = {"Authorization": f"Bearer {key}", "Accept": "application/json"}
         d = json.load(urllib.request.urlopen(urllib.request.Request(url, headers=hdr), timeout=15))
-        bi = (d.get("balance_infos") or [{}])[0]
-        res["quota"] = {"balance": float(bi.get("total_balance", 0)), "currency": bi.get("currency"),
-                        "available": d.get("is_available")}
+        res["quota"] = pi_quota_from_balance(d)
     except Exception as e:  # noqa: BLE001
         res["quota_error"] = str(e)[:200]
     return res
@@ -3588,7 +3623,7 @@ def plan_pi(prof, st, policy, forced, notes):
     if not binary:
         return None, "no working pi binary"
     quota = (known or {}).get("quota") or {}
-    if quota and (quota.get("available") is False or quota.get("balance") is not None and quota.get("balance") <= 0):
+    if quota and pi_quota_exhausted(quota):
         return None, "pi provider balance exhausted"
     if cfg.get("require_isolation", sys.platform != "darwin"):
         expected = os.path.join(os.path.dirname(os.path.realpath(__file__)), "pi-isolated")

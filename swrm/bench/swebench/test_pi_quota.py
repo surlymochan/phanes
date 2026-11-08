@@ -18,6 +18,9 @@ DEMO_STATE = str(__import__("pathlib").Path(__file__).resolve().parents[2] / "ex
 POLICY = xs.load_policy()
 
 BALANCE = {"is_available": True, "balance_infos": [{"currency": "USD", "total_balance": "12.50"}]}
+MULTI_BALANCE = {"is_available": True,
+                 "balance_infos": [{"currency": "CNY", "total_balance": "0.00"},
+                                   {"currency": "USD", "total_balance": "12.50"}]}
 
 
 class FakeResponse:
@@ -49,8 +52,18 @@ class PiQuotaTests(unittest.TestCase):
         with mock.patch.object(xs.urllib.request, "urlopen", return_value=FakeResponse(BALANCE)) as urlopen:
             state = xs.probe_pi(policy())
 
-        self.assertEqual(state["quota"], {"balance": 12.5, "currency": "USD", "available": True})
+        self.assertEqual(state["quota"], {"balance": 12.5, "currency": "USD", "available": True,
+                                          "balances": [{"currency": "USD", "balance": 12.5}]})
         self.assertIn("api.deepseek.com/user/balance", urlopen.call_args[0][0].full_url)
+
+    def test_probe_reads_every_currency_of_the_provider_balance(self):
+        with mock.patch.object(xs.urllib.request, "urlopen", return_value=FakeResponse(MULTI_BALANCE)):
+            state = xs.probe_pi(policy())
+
+        self.assertEqual(state["quota"]["balances"], [{"currency": "CNY", "balance": 0.0},
+                                                       {"currency": "USD", "balance": 12.5}])
+        self.assertEqual(state["quota"]["balance"], 12.5)
+        self.assertEqual(state["quota"]["currency"], "USD")
 
     def test_probe_without_a_key_keeps_the_quota_unknown(self):
         os.environ.pop("DEEPSEEK_API_KEY", None)
@@ -118,6 +131,35 @@ class PiQuotaTests(unittest.TestCase):
         self.assertEqual(decision["backend"], "pi")
         self.assertIsNone(why)
         self.assertIn("pi provider balance 12.5 USD", notes)
+
+    def test_routing_uses_a_pi_provider_funded_in_another_currency(self):
+        st = {"pi": {"binary": "/usr/bin/pi", "default_model": "deepseek-flash",
+                     "quota": {"balance": 12.5, "currency": "USD", "available": True,
+                               "balances": [{"currency": "CNY", "balance": 0.0},
+                                            {"currency": "USD", "balance": 12.5}]}}}
+        notes = []
+        with mock.patch.object(xs, "pi_bin", return_value="/usr/bin/pi"), \
+                mock.patch.object(xs, "breakers", return_value={}):
+            decision, why = xs.plan_pi({"type": "impl", "difficulty": 3, "model": None},
+                                       st, self.policy(), False, notes)
+
+        self.assertEqual(decision["backend"], "pi")
+        self.assertIsNone(why)
+        self.assertIn("pi provider balance 12.5 USD", notes)
+
+    def test_routing_spills_off_a_pi_provider_without_any_funded_currency(self):
+        st = {"pi": {"binary": "/usr/bin/pi", "default_model": "deepseek-flash",
+                     "quota": {"balance": 0.0, "currency": "CNY", "available": True,
+                               "balances": [{"currency": "CNY", "balance": 0.0},
+                                            {"currency": "USD", "balance": 0.0}]}}}
+        notes = []
+        with mock.patch.object(xs, "pi_bin", return_value="/usr/bin/pi"), \
+                mock.patch.object(xs, "breakers", return_value={}):
+            decision, why = xs.plan_pi({"type": "impl", "difficulty": 3, "model": None},
+                                       st, self.policy(), False, notes)
+
+        self.assertIsNone(decision)
+        self.assertEqual(why, "pi provider balance exhausted")
 
     def policy(self):
         full = dict(POLICY)
