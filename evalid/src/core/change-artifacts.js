@@ -6,8 +6,11 @@ function nowIso() {
 }
 
 export function resolveChangeDir(projectRoot, changeId) {
-  if (!changeId) {
+  if (typeof changeId !== 'string' || !changeId) {
     throw new Error('change_id is required');
+  }
+  if (changeId === '.' || changeId === '..' || /[\\/\0]/.test(changeId)) {
+    throw new Error('change_id must be a single directory name');
   }
   return resolve(projectRoot, 'specs', 'changes', changeId);
 }
