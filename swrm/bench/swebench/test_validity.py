@@ -137,6 +137,46 @@ class ValidityTest(unittest.TestCase):
         self.assertEqual(records[0]["status"], "incomplete")
         self.assertEqual(records[0]["reasons"], ["last model call ended in error"])
 
+    def test_last_assistant_stop_reason_across_files(self):
+        self.add_run("inst-1", "baseline", 1, ["task-1"])
+        self.add_pi("task-1", "minimaxi/MiniMax-M3.1-Flash-Preview")
+        # Create files in reverse order to ensure filename order determines the last call.
+        self.add_events("inst-1", "baseline", 1, [{"stopReason": "stop"}], "b-events.jsonl")
+        self.add_events("inst-1", "baseline", 1, [{"stopReason": "error"}], "a-events.jsonl")
+
+        records, _ = self.run_validity(["baseline"], ["inst-1"])
+
+        self.assertEqual(records[0]["status"], "valid")
+        self.assertEqual(records[0]["reasons"], [])
+
+    def test_last_error_and_usage_cap_across_files(self):
+        self.add_run("inst-1", "baseline", 1, ["task-1"])
+        self.add_pi("task-1", "minimaxi/MiniMax-M3.1-Flash-Preview")
+        self.add_events("inst-1", "baseline", 1, [
+            {"stopReason": "error", "errorMessage": "用量上限"},
+            {"stopReason": "stop"},
+        ], "a-events.jsonl")
+        self.add_events("inst-1", "baseline", 1, [{"stopReason": "error"}], "b-events.jsonl")
+        self.add_events("inst-1", "baseline", 1, [], "c-events.jsonl")
+
+        records, _ = self.run_validity(["baseline"], ["inst-1"])
+
+        self.assertEqual(records[0]["reasons"], [
+            "usage cap hit during run", "last model call ended in error",
+        ])
+
+    def test_last_retry_preserves_earlier_usage_cap(self):
+        self.add_run("inst-1", "baseline", 1, ["task-1"])
+        self.add_pi("task-1", "minimaxi/MiniMax-M3.1-Flash-Preview")
+        self.add_events("inst-1", "baseline", 1, [
+            {"stopReason": "error", "errorMessage": "用量上限"},
+        ], "a-events.jsonl")
+        self.add_events("inst-1", "baseline", 1, [{"stopReason": "stop"}], "b-events.jsonl")
+
+        records, _ = self.run_validity(["baseline"], ["inst-1"])
+
+        self.assertEqual(records[0]["reasons"], ["usage cap hit during run"])
+
     def test_harness_error_reason_is_truncated(self):
         self.add_run("inst-1", "baseline", 1, harness_error="H" * 150)
 
