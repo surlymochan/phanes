@@ -36,6 +36,11 @@
     }
   ],
   "secrets": {
+    // The operator token of `/v2/admin/server-claims` is not here. A required secret makes the
+    // deployment fail when it is missing, and the token stays optional in production: without it
+    // nobody can make a server claim. Wrangler keeps a development variable only when its name is
+    // a `vars` entry or a required secret, so a local run takes the token from the development
+    // environment instead. `src/server/runtime-env.ts` forwards it into the local Worker.
     "required": [
       "EMAIL_SMTP_PASSWORD",
       "SKILLS_ADMIN_TOKEN",
