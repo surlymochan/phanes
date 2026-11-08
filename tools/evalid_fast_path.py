@@ -22,6 +22,7 @@ Seam:
 from __future__ import annotations
 
 import copy
+import json
 import math
 import re
 import sys
@@ -155,20 +156,29 @@ def _requirements_reason(value: Any) -> str | None:
     reason = _ambiguity_reason(value)
     if reason:
         return reason
-    # Conservatively accept behavioral statements, not implementation goals
-    # such as "Fix the bug". Unsupported prose goes through the full Spec run.
-    behavior = re.match(r"^(?:return|emit|print|write|reject|accept|exit|output)\s+(\S.*)",
-                        value.strip(), re.IGNORECASE | re.DOTALL)
+    # Recognizing a verb or excluding vague words cannot prove that arbitrary
+    # prose defines a function (e.g. "Return 3 or 4 depending on input"). Only
+    # recognize this small grammar of complete behaviors. All other prose,
+    # including conditional or compound statements, needs independent Spec.
+    behavior = re.fullmatch(r"(?:return|emit|print|output)\s+(.+?)\.?",
+                            value.strip(), re.IGNORECASE)
     if behavior is None:
         return "requirements_behavior_unspecified"
-    # A generic object stays underspecified with qualifiers such as "depending
-    # on input". Conservatively send such prose to Spec instead of inferring a
-    # relationship from the other fields' concrete examples.
-    if re.match(r"(?:(?:a|an|the|some|any|correct|expected|valid|exact)\s+)*"
-                r"(?:result|value|output|response|error|input|data|message|status|code)\b",
-                behavior[1], re.IGNORECASE):
+    if re.fullmatch(r"the exact decimal (?:sum|difference|product) of two integers",
+                    behavior[1], re.IGNORECASE):
+        return None
+    # An unconditional JSON string or integer literal is also explicit. Parsing
+    # the entire object rejects trailing alternatives, qualifiers and sentences.
+    if (not behavior[1].startswith('"') and
+            not re.fullmatch(r"-?(?:0|[1-9][0-9]*)", behavior[1])):
         return "requirements_behavior_unspecified"
-    return None
+    try:
+        literal = json.loads(behavior[1])
+    except ValueError:
+        return "requirements_behavior_unspecified"
+    if type(literal) in (str, int):
+        return None
+    return "requirements_behavior_unspecified"
 
 
 def _ambiguity_reason(text: str) -> str | None:
@@ -272,7 +282,13 @@ def _concrete_boundary_value(value: Any) -> bool:
 
 
 def _allowed_files_reason(value: Any) -> str | None:
-    """The file scope must be narrow: explicit repository relative files."""
+    """Require literal, canonical repository paths, never directory prefixes.
+
+    Scope is syntactic, just like the controller's exact (non-glob) matching;
+    it does not infer file types from a checkout. Require a filename suffix as
+    conservative evidence of file intent. Extensionless or unconventional names
+    need Spec. New files need not exist at base_commit or in the working tree.
+    """
     if not isinstance(value, list) or not value:
         return "allowed_files_missing"
     for path in value:
@@ -290,11 +306,10 @@ def _allowed_files_reason(value: Any) -> str | None:
             return "allowed_files_not_narrow"
         if path.endswith("/"):
             return "allowed_files_not_narrow"
-        # Resolve scope against this repository, independent of the caller's
-        # working directory. New files are allowed, existing directories are not.
-        try:
-            if (Path(__file__).resolve().parent.parent / path).is_dir():
-                return "allowed_files_not_narrow"
-        except (OSError, ValueError):
+        parsed = PurePosixPath(path)
+        if (str(parsed) != path or
+                not re.fullmatch(r"[A-Za-z0-9_.-]+(?:/[A-Za-z0-9_.-]+)*", path)):
             return "allowed_files_invalid"
+        if not parsed.suffix or parsed.suffix == ".":
+            return "allowed_files_not_narrow"
     return None

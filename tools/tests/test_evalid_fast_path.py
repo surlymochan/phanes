@@ -132,6 +132,32 @@ class FastPathContractTests(unittest.TestCase):
                 intake["public_scope"]["requirements"] = text
                 self.assert_closed(intake, enabled=True)
 
+    def test_unspecified_branch_conditions_fail_closed(self):
+        for text in ("Return 3 or 4 depending on input.",
+                     "Return 3 or 4 based on input.",
+                     "Return either 3 or 4.",
+                     "Return 3 when appropriate and 4 otherwise.",
+                     "Print success or failure according to the input.",
+                     "Return the exact decimal sum of two integers or 4.",
+                     "Return 3. Choose another value for other inputs."):
+            with self.subTest(requirements=text):
+                intake = copy.deepcopy(self.intake)
+                intake["public_scope"]["requirements"] = text
+                self.assert_closed(intake, enabled=True)
+
+    def test_supported_unconditional_behaviors_remain_eligible(self):
+        for text, output in (("Return 3.", "3\n"),
+                             ('Print "success".', "success\n")):
+            with self.subTest(requirements=text):
+                intake = copy.deepcopy(self.intake)
+                scope = intake["public_scope"]
+                scope["requirements"] = text
+                scope["expected_output"]["value"] = output
+                scope["boundaries"] = [
+                    {"input": value, "exit_code": 0, "output": output}
+                    for value in ([], [0, 0], ["x", 1])]
+                self.assertTrue(self.evaluate(intake, enabled=True)["eligible"])
+
     def test_unrecognized_public_contract_fields_fail_closed(self):
         # Unsupported requirements must go to Spec even when their values look
         # concrete; otherwise the receipt silently drops part of the contract.
@@ -236,6 +262,32 @@ class FastPathContractTests(unittest.TestCase):
         intake["public_scope"]["allowed_files"] = [
             "tools/evalid_fast_path.py", "tools/new_fast_path_module.py"]
         self.assertTrue(self.evaluate(intake, enabled=True)["eligible"])
+
+    def test_scope_verdict_and_receipt_ignore_workspace_path_types(self):
+        # allowed_files is a set of exact file names, not directory prefixes.
+        # The frozen intake must not acquire facts from a mutable checkout.
+        for path, eligible in (("tools/new_fast_path_module.py", True),
+                               ("tools/new_scope", False), ("tools", False)):
+            with self.subTest(path=path):
+                intake = copy.deepcopy(self.intake)
+                intake["public_scope"]["allowed_files"] = [path]
+                verdicts = []
+                for is_directory in (False, True):
+                    with mock.patch("pathlib.Path.is_dir", return_value=is_directory) as probe:
+                        result = self.evaluate(intake, enabled=True)
+                    verdicts.append(result)
+                    self.assertEqual(result["eligible"], eligible)
+                    probe.assert_not_called()
+                self.assertEqual(verdicts[0], verdicts[1])
+
+    def test_ambiguous_or_noncanonical_file_names_fail_closed(self):
+        for path in ("tools/new_scope", "tools/new_scope/", "./tools/example.py",
+                     "tools//example.py", "tools/example.py ",
+                     "tools/example.py\x00", "tools\\example.py"):
+            with self.subTest(path=path):
+                intake = copy.deepcopy(self.intake)
+                intake["public_scope"]["allowed_files"] = [path]
+                self.assert_closed(intake, enabled=True)
 
     def test_label_and_short_text_do_not_override_missing_evidence(self):
         intake = copy.deepcopy(self.intake)
