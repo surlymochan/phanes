@@ -3,6 +3,7 @@ import concurrent.futures
 import json
 import os
 import pathlib
+import signal
 import subprocess
 import sys
 import tempfile
@@ -149,6 +150,58 @@ class FleetCapacityTests(unittest.TestCase):
                                                           {'concurrency': {'total': 8}})
             self.assertEqual(error, 'risk_blocked')
             self.assertEqual(self.call('broker', op='status')['reservations'], [])
+
+    @unittest.skipIf(os.name == 'nt', 'fixture relies on POSIX detached sessions')
+    def test_successful_executor_retains_slot_for_unobserved_detached_descendant(self):
+        guard = pathlib.Path(self.temp.name, 'guard.json')
+        guard.write_text(json.dumps({'command': [str(BIN), 'broker']}))
+        child_pid_file = pathlib.Path(self.temp.name, 'detached-child.pid')
+        fixture = pathlib.Path(self.temp.name, 'detached_executor.py')
+        fixture.write_text(
+            'import os, pathlib, subprocess, sys, time\n'
+            'if sys.argv[1] == "child":\n'
+            '    pathlib.Path(sys.argv[2]).write_text(str(os.getpid()))\n'
+            '    time.sleep(60)\n'
+            'else:\n'
+            '    subprocess.Popen([sys.executable, __file__, "child", sys.argv[2]], start_new_session=True)\n'
+            '    deadline = time.monotonic() + 5\n'
+            '    while not pathlib.Path(sys.argv[2]).exists() and time.monotonic() < deadline: time.sleep(0.01)\n'
+            '    if not pathlib.Path(sys.argv[2]).exists(): sys.exit(2)\n'
+        )
+
+        def executor(_decision, _state, _prompt, wd, _rdir, timeout, event_file):
+            parent = subprocess.Popen([sys.executable, str(fixture), 'parent', str(child_pid_file)],
+                                      cwd=wd, start_new_session=True)
+            rc = parent.wait(timeout=timeout)
+            return rc, {}, {}, ''
+
+        rdir = pathlib.Path(self.temp.name, 'runs', 'detached')
+        rdir.mkdir(parents=True)
+        child_pid = None
+        try:
+            with mock.patch.dict(os.environ, {'OPENSWARM_FLEET_GUARD_CONFIG': str(guard),
+                                               'OPENSWARM_FLEET_CAPACITY_DIR': self.temp.name}), \
+                    mock.patch.dict(xs.EXECUTORS, {'pi': executor}):
+                _, _, error = xs.run_executor_with_rate_limit(
+                    'pi', {'backend': 'pi', 'model': 'fake'}, {}, 'review', self.temp.name,
+                    str(rdir), xs.NOW() + 15, {'concurrency': {'total': 8}})
+                self.assertIsNone(error)
+                child_pid = int(child_pid_file.read_text())
+                self.assertTrue(xs.pid_alive(child_pid))
+                self.assertTrue(self.call('broker', op='status')['reservations'],
+                                'fleet capacity was released while a detached executor descendant remained alive')
+        finally:
+            if child_pid is None and child_pid_file.exists():
+                child_pid = int(child_pid_file.read_text())
+            if child_pid is not None:
+                try:
+                    os.kill(child_pid, signal.SIGTERM)
+                except OSError:
+                    pass
+            if os.path.realpath(rdir) in xs._FLEET_RESERVATIONS:
+                with mock.patch.dict(os.environ, {'OPENSWARM_FLEET_GUARD_CONFIG': str(guard),
+                                                   'OPENSWARM_FLEET_CAPACITY_DIR': self.temp.name}):
+                    xs.release_fleet_slot(str(rdir))
 
     def test_one_shot_agy_403_releases_slot_for_next_run(self):
         guard = pathlib.Path(self.temp.name, 'guard.json')
