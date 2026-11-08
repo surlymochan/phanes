@@ -2,6 +2,7 @@ import hashlib
 import json
 import os
 import pathlib
+import signal
 import shutil
 import socket
 import subprocess
@@ -244,6 +245,34 @@ class LaneTests(unittest.TestCase):
         result = json.loads((self.data / "runs" / run_id / "result.json").read_text())
         self.assertEqual(result["workspace"]["base"], expected_head)
         self.assertTrue(wt.is_dir())
+
+    def test_serve_restart_resumes_the_in_flight_run(self):
+        self.set_config("pi")
+        self.start_lane()
+        run_id = self.assign("LANE_TEST_WAIT resume this run after supervisor restart")
+        self.wait_running(run_id)
+        log = pathlib.Path(self.env["FAKE_PI_RPC_LOG"])
+        self.wait_for(
+            lambda: log.exists() and any(
+                row.get("type") == "prompt" and "resume this run" in row.get("message", "")
+                for row in (json.loads(line) for line in log.read_text().splitlines())
+            ),
+            description="the in-flight prompt to reach the executor",
+        )
+
+        supervisor_pid = self.lane_state()["supervisor_pid"]
+        os.kill(supervisor_pid, signal.SIGKILL)
+        self.wait_for(lambda: not pathlib.Path(self.data / "lanes" / self.lane_name / "ctl.sock").exists(),
+                      description="the stopped supervisor socket to disappear")
+        restarted = self.cli("lane", "up", self.lane_name)
+        self.assertTrue(json.loads(restarted.stdout)["lanes"][0]["started"])
+
+        state = self.wait_for(
+            lambda: (row if (row := self.lane_state()).get("current_run") == run_id else None),
+            timeout=3,
+            description=f"restarted lane to resume run {run_id}",
+        )
+        self.assertEqual(state["state"], "busy")
 
     def test_pi_rate_limit_retries_in_session_and_watch_shows_alert(self):
         self.set_config("pi")
