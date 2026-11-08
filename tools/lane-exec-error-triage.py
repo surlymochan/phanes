@@ -30,10 +30,10 @@ For every failed run: the recorded ``error_class``, the executor return code,
 the wall time, and the *evidence line* (file, line number, text) that supports
 the cause hypothesis.  The hypotheses reuse the executor's own patterns, so the
 tool agrees with ``executor_error_class``
-(``openswarm/bin/openswarm:3942``):
+(``swrm/bin/swrm:3942``):
 
   exec_error        the executor exited non-zero or produced no final report
-                    (``openswarm/bin/openswarm:3942-3959``)
+                    (``swrm/bin/swrm:3942-3959``)
   quota_or_rate_limit  the error text matched RATE_LIMIT_RE
   auth              the error text matched AUTH_ERROR_RE
   model_unavailable the error text matched MODEL_UNAVAILABLE_RE
@@ -63,7 +63,7 @@ from collections import Counter
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-# The executor's own patterns (openswarm/bin/openswarm:3483-3486); a triage
+# The executor's own patterns (swrm/bin/swrm:3483-3486); a triage
 # that disagrees with the executor about "quota" is worthless.
 MODEL_UNAVAILABLE_RE = re.compile(r"(at capacity|server.?overloaded|overloaded|try a different model|model is not supported|not supported when using|model .{0,40}(not (found|available)|is unavailable))", re.I)
 RATE_LIMIT_RE = re.compile(r"(\b429\b|resource[_ -]?exhausted|rate.?limit|usage limit|quota|too many requests|insufficient balance|spend.?control)", re.I)
@@ -114,7 +114,7 @@ NO_CLASS_CAUSE = "missing_error_class"
 
 RUN_ID_RE = re.compile(r"(\d{8})-(\d{6})")
 # The executor writes its stderr next to the event stream: events.1.pi.jsonl
-# and events.1.pi.jsonl.err (openswarm/bin/openswarm:4613).
+# and events.1.pi.jsonl.err (swrm/bin/swrm:4613).
 EVENT_RE = re.compile(r"^events\.[^.]+\.[a-z_]+\.jsonl(\.err)?$")
 MAX_SCAN_BYTES = 512 * 1024
 IN_PROGRESS_STATES = {"started", "starting", "queued", "routing", "running", "finalizing", "verifying"}

@@ -189,6 +189,7 @@
     "test:related": "vitest related --run --maxWorkers=1",
     "test:durations": "bun scripts/test-durations.ts",
     "test:api": "bun run --cwd apps/auth-api test",
+    "test:self-hosted-workerd": "bun apps/auth-api/scripts/issue-9-local-workerd-e2e.ts",
     "test:backend": "vitest run src/backend",
     "test:browser": "bun scripts/browser-smoke.ts",
     "test:org-health-demo": "bun scripts/org-health-demo-e2e.ts",

@@ -12,3 +12,12 @@ execution live in `swrm/`. Use `swrm` for new CLI invocations. The legacy
 Configure fleet hosts and local paths in the consuming deployment. Keep host
 names, account names, credentials, and machine-specific paths out of this public
 repository.
+
+For the 2026-11-02 box deployment, load
+[`docs/examples/hub-bridge.env.example`](../docs/examples/hub-bridge.env.example)
+into the bridge service environment and replace the CLI path with the installed
+`swrm-fleet` path. `OPENSWARM_HUB_LOCAL_ROUTER=1` routes through the local fleet
+inventory; `OPENSWARM_AUTO_LOCAL_HOST=box` and the empty `"box":[]` backend
+allowlist exclude control-plane lanes from discovery and dispatch. The six
+remote hosts and their backend allocation follow
+[`docs/fleet-topology-expected.md`](../docs/fleet-topology-expected.md).
