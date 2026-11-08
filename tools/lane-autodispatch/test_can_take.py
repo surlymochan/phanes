@@ -10,7 +10,7 @@ import unittest
 import warnings
 import importlib.util
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import call, patch
 
 SPEC = importlib.util.spec_from_file_location("autodispatch", Path(__file__).with_name("autodispatch.py"))
 AUTODISPATCH = importlib.util.module_from_spec(SPEC)
@@ -442,6 +442,36 @@ class TickMemoryPreflightTest(TickHarness, unittest.TestCase):
                                       available_memory_mb=400)
         self.assertEqual(dispatched, [("CX2", 1713)])
         self.assertEqual(self.host_fail_calls, [])
+
+    def test_same_host_is_rechecked_after_a_codex_dispatch(self):
+        cards = [issue(n, "Codex session work", ("lane-ready",)) for n in (1721, 1722)]
+        lanes = {"CX2": {"host": "gores2", "backend": "codex"},
+                 "CX10": {"host": "gores2", "backend": "codex"}}
+        with patch.object(AUTODISPATCH, "available_memory_mb", side_effect=[500, 135]) as probe:
+            dispatched, logs = self.run_tick(cards, lanes=lanes)
+        self.assertEqual(dispatched, [("CX2", 1721)])
+        self.assertEqual(probe.call_args_list, [call("gores2"), call("gores2")])
+        self.assertTrue(any("CX10 #1722 skipped: blocked-by-host-memory host=gores2 available=135MB threshold=400MB"
+                            in line for line in logs), logs)
+        self.assertEqual(self.host_fail_calls, [])
+        self.assertEqual(self.last_status["_blocked"], 1)
+        self.assertEqual(self.last_status["_ready"], 0)
+        self.assertEqual(self.last_status["_memory_blocks"], {
+            1722: [{"host": "gores2", "available_mb": 135, "threshold_mb": 400,
+                    "reason": "blocked-by-host-memory"}]})
+
+    def test_same_host_can_recover_before_the_next_lane_attempt(self):
+        card = issue(1723, "Codex session work", ("lane-ready",))
+        lanes = {"CX2": {"host": "gores2", "backend": "codex"},
+                 "CX10": {"host": "gores2", "backend": "codex"}}
+        with patch.object(AUTODISPATCH, "available_memory_mb", side_effect=[135, 500]) as probe:
+            dispatched, _ = self.run_tick([card], lanes=lanes)
+        self.assertEqual(dispatched, [("CX10", 1723)])
+        self.assertEqual(probe.call_count, 2)
+        self.assertEqual(self.host_fail_calls, [])
+        self.assertEqual(self.last_status["_blocked"], 0)
+        self.assertEqual(self.last_status["_ready"], 0)
+        self.assertEqual(self.last_status["_memory_blocks"], {})
 
     def test_configured_threshold_applies_to_host_and_skip_is_not_failure(self):
         card = issue(1714, "Codex session work", ("lane-ready",))

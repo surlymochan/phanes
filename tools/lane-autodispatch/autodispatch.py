@@ -1513,7 +1513,6 @@ def tick(lanes, state, last_warn):
     base = None
     outcomes = {}
     freed_lanes = set()
-    memory_cache = {}
     memory_rejections = {}
     dispatch_eligible_lanes = set()
 
@@ -1580,6 +1579,9 @@ def tick(lanes, state, last_warn):
                 candidates.sort(key=lambda i: bool(i.get("verify")) != preferred)
                 log(f"queue share: {L} prefers verify (verify deficit={verify_slots}, work slots={work_slots}); other class yields", brain=False)
         if candidates: dispatch_eligible_lanes.add(L)
+        # Share a probe across this lane's candidates only. Another lane on the
+        # same host must recheck after a session starts or memory recovers.
+        memory_cache = {}
         eligible = []
         for candidate in candidates:
             rejection = memory_preflight(L, cfg, candidate, memory_cache)
