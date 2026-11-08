@@ -7,8 +7,7 @@ that names files the repository does not contain cannot refill the lane queue,
 so the rules the planner issue announces are checked here as executable
 assertions:
 
-  * exactly the 20 announced files exist (`ls docs/backlog/next/20261103-0313-*.md
-    | wc -l | grep -qx 20`);
+  * exactly the 20 announced files exist, including shell count validation;
   * every card keeps the announced section order (title / labels / body /
     验收) and passes the dispatcher's own card predicate
     (`tools/check-ad-ready-target.py`);
@@ -17,12 +16,23 @@ assertions:
     moved tree cannot be dispatched);
   * the backend mix keeps every lane fed and no card repeats another one.
 
-The assertions fail on the baseline: the batch was never written.
+The original 17 assertions fail on the baseline: the batch was never written.
+
+The issue's original pipeline ends with ``grep -qx 20``, which rejects BSD wc's
+space-padded count on macOS. The portable replacement is::
+
+    ls docs/backlog/next/20261103-0313-*.md | wc -l | grep -Eq '^[[:space:]]*20[[:space:]]*$'
+
+Both pipelines are exercised below, including a padded-wc reproduction. Updating
+the external issue/host acceptance command remains necessary; card contents
+cannot change the output formatting of the host's wc.
 """
 
 import glob
 import importlib.util
 import re
+import subprocess
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -32,6 +42,9 @@ NEXT = ROOT / "docs" / "backlog" / "next"
 TAG = "20261103-0313"
 COUNT = 20
 CARD_NAMES = [f"{TAG}-{index:02d}.md" for index in range(1, COUNT + 1)]
+COUNT_PIPELINE = f"ls docs/backlog/next/{TAG}-*.md | wc -l"
+ISSUE_COUNT_COMMAND = COUNT_PIPELINE + " | grep -qx 20"
+PORTABLE_COUNT_COMMAND = COUNT_PIPELINE + " | grep -Eq '^[[:space:]]*20[[:space:]]*$'"
 AD_PATH = ROOT / "tools" / "lane-autodispatch" / "autodispatch.py"
 READY_TARGET_PATH = ROOT / "tools" / "check-ad-ready-target.py"
 
@@ -249,6 +262,54 @@ class BatchPresenceTests(BatchCase):
         for path in batch_files():
             text = path.read_text(encoding="utf-8")
             self.assertTrue(text.strip(), "%s is empty" % path.name)
+
+
+class BatchCountCommandTests(BatchCase):
+    """Run shell acceptance, including the macOS wc formatting difference."""
+
+    def run_command(self, command, cwd=ROOT):
+        return subprocess.run(
+            ["sh", "-c", command], cwd=cwd, capture_output=True, text=True, timeout=10,
+        )
+
+    def test_original_issue_pipeline_matches_native_wc_format(self):
+        self.require_batch()
+        count = self.run_command(COUNT_PIPELINE)
+        self.assertEqual(count.returncode, 0, count.stderr)
+        self.assertEqual(int(count.stdout.strip()), COUNT)
+        result = self.run_command(ISSUE_COUNT_COMMAND)
+        # Execute the exact issue command, without silently substituting a
+        # different grep pattern or wrapping the native wc on the real batch.
+        expected = 0 if count.stdout.rstrip("\n") == "20" else 1
+        self.assertEqual(result.returncode, expected, result.stderr)
+        self.assertEqual(result.stderr, "")
+
+    def test_portable_pipeline_accepts_the_real_batch(self):
+        self.require_batch()
+        result = self.run_command(PORTABLE_COUNT_COMMAND)
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_padded_wc_accepts_twenty_and_rejects_incomplete_or_extra_cards(self):
+        # Count actual files with native wc, then format its result as BSD wc
+        # does. No macOS executable or change to the user's PATH is needed.
+        padded_wc = 'wc() { wc_count=$(command wc "$@"); printf "%8d\\n" "$wc_count"; }; '
+        with tempfile.TemporaryDirectory(prefix=".batch-0313-", dir=ROOT) as temporary:
+            root = Path(temporary)
+            directory = root / "docs" / "backlog" / "next"
+            directory.mkdir(parents=True)
+            for name in CARD_NAMES[:-1]:
+                (directory / name).write_text("# 计数夹具\n", encoding="utf-8")
+            for count in (19, 20, 21):
+                if count >= 20:
+                    (directory / f"{TAG}-{count:02d}.md").write_text("# 计数夹具\n", encoding="utf-8")
+                with self.subTest(count=count):
+                    formatted = self.run_command(padded_wc + COUNT_PIPELINE, cwd=root)
+                    self.assertEqual(formatted.returncode, 0, formatted.stderr)
+                    self.assertEqual(formatted.stdout, f"{count:8d}\n")
+                    original = self.run_command(padded_wc + ISSUE_COUNT_COMMAND, cwd=root)
+                    self.assertEqual(original.returncode, 1, original.stderr)
+                    portable = self.run_command(padded_wc + PORTABLE_COUNT_COMMAND, cwd=root)
+                    self.assertEqual(portable.returncode, 0 if count == COUNT else 1, portable.stderr)
 
 
 class CardShapeTests(BatchCase):
