@@ -22,6 +22,7 @@ cwd = os.getcwd()
 model = None
 overload_model = os.environ.get("FAKE_APP_SERVER_OVERLOAD_MODEL")
 overload_used = False
+thread_start_error = os.environ.get("FAKE_APP_SERVER_THREAD_START_ERROR")
 
 for line in sys.stdin:
     try:
@@ -39,7 +40,10 @@ for line in sys.stdin:
         cwd = params.get("cwd", cwd)
         model = params.get("model")
         send({"jsonrpc": "2.0", "method": "fixture/unrelated", "params": {"before": method}})
-        response(req, {"thread": {"id": thread_id}, "model": params.get("model")})
+        if thread_start_error:
+            send({"jsonrpc": "2.0", "id": req.get("id"), "error": {"message": thread_start_error}})
+        else:
+            response(req, {"thread": {"id": thread_id}, "model": params.get("model")})
     elif method == "turn/start":
         prompt = (params.get("input") or [{}])[0].get("text", "")
         if "LANE_TEST_CRASH" in prompt:
