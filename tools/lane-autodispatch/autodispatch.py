@@ -1662,11 +1662,11 @@ def block_pr_validation(lane, cfg, st, info, state, title, body, missing):
             "error": f"PR 提交前校验未通过（{PR_VALIDATION_STRICT}）：{'；'.join(missing)}",
             "missing": list(missing)}
 
-# The artifacts that never enter a harvested branch (Refs #1835): the hidden build
-# leftovers (swrm/tests/.dde4*-00000000.so) and the review products
+# The artifacts that never enter a harvested branch (Refs #1835, #1863): shared
+# object files and the review products
 # (.lane-review/PR-N.md).  The rules are a list constant: one more artifact kind is
 # one more pattern. This legacy AD owns its filtering rules.
-HARVEST_EXCLUDE_PATTERNS = [re.compile(r"(^|/)\.[^/]*\.so$"), re.compile(r"(^|/)\.lane-review/")]
+HARVEST_EXCLUDE_PATTERNS = [re.compile(r"(^|/)[^/]*\.so$"), re.compile(r"(^|/)\.lane-review/")]
 
 def filter_harvest(ref, base):
     """Rebuild the harvested branch without the artifacts that never enter a PR.
