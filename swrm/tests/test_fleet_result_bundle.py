@@ -129,7 +129,8 @@ def test_malformed_evidence_is_unavailable_without_breaking_bundle(completed_run
         assert report["evidence"][field] == {"status": "unavailable"}
 
 
-@pytest.mark.parametrize("log, truncated", [("x" * MAX_LOG_BYTES, False), ("中" * 30000, True)])
+@pytest.mark.parametrize("log, truncated", [("x" * MAX_LOG_BYTES, False), ("中" * 30000, True)],
+                         ids=["exact-byte-limit", "multibyte-truncation"])
 def test_log_limit_counts_utf8_bytes_without_splitting_characters(completed_run, log, truncated):
     tests = completed_run({"tests": {"command": "test", "rc": 0, "log": log}})["evidence"]["tests"]
     assert tests["truncated"] is truncated
