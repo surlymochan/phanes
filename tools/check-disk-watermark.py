@@ -12,6 +12,8 @@ Covered contract:
   apparent size, and the guard reads the usage numbers of the remote host;
 * block -> hold -> recovered: the lane stays paused inside the hysteresis band
   and the guard releases its own marker at the recovery threshold;
+* the hysteresis band only holds an existing block: fresh and recovered hosts
+  remain dispatchable below the block threshold;
 * the guard restores its own marker when another sweep (the health sweep) has
   cleared it, and it never takes over or releases a foreign marker;
 * a failed probe is never a healthy host: the guard fails closed;
@@ -150,7 +152,13 @@ def check_hysteresis(base):
     assert done.returncode == 0, done.stderr
     assert marker.read_text() == "auto:other-guard\n", marker.read_text()
 
-    # Restore our own marker, then check release exactly at 87%.
+    # Reach the block threshold again after recovery, then check marker repair
+    # in the hold band and release exactly at 87%.
+    marker.unlink()
+    env["PATH"] = fake_ssh(base, DF_BLOCKED)
+    done = run_guard(base, pause_dir, brain_log, env)
+    assert done.returncode == 0, done.stderr
+    assert marker.exists(), "the block must create our own marker"
     marker.unlink()
     env["PATH"] = fake_ssh(base, DF_HELD)
     done = run_guard(base, pause_dir, brain_log, env)
@@ -185,15 +193,29 @@ def check_dispatch_gate(base):
     pause_dir = home / "phanes-ctl" / "autodispatch"
     brain_log = home / "phanes-ctl" / "brain.log"
     env = dict(os.environ)
-    env["PATH"] = fake_ssh(base, DF_BLOCKED)
-    done = run_guard(base, pause_dir, brain_log, env)
-    assert done.returncode == 0, done.stderr
-
     previous = {name: os.environ.get(name) for name in ("HOME", "OPENSWARM_HOME")}
     os.environ["HOME"] = str(home)
     os.environ["OPENSWARM_HOME"] = str(home / "state")
     try:
         dispatcher = load("autodispatch_disk_watermark_check", AUTODISPATCH)
+        # A fresh host, repeated warnings and a healthy -> warning transition
+        # must never latch the disk gate without first reaching the block limit.
+        for df_text in (DF_HELD, DF_HELD, DF_RECOVERED, DF_HELD):
+            env["PATH"] = fake_ssh(base, df_text)
+            done = run_guard(base, pause_dir, brain_log, env)
+            assert done.returncode == 0, done.stderr
+            assert not (pause_dir / MARKER).exists(), done.stdout
+            record = json.loads((pause_dir / f"disk-watermark-{HOST}.json").read_text())
+            assert record["blocked"] is False, record
+            if df_text == DF_HELD:
+                assert record["state"] == "warn", record
+                assert "state=warn" in brain_rows(brain_log)[-1], brain_rows(brain_log)
+            assert not dispatcher.lane_paused("CX2", {"host": HOST}), \
+                "a host below the block threshold must remain dispatchable"
+
+        env["PATH"] = fake_ssh(base, DF_BLOCKED)
+        done = run_guard(base, pause_dir, brain_log, env)
+        assert done.returncode == 0, done.stderr
         assert f"host:{HOST}" in dispatcher.paused_scopes(), dispatcher.paused_scopes()
         assert dispatcher.lane_paused("CX2", {"host": HOST}), \
             "the dispatcher must hold a lane of the blocked host"
@@ -212,6 +234,12 @@ def check_dispatch_gate(base):
         dispatcher = load("autodispatch_disk_watermark_recovered_check", AUTODISPATCH)
         assert not dispatcher.lane_paused("CX2", {"host": HOST}), \
             "the dispatcher must open the gate again after the recovery"
+        env["PATH"] = fake_ssh(base, DF_HELD)
+        done = run_guard(base, pause_dir, brain_log, env)
+        assert done.returncode == 0, done.stderr
+        assert not (pause_dir / MARKER).exists(), done.stdout
+        assert not dispatcher.lane_paused("CX2", {"host": HOST}), \
+            "returning to the warning band after recovery must not reblock the host"
     finally:
         for name, value in previous.items():
             if value is None:

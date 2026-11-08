@@ -630,7 +630,8 @@ Watermark policy (the thresholds are the ones of the lane host):
 | Measured usage | State | Effect |
 | --- | --- | --- |
 | `>= 95%` | `block` | the host is paused (`PAUSE-HOST-<host>`) and the brain log gets an alert row |
-| `> 87%` and `< 95%` | `hold` | the pause **stays** (hysteresis): the lane is not released before the recovery threshold |
+| `> 87%` and `< 95%`, previously blocked | `hold` | the pause **stays** (hysteresis): the lane is not released before the recovery threshold |
+| `> 87%` and `< 95%`, previously unblocked | `warn` | the brain log gets a warning; dispatch stays open and no pause is created |
 | `<= 87%` | `recovered` | the guard releases **its own** marker only |
 
 Ownership rules: the marker body starts with `auto:disk-watermark`, so the health

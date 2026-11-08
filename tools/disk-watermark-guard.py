@@ -9,8 +9,9 @@ the reviews stall.  The guard is the resident loop of the box control plane:
   lane host);
 * above the block threshold it pauses the host (a `PAUSE-HOST-<host>` marker
   that the dispatcher reads) and writes an alert row into the brain log;
-* between the block and the recovery threshold it **keeps** the pause (the
-  hysteresis band) and restores the marker when another sweep removed it;
+* between the block and the recovery threshold it **keeps** an existing pause
+  (the hysteresis band) and restores the marker when another sweep removed it;
+  a host that was not blocked only gets a warning;
 * at or below the recovery threshold it releases **its own** marker only: a pause
   that belongs to another guard or to an operator is never taken over and never
   released;
@@ -88,18 +89,19 @@ def owns_marker(body):
     return bool(body) and body.startswith(MARKER_PREFIX)
 
 
-def decide(used_pct, block_pct=BLOCK_PCT, recover_pct=RECOVER_PCT):
+def decide(used_pct, block_pct=BLOCK_PCT, recover_pct=RECOVER_PCT, was_blocked=False):
     """The watermark state of a measured host.
 
     `block`     - at or above the block threshold: the lane host is paused;
-    `hold`      - between the thresholds: the lane host stays paused;
+    `hold`      - between the thresholds after a block: the host stays paused;
+    `warn`      - between the thresholds without a block: dispatch stays open;
     `recovered` - at or below the recovery threshold: the guard may release its own
                   pause.
     """
     if used_pct >= block_pct:
         return "block"
     if used_pct > recover_pct:
-        return "hold"
+        return "hold" if was_blocked else "warn"
     return "recovered"
 
 
@@ -243,14 +245,16 @@ def run_once(options):
         print(f"disk-watermark: {error}", file=sys.stderr)
         return 1
     used_pct = usage["used_pct"]
-    state = decide(used_pct, options.block_pct, options.recover_pct)
-    if state == "recovered":
-        released = release_marker(marker)
-        write_state(state_file, host, "recovered", False, usage)
-        if previous.get("state") != "recovered" or released:
-            brain_row(options.brain_log, host=host, state="recovered",
+    state = decide(used_pct, options.block_pct, options.recover_pct,
+                   was_blocked=bool(previous.get("blocked")))
+    if state in ("recovered", "warn"):
+        released = release_marker(marker) if state == "recovered" else False
+        write_state(state_file, host, state, False, usage)
+        if previous.get("state") != state or released:
+            brain_row(options.brain_log, host=host, state=state,
                       used_pct=used_pct, used_bytes=usage["used_bytes"],
-                      free_bytes=usage["free_bytes"], action="release-pause")
+                      free_bytes=usage["free_bytes"],
+                      action="release-pause" if state == "recovered" else "warn-only")
         print(f"disk-watermark: {host} used_pct={used_pct} state={state}")
         return 0
     marker_state = ensure_marker(marker, host, used_pct, state)
