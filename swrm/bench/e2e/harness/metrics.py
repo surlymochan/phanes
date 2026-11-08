@@ -26,20 +26,36 @@ def empty_usage() -> dict:
 
 
 def looks_like_usage(obj: object) -> bool:
+    """Recognize usable counters so every caller can skip malformed usage."""
     if not isinstance(obj, dict):
         return False
     for names in _ALIASES.values():
         if any(name in obj for name in names):
+            try:
+                normalize_usage(obj)
+            except (TypeError, ValueError, OverflowError):
+                return False
             return True
     return False
 
 
 def normalize_usage(obj: dict) -> dict:
+    """Accept nonnegative integers, integral floats and integer strings.
+
+    Missing/null counters stay zero. Reject the entire usage object if a
+    selected counter is invalid; callers should first use looks_like_usage.
+    """
     usage = empty_usage()
     for key, names in _ALIASES.items():
         for name in names:
             if name in obj and obj[name] is not None:
-                usage[key] = int(obj[name])
+                value = obj[name]
+                if isinstance(value, bool) or not isinstance(value, (int, float, str)):
+                    raise ValueError("invalid token counter type")
+                count = int(value)
+                if count < 0 or (isinstance(value, float) and value != count):
+                    raise ValueError("token counter must be a nonnegative integer")
+                usage[key] = count
                 break
     return usage
 
