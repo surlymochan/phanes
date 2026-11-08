@@ -11,12 +11,8 @@ PAUSE-HOST-<HOST>, PAUSE-BACKEND-<BACKEND> and PAUSE-MINT (no new issue minted).
 A legacy marker that carries its own deadline (`until=<epoch|ISO>`) stops holding the lane once that
 deadline passed; the marker file stays on disk as the evidence of the hold (Refs #1592).
 """
-<<<<<<< HEAD
-import base64, hashlib, json, os, re, shlex, stat, subprocess, sys, time, tempfile, concurrent.futures as cf
-from datetime import datetime, timezone
-=======
 import base64, hashlib, json, math, os, re, shlex, stat, subprocess, sys, time, tempfile, concurrent.futures as cf
->>>>>>> b29e11f43bb041d506a930dcbcb3c98f641412ee
+from datetime import datetime, timezone
 HOME = os.path.expanduser("~"); D = f"{HOME}/phanes-ctl/autodispatch"
 REPO = "surlymochan/phanes"; LOCAL = "/workspace/phanes-repo"; BRAIN_LOG = "/workspace/phanes/brain/log.md"
 TICK = int(os.environ.get("AD_TICK", "60")); BUDGET = os.environ.get("AD_BUDGET", "45"); LOW = int(os.environ.get("AD_LOW", "10"))
@@ -1017,9 +1013,6 @@ def freshen_queue(q, state, cache=None):
             fresh.append(item)
     return fresh
 
-<<<<<<< HEAD
-def status_snapshot(lanes, state, res, ready, blocked, records=None):
-=======
 def update_busy_stale(lanes, state, res):
     """Retain review markers independently of run tracking, including offline hosts.
 
@@ -1049,8 +1042,7 @@ def update_busy_stale(lanes, state, res):
             log(f"{lane} #{st['issue']} run {st['run']} stale: no trusted activity; review required", brain=False)
     save_state(state)
 
-def status_snapshot(lanes, state, res, ready, blocked):
->>>>>>> b29e11f43bb041d506a930dcbcb3c98f641412ee
+def status_snapshot(lanes, state, res, ready, blocked, records=None):
     """Build the observable lane status row, including this process's stale skips."""
     status = {L: (("stale #%s (review required)" if "stale_since" in state[L] else "busy #%s") % state[L]["issue"]) if state.get(L) else (res[L].get("error") or res[L].get("lane") or "?") for L in lanes}
     status["_busy"] = sum(1 for L in lanes if state.get(L) and "stale_since" not in state[L])
@@ -1742,16 +1734,11 @@ def tick(lanes, state, last_warn):
             if filed: log(f"{why}: filed {len(filed)} issue(s) from backlog: {' '.join(filed)}")
             elif time.time() - last_warn > 600:
                 log(f"WARNING queue low: {ready} dispatchable lane-ready issue(s) left (+{blocked} waiting on 依赖), backlog/ empty (threshold {LOW})"); last_warn = time.time()
-<<<<<<< HEAD
-    st = status_snapshot(lanes, state, res, ready, blocked, records)
-    json.dump(st, open(f"{D}/lanes-status.json", "w"), ensure_ascii=False, indent=1)
-=======
     state["_tick_at"] = now
     save_state(state)
-    st = status_snapshot(lanes, state, res, ready, blocked)
+    st = status_snapshot(lanes, state, res, ready, blocked, records)
     with open(f"{D}/lanes-status.json", "w") as stream:
         json.dump(st, stream, ensure_ascii=False, indent=1)
->>>>>>> b29e11f43bb041d506a930dcbcb3c98f641412ee
     return last_warn
 
 def file_issue(text, extra=()):
