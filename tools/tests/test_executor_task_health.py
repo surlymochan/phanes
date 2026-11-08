@@ -113,6 +113,7 @@ Run:
     python3 -m unittest tools.tests.test_executor_task_health -v
 """
 
+import fcntl
 import importlib.util
 import inspect
 import json
@@ -123,7 +124,9 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
+from unittest import mock
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -777,6 +780,138 @@ class ExecutorProbeCommandLineTests(ProbeTestCase):
         self.assertIn(SERVICE, alert, "the command line probe must alert")
         self.assertTrue(self.snapshots(snapshot_dir), "the command line probe must save the ps snapshot")
         self.assertTrue(log.exists(), "the command line probe must sample the host over ssh")
+
+
+class ExecutorReviewRegressionTests(ProbeTestCase):
+    """Regressions for the three blockers of the implementation review."""
+
+    def test_ssh_preserves_shell_quotes_for_the_bulk_cgroup_map(self):
+        # Model SSH's join of the arguments after the host, then run that command
+        # in a real shell. Neither zombies nor their parents are in cgroup.procs.
+        host = self.soft_host()
+        host.services[SERVICE]["pids"] = []
+        proc = self.root / "proc"
+        proc.mkdir()
+        for index in range(51):
+            entry = proc / str(PARENT_PID + 1 + index)
+            entry.mkdir()
+            (entry / "cgroup").write_text("0::/system.slice/" + SERVICE + "\n")
+        command = MODULE.CGROUP_MAP_COMMAND.replace("/proc/", str(proc) + "/")
+        real_run = subprocess.run
+
+        def remote_shell(argv, **kwargs):
+            return real_run(["sh", "-c", ssh_command(argv, HOST)], **kwargs)
+
+        with mock.patch.object(MODULE.subprocess, "run", side_effect=remote_shell):
+            mapping_output = MODULE.ssh_runner(HOST)(command)
+        mapping = MODULE.parse_cgroup_map(mapping_output)
+        self.assertEqual(len(mapping), 51)
+
+        def runner(command):
+            if command == MODULE.CGROUP_MAP_COMMAND:
+                return mapping_output
+            return host.run(command)
+
+        payload, _ = MODULE.collect(HOST, run=runner)
+        service = payload["services"][0]
+        self.assertEqual(service["zombie_count"], 51)
+        self.assertEqual(service["zombie_parent_pids"], [PARENT_PID])
+        self.assertEqual(service["level"], "soft")
+
+    def test_failed_cgroup_read_is_uncollected_and_never_alerts(self):
+        host = self.soft_host()
+
+        def runner(command):
+            if "cgroup.procs" in command:
+                raise subprocess.CalledProcessError(1, command, stderr="permission denied")
+            return host.run(command)
+
+        alert = self.root / "health.alert"
+        payload = MODULE.update(HOST, self.root / "health.json", alert,
+                                self.root / "snapshots", run=runner)
+        service = payload["services"][0]
+        self.assertFalse(service["collected"])
+        self.assertEqual(service["level"], "uncollected")
+        self.assertIsNone(service["zombie_count"])
+        self.assertFalse(alert.exists())
+
+    def test_missing_control_group_is_uncollected(self):
+        host = self.soft_host()
+
+        def runner(command):
+            output = host.run(command)
+            if "systemctl show" in command:
+                return "\n".join(line for line in output.splitlines()
+                                 if not line.startswith("ControlGroup="))
+            return output
+
+        payload, _ = MODULE.collect(HOST, run=runner)
+        self.assertFalse(payload["services"][0]["collected"])
+        self.assertEqual(MODULE.build_alerts(payload), [])
+
+    def test_health_update_waits_for_writer_and_reads_its_latest_summary(self):
+        health = self.root / "health.json"
+        health.write_text(json.dumps({"hosts": {HOST: "degraded"}, "hosts_ok": 0}))
+        ready = self.root / "writer-ready"
+        # A second process uses the probe's real writer, while this process holds
+        # the shared health-loop lock and changes the summary in the meantime.
+        script = (
+            "import importlib.util, pathlib, sys\n"
+            "spec = importlib.util.spec_from_file_location('probe', sys.argv[1])\n"
+            "probe = importlib.util.module_from_spec(spec)\n"
+            "spec.loader.exec_module(probe)\n"
+            "pathlib.Path(sys.argv[3]).touch()\n"
+            "probe.write_health_payload(pathlib.Path(sys.argv[2]), sys.argv[4], "
+            "{'status': 'collected', 'services': []})\n"
+        )
+        with Path(str(health) + ".lock").open("a") as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            child = subprocess.Popen(
+                [sys.executable, "-c", script, str(PROBE_PATH), str(health), str(ready), HOST],
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+            try:
+                # Bounded wait for the child to enter the writer, without sockets.
+                deadline = time.monotonic() + 5
+                while not ready.exists() and child.poll() is None and time.monotonic() < deadline:
+                    time.sleep(0.01)
+                self.assertTrue(ready.exists())
+                with self.assertRaises(subprocess.TimeoutExpired):
+                    child.communicate(timeout=0.2)
+                latest = {"hosts": {HOST: "degraded", OTHER_HOST: "ok"}, "hosts_ok": 1,
+                          "executor_tasks": {OTHER_HOST: {"status": "skipped"}}}
+                health.write_text(json.dumps(latest))
+                fcntl.flock(lock, fcntl.LOCK_UN)
+                stdout, stderr = child.communicate(timeout=5)
+                self.assertEqual(child.returncode, 0, stdout + stderr)
+            finally:
+                if child.poll() is None:
+                    child.kill()
+                child.communicate()
+        written = json.loads(health.read_text())
+        self.assertEqual(written["hosts"], latest["hosts"])
+        self.assertEqual(written["hosts_ok"], 1)
+        self.assertEqual(written["executor_tasks"][OTHER_HOST], {"status": "skipped"})
+        self.assertEqual(written["executor_tasks"][HOST]["status"], "collected")
+
+    def test_invalid_health_json_is_preserved_instead_of_overwritten(self):
+        health = self.root / "health.json"
+        for original in ('{"hosts":', '[]'):
+            with self.subTest(original=original):
+                health.write_text(original)
+                with self.assertRaises(ValueError):
+                    MODULE.write_health_payload(health, HOST, {"status": "skipped"})
+                self.assertEqual(health.read_text(), original)
+
+    def test_failed_atomic_replace_preserves_the_existing_summary(self):
+        health = self.root / "health.json"
+        original = json.dumps({"hosts": {HOST: "ok"}, "hosts_ok": 1})
+        health.write_text(original)
+        with mock.patch("os.replace", side_effect=OSError("write failed")):
+            with self.assertRaises(OSError):
+                MODULE.write_health_payload(health, HOST, {"status": "skipped"})
+        self.assertEqual(health.read_text(), original)
+        self.assertEqual(sorted(path.name for path in self.root.iterdir()),
+                         ["health.json", "health.json.lock"])
 
 
 if __name__ == "__main__":

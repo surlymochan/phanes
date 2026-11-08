@@ -43,11 +43,14 @@ prints (``collected`` / ``skipped`` / ``uncollected``), 1 when the probe itself 
 from __future__ import annotations
 
 import argparse
+import fcntl
 import json
+import os
 import re
 import shlex
 import subprocess
 import sys
+import tempfile
 import time
 from pathlib import Path
 from typing import Callable, Dict, Iterable, List, Optional, Sequence, Set, Tuple
@@ -301,7 +304,8 @@ def ssh_runner(host: str, user: Optional[str] = None, timeout: float = DEFAULT_T
         argv = ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=20"]
         argv.extend(ssh_options)
         argv.append("%s@%s" % (user, host) if user else host)
-        argv.extend(shlex.split(command))
+        # SSH joins remote arguments with spaces; keep the shell quoting intact.
+        argv.append(command)
         completed = subprocess.run(
             argv, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=timeout)
         if completed.returncode != 0:
@@ -319,12 +323,12 @@ def collect_service(runner: Callable[[str], str], unit: str, ps_output: str,
     except Exception as error:  # noqa: BLE001 - a failed sample is data, not a crash
         return unavailable(unit, error)
     control_group = parse_systemctl_show(show).get("ControlGroup", "")
-    pids: Set[int] = set()
-    if control_group:
-        try:
-            pids = parse_pid_list(runner(CGROUP_PROCS_COMMAND % control_group))
-        except Exception:  # noqa: BLE001 - the cgroup file may be gone already
-            pids = set()
+    if not control_group:
+        return unavailable(unit, "missing ControlGroup in systemctl show sample")
+    try:
+        pids = parse_pid_list(runner(CGROUP_PROCS_COMMAND % shlex.quote(control_group)))
+    except Exception as error:  # noqa: BLE001 - a failed sample must not look healthy
+        return unavailable(unit, error)
     return inspect_service(unit, show, pids, ps_output, cgroup_map)
 
 
@@ -400,31 +404,49 @@ def write_health_payload(health_path: Path, host: str,
     The summary of the control plane (``at``, ``hosts``, ``hosts_ok``,
     ``hosts_degraded``) is preserved: the probe never rewrites the status of a host.
     """
-    data: Dict[str, object] = {}
-    if health_path.exists():
+    # Lock a stable sidecar rather than health.json's inode, which changes on
+    # atomic replacement. Every summary writer must use this same lock and reread
+    # health.json after acquiring it (including the external health-check loop).
+    health_path.parent.mkdir(parents=True, exist_ok=True)
+    with Path(str(health_path) + ".lock").open("a") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
         try:
             loaded = json.loads(health_path.read_text())
-        except (OSError, ValueError):
+        except FileNotFoundError:
             loaded = {}
-        if isinstance(loaded, dict):
-            data = loaded
+        if not isinstance(loaded, dict):
+            raise ValueError("health.json must contain an object")
+        data = loaded
 
-    hosts = data.get("hosts")
-    if not isinstance(hosts, dict):
-        hosts = {}
-        data["hosts"] = hosts
-    entry = hosts.get(host)
-    if isinstance(entry, dict):
-        entry["executor_tasks"] = payload  # a host entry that is already a mapping
-    tasks = data.get(HEALTH_KEY)
-    if not isinstance(tasks, dict):
-        tasks = {}
-        data[HEALTH_KEY] = tasks
-    tasks[host] = payload
+        hosts = data.get("hosts")
+        if not isinstance(hosts, dict):
+            hosts = {}
+            data["hosts"] = hosts
+        entry = hosts.get(host)
+        if isinstance(entry, dict):
+            entry["executor_tasks"] = payload  # a host entry that is already a mapping
+        tasks = data.get(HEALTH_KEY)
+        if not isinstance(tasks, dict):
+            tasks = {}
+            data[HEALTH_KEY] = tasks
+        tasks[host] = payload
 
-    health_path.parent.mkdir(parents=True, exist_ok=True)
-    health_path.write_text(json.dumps(data, indent=2) + "\n")
-    return data
+        # A reader sees either the old complete document or the new one. On a
+        # failed write/replace, preserve the existing summary and remove the temp.
+        temporary = None
+        try:
+            with tempfile.NamedTemporaryFile(
+                    mode="w", dir=health_path.parent, prefix=health_path.name + ".",
+                    suffix=".tmp", delete=False) as handle:
+                temporary = Path(handle.name)
+                handle.write(json.dumps(data, indent=2) + "\n")
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temporary, health_path)
+        finally:
+            if temporary is not None:
+                temporary.unlink(missing_ok=True)
+        return data
 
 
 def build_alerts(payload: Dict[str, object]) -> List[str]:

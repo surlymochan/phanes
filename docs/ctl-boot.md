@@ -627,6 +627,16 @@ python3 tools/executor-task-health.py <host> \
 The box runtime (`~/phanes-ctl/bin/health-check.py`) lives outside this repository; wiring
 the probe into that loop is a deployment step, not part of this card.
 
+`health.json` updates use an exclusive `flock` on the stable sidecar
+`health.json.lock`, held from **before reading** the current summary until the merged
+JSON has been atomically replaced. All writers, including the external health-check
+loop, must use that same sidecar and reread the summary under the lock; advisory
+locking cannot protect against a writer that ignores it. Do not lock the JSON inode
+itself or delete the sidecar, since replacement would let writers lock different
+inodes. A malformed or unreadable existing summary fails the probe write instead of
+being overwritten with an empty summary. Temporary JSON files are created beside the
+target, flushed and replaced atomically, and removed if writing fails.
+
 | watermark | level | condition |
 |---|---|---|
 | zombie count | `soft` | `Z > 50` |
@@ -703,6 +713,15 @@ Review mapping (the open findings of the pull request of the issue):
 | B3 - the zombie count of `cgroup.procs` misses the not yet reaped zombies | the zombie count comes from the `ps` table; a zombie belongs to the unit cgroup when the cgroup lists it, when its parent lives in that cgroup, or when the bulk `/proc` cgroup dump says so | `ExecutorWatermarkThresholdTests.test_the_zombie_parent_pids_are_reported`, `...test_more_than_fifty_zombies_is_soft` |
 | B4 - the chain tests were not in the CI discovery path | the tests live in `tools/tests/` (`unittest discover -s tools/tests` picks them up) and every test class sits above `unittest.main()`, so a direct run finds them too | `python3 -m unittest discover -s tools/tests -p 'test_*.py'` |
 | card - the duplicate sweep loops of #1826 | `detect_sweep()` counts the `fleet-capacity --sweep-loop` processes and reports their parents and the run id of the parent | `ExecutorSweepLoopTests` (2 tests) |
+
+Implementation review follow-up (baseline `e05a8f2ee`):
+
+| blocker | fix | regression in `ExecutorReviewRegressionTests` |
+|---|---|---|
+| 1 - SSH strips remote shell quotes, losing bulk cgroup attribution | pass the complete remote command as one SSH argument, preserving shell quotes | `test_ssh_preserves_shell_quotes_for_the_bulk_cgroup_map` executes the command through a real shell with fixture `/proc` files, then verifies 51 zombies outside `cgroup.procs` trigger `soft` with the parent PID |
+| 2 - failed `cgroup.procs` read looks like a healthy empty cgroup | return `uncollected` on read failure or missing `ControlGroup`, without a service alert | `test_failed_cgroup_read_is_uncollected_and_never_alerts`, `test_missing_control_group_is_uncollected` |
+| 3 - concurrent health writers lose summary updates | lock before reading, merge the latest summary, atomically replace it under the same lock | `test_health_update_waits_for_writer_and_reads_its_latest_summary` uses a separate probe process; `test_failed_atomic_replace_preserves_the_existing_summary` and `test_invalid_health_json_is_preserved_instead_of_overwritten` verify failure safety |
+
 
 ## ctl-loop child reaping and restart (Refs #951)
 
