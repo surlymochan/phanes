@@ -44,7 +44,15 @@ export function listMemoryItems(state, filter = {}) {
 }
 
 export function buildMemoryMount(state, input = {}) {
-  const items = listMemoryItems(state, input).slice(0, Number(input.limit || 20));
+  const rawLimit = input.limit === undefined ? 20 : input.limit;
+  const limit = typeof rawLimit === 'string' && rawLimit.trim() !== ''
+    ? Number(rawLimit)
+    : rawLimit;
+  if (!Number.isSafeInteger(limit) || limit <= 0) {
+    throw new RangeError('Memory mount limit must be a positive integer');
+  }
+
+  const items = listMemoryItems(state, input).slice(0, limit);
   return {
     mission_id: input.mission_id || null,
     total: items.length,
