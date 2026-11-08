@@ -150,7 +150,7 @@ export function AgentThreadView(props: AgentThreadViewProps) {
   const completedGoals = () => goals().filter((goal) => goal.state === "closed");
   const goalCompletion = (goal: AgentTask) => {
     if (goal.state === "closed") return 100;
-    const value = goal.progress?.match(/(?:^|\s)(\d{1,3})\s*%/)?.[1];
+    const value = goal.progress?.match(/(?:^|\D)(\d{1,3})\s*%/)?.[1];
     return value === undefined ? 0 : Math.max(0, Math.min(100, Number(value)));
   };
   const switchGoalGroup = (event: KeyboardEvent) => {
@@ -168,6 +168,7 @@ export function AgentThreadView(props: AgentThreadViewProps) {
             id="agent-goals-active"
             type="button"
             role="tab"
+            aria-controls="agent-goals-panel"
             tabIndex={goalGroup() === "active" ? 0 : -1}
             aria-selected={goalGroup() === "active"}
             onKeyDown={switchGoalGroup}
@@ -179,6 +180,7 @@ export function AgentThreadView(props: AgentThreadViewProps) {
             id="agent-goals-completed"
             type="button"
             role="tab"
+            aria-controls="agent-goals-panel"
             tabIndex={goalGroup() === "completed" ? 0 : -1}
             aria-selected={goalGroup() === "completed"}
             onKeyDown={switchGoalGroup}
@@ -187,7 +189,7 @@ export function AgentThreadView(props: AgentThreadViewProps) {
             已完成 / Completed goals ({completedGoals().length})
           </button>
         </div>
-        <div role="tabpanel">
+        <div id="agent-goals-panel" role="tabpanel" aria-labelledby={`agent-goals-${goalGroup()}`}>
           <For each={goalGroup() === "active" ? activeGoals() : completedGoals()} keyed={(goal) => goal.id}>
             {(goal) => (
               <article class="agent-goal">
