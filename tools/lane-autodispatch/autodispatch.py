@@ -20,6 +20,9 @@ RULES = ("Rules: work only inside this repository worktree (the current director
          "clear message referencing the issue (\"Refs #{n}\"). Write in the same language as the issue. "
          "Your commit message must also carry a short body with a `Closes #{n}` line and a `验收：<command>` line, and the "
          "commit subject (the PR title) must contain `#{n}`, so the lane PR passes the pre-submit check (Refs #1704).")
+IMPL_CARD_TASK_BOOK = ("## Impl card delivery requirements\n"
+                       "1. 交付说明必须对每个新增函数列出入口→调用链→数据结构来源：由谁调用、输入来自哪个真实数据结构、每个字段由谁填写。\n"
+                       "2. 至少补一个 tick/集成级测试：从真实入口（tick 或等价入口）驱动到可观测结果；只测函数加 mock 不算。\n")
 PRIO = {"p0": 0, "p1": 1, "p2": 2}
 DISPATCH_EXCLUDING_LABELS = {"in-progress", "lane-pr", "lane-failed"}
 # One multiplexed connection per host (cuts handshakes ~10x; banner-exchange timeouts came from bursts of parallel ssh).
@@ -671,7 +674,7 @@ def queue():
             valid, missing = verify_requirements(body)
             if not valid:
                 log_verify_rejected(i["number"], missing); continue
-        items.append({"n": i["number"], "title": i["title"], "body": body, "prio": pr, "backend": be, "strict": "strict-backend" in labels, "verify": verify})
+        items.append({"n": i["number"], "title": i["title"], "body": body, "labels": sorted(labels), "prio": pr, "backend": be, "strict": "strict-backend" in labels, "verify": verify})
     return sorted(items, key=lambda x: (x["prio"], x["n"]))
 
 VERIFY_HEADING_RE = re.compile(r"(?mi)^##[^\S\r\n]*Verify[^\S\r\n]*Intent[^\S\r\n]*$")
@@ -912,7 +915,14 @@ def dispatch_failed(lane, cfg, item, error):
     host_fail(cfg["host"], f"dispatch #{item['n']}: {error}")
 
 def dispatch(lane, cfg, item, base):
-    n = item["n"]; task = f"# #{n} {item['title']}\n\n{item['body']}\n\n{RULES.format(n=n)}\n"
+    n = item["n"]
+    body = item["body"]
+    labels = set(item.get("labels", ()))
+    is_impl = ("impl" in labels or "card:impl" in labels or "type:impl" in labels
+               or re.match(r"(?i)^impl(?:\s*[:：]|\s+)", item["title"]))
+    if is_impl and "## Impl card delivery requirements" not in body:
+        body = f"{body.rstrip()}\n\n{IMPL_CARD_TASK_BOOK}"
+    task = f"# #{n} {item['title']}\n\n{body}\n\n{RULES.format(n=n)}\n"
     path = f"{D}/tasks/{lane}-{n}.md"; os.makedirs(f"{D}/tasks", exist_ok=True); open(path, "w").write(task)
     h = cfg["host"]; F = cfg.get("fleet", "~/.local/bin/swrm-fleet"); R = cfg.get("repo", "~/work/phanes-fleet")
     with open(path) as task_file:
