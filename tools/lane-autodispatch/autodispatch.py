@@ -9,7 +9,7 @@ Pause: the swrm pause store ($OPENSWARM_HOME/pauses, written by `swrm pause <sco
 legacy markers ~/phanes-ctl/autodispatch/PAUSE (whole loop), PAUSE-<LANE> (one lane),
 PAUSE-HOST-<HOST>, PAUSE-BACKEND-<BACKEND> and PAUSE-MINT (no new issue minted). Both are read (Refs #1366).
 """
-import base64, hashlib, json, os, re, shlex, stat, subprocess, sys, time, tempfile, concurrent.futures as cf
+import base64, calendar, hashlib, json, os, re, shlex, stat, subprocess, sys, time, tempfile, concurrent.futures as cf
 HOME = os.path.expanduser("~"); D = f"{HOME}/phanes-ctl/autodispatch"
 REPO = "surlymochan/phanes"; LOCAL = "/workspace/phanes-repo"; BRAIN_LOG = "/workspace/phanes/brain/log.md"
 TICK = int(os.environ.get("AD_TICK", "60")); BUDGET = os.environ.get("AD_BUDGET", "45"); LOW = int(os.environ.get("AD_LOW", "10"))
@@ -82,6 +82,18 @@ def env_number(name, default, cast=float):
 AD_VERIFY_SHARE_ENABLED = os.environ.get("AD_VERIFY_SHARE_ENABLED", "0").lower() in {"1", "true", "yes"}
 VERIFY_SHARE = env_number("AD_VERIFY_SHARE", 0.2)
 VERIFY_MIN = env_number("AD_VERIFY_MIN", 1, int)
+
+# --- in-progress lease (Refs #1364) ------------------------------------------------------
+# The AD labels an issue `in-progress` before the run is really alive. When the AD dies in that
+# window (or the executor never starts) the label stays behind and the issue is never scheduled
+# again: a "ghost" in-progress. The lease bounds that window: it is taken BEFORE the label, it
+# expires after `AD_LEASE_TTL_S` unless the lane heartbeat renews it, and an expired lease is
+# only reclaimed when the run it points at is gone. Same semantics as the bus claim lease
+# (`tools/check-bus-claim-lease.py`): a lease bounds a claim, an expired one can be taken over.
+LEAK_GRACE_S = env_number("AD_LEAK_GRACE_S", 900, int)
+LEAK_SWEEP_INTERVAL_S = env_number("AD_LEAK_SWEEP_INTERVAL_S", 300, int)
+# the lease TTL must outlast the sweep interval, otherwise a lease expires between two sweeps
+LEASE_TTL_S = max(env_number("AD_LEASE_TTL_S", LEAK_GRACE_S, int), 2 * LEAK_SWEEP_INTERVAL_S)
 
 def ctl_state_dir():
     directory = os.path.expanduser(os.environ.get("OPENSWARM_CTL_STATE_DIR", f"{HOME}/phanes-ctl/state"))
@@ -1184,6 +1196,155 @@ def finish(lane, cfg, st, info, state):
         mark_done(state, n); log(f"{lane} ended #{n} without a commit (run {run}, {info.get('status')}/{info.get('error_class')}) → labelled lane-failed")
         return {"done": True, "status": "lane-failed", "error": None, "missing": []}
 
+# --- in-progress lease (Refs #1364) ------------------------------------------------------
+# The lease file lives next to the AD state (`~/phanes-ctl/autodispatch/leases.json`). It is
+# written atomically, so a crash never leaves a half written lease file behind.
+
+def lease_path():
+    """The lease file of the AD; `AD_LEASE_FILE` overrides the location."""
+    return os.environ.get("AD_LEASE_FILE") or f"{D}/leases.json"
+
+def load_leases():
+    """Every lease record, keyed by the issue number (empty when the file is missing or broken)."""
+    try:
+        with open(lease_path(), encoding="utf-8") as stream:
+            payload = json.load(stream)
+    except Exception:
+        return {}
+    leases = payload.get("leases") if isinstance(payload, dict) else None
+    if not isinstance(leases, dict): return {}
+    return {str(key): record for key, record in leases.items() if isinstance(record, dict)}
+
+def save_leases(leases):
+    """Write the lease file atomically (temporary file + os.replace)."""
+    path = lease_path(); os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+    tmp = f"{path}.tmp"
+    with open(tmp, "w", encoding="utf-8") as stream:
+        json.dump({"version": 1, "leases": leases}, stream, indent=1, ensure_ascii=False)
+    os.replace(tmp, path)
+
+def grant_lease(issue, run, lane, ttl=None, now=None):
+    """Take (or refresh) the lease of `issue`; the lease is taken BEFORE the label (Refs #1364).
+
+    `run` is empty while the dispatch is still in flight: the lease exists from the first moment,
+    so a crash between the label and the dispatch leaves a reclaimable lease instead of a label
+    nobody owns."""
+    now = time.time() if now is None else now
+    ttl = LEASE_TTL_S if ttl is None else ttl
+    leases = load_leases()
+    record = {"issue": issue, "run": run or "", "lane": lane, "granted_at": now,
+              "expires_at": now + ttl, "ttl_s": ttl}
+    leases[str(issue)] = record
+    save_leases(leases)
+    return record
+
+def renew_lease(issue, run=None, now=None):
+    """Extend the lease of `issue` (the lane heartbeat); the lease of another run is not renewed."""
+    now = time.time() if now is None else now
+    leases = load_leases()
+    record = leases.get(str(issue))
+    if not record: return None
+    if run and record.get("run") and record.get("run") != run: return None
+    record["expires_at"] = now + float(record.get("ttl_s") or LEASE_TTL_S)
+    leases[str(issue)] = record
+    save_leases(leases)
+    return record
+
+def release_lease(issue):
+    """Drop the lease of `issue` (the run ended, failed or was requeued)."""
+    leases = load_leases()
+    if leases.pop(str(issue), None) is None: return False
+    save_leases(leases)
+    return True
+
+def lease_running_runs(state, res):
+    """The run ids of the lanes that are busy with the run the AD state records for them."""
+    running = set()
+    for lane, record in (state or {}).items():
+        if lane.startswith("_") or not isinstance(record, dict): continue
+        status = (res or {}).get(lane) or {}
+        if status.get("lane") == "busy" and status.get("current_run") == record.get("run"):
+            running.add(record.get("run"))
+    return running
+
+def held_issues(state):
+    """The issues the lanes of the AD state hold."""
+    held = set()
+    for lane, record in (state or {}).items():
+        if lane.startswith("_") or not isinstance(record, dict): continue
+        issue = record.get("issue")
+        if issue is None: continue
+        held.add(int(issue) if str(issue).isdigit() else issue)
+    return held
+
+def updated_at_epoch(value):
+    """The epoch seconds of a GitHub `updatedAt` timestamp (0 when it cannot be read)."""
+    try:
+        return calendar.timegm(time.strptime(str(value), "%Y-%m-%dT%H:%M:%SZ"))
+    except Exception:
+        return 0
+
+def sweep_leaked_inprogress(state, res=None, now=None):
+    """Reclaim the `in-progress` labels whose lease expired and whose lane run is gone (Refs #1364).
+
+    Every dispatched issue holds a lease, taken before the label. The lease is renewed with the
+    lane heartbeat; an expired lease is reclaimed only when the run it points at is not running
+    any more. A label without a lease (written before the upgrade) is reclaimed with the
+    original grace rule: the label must be older than `AD_LEAK_GRACE_S` and no lane may hold the
+    issue. Returns the issue numbers whose label was removed."""
+    now = time.time() if now is None else now
+    running = lease_running_runs(state, res)
+    held = held_issues(state)
+    # the lane heartbeat renews the lease of every run that is still alive
+    for lane, record in (state or {}).items():
+        if lane.startswith("_") or not isinstance(record, dict): continue
+        status = (res or {}).get(lane) or {}
+        if status.get("lane") == "busy" and status.get("current_run") == record.get("run"):
+            renew_lease(record.get("issue"), record.get("run"), now)
+    leases = load_leases()
+    reclaimable = []
+    for record in leases.values():
+        if float(record.get("expires_at") or 0) > now: continue
+        run = record.get("run") or ""
+        if run and run in running: continue          # the run is still alive: only the lease expired
+        if not run and record.get("issue") in held: continue  # the dispatch is still in flight
+        reclaimable.append(record)
+    rc, out, _ = gh(["issue", "list", "--state", "open", "--label", "in-progress", "--limit", "100",
+                     "--json", "number,updatedAt"])
+    if rc: return []
+    labelled = json.loads(out) if out else []
+    numbers = {i.get("number") for i in labelled}
+    dropped = []
+    for record in reclaimable:
+        n = record.get("issue")
+        if n in numbers:
+            rc, _, err = gh(["issue", "edit", str(n), "--remove-label", "in-progress"])
+            if rc:
+                # the label is still on the issue: the lease stays, the next sweep retries
+                log(f"leak-sweep: #{n} could not remove in-progress (gh rc={rc}: {(err or '').strip()[-100:]}) → the lease is kept", brain=False)
+                continue
+            dropped.append(n)
+            log(f"leak-sweep: #{n} lease expired and its run is absent → removed in-progress")
+        release_lease(n)
+    # the labels written before the upgrade hold no lease: the original grace rule applies
+    # (the label must be older than AD_LEAK_GRACE_S and no lane may hold the issue)
+    for issue in labelled:
+        n = issue.get("number")
+        if n is None or str(n) in leases: continue   # it holds a lease: handled above
+        if n in held: continue                        # a lane still holds the issue
+        updated = updated_at_epoch(issue.get("updatedAt"))
+        if not updated: continue
+        age = now - updated
+        if age < LEAK_GRACE_S: continue
+        rc, _, err = gh(["issue", "edit", str(n), "--remove-label", "in-progress"])
+        if rc:
+            # the label is still on the issue: the next sweep tries again
+            log(f"leak-sweep: #{n} could not remove in-progress (gh rc={rc}: {(err or '').strip()[-100:]}) → kept", brain=False)
+            continue
+        dropped.append(n)
+        log(f"leak-sweep: #{n} had in-progress but no lease and no lane holds it (idle {int(age)}s) → removed")
+    return dropped
+
 def tick(lanes, state, last_warn):
     audit_switches()  # the switch audit runs every tick, also when the loop itself is paused (Refs #1827)
     scopes = paused_scopes()  # the swrm pause store and the legacy PAUSE markers (Refs #1366)
@@ -1208,9 +1369,21 @@ def tick(lanes, state, last_warn):
         if st and isinstance(r.get("run"), dict):
             if lane_in_fetch_backoff(st): continue  # harvest fetch is backing off after a transient failure (Refs #947)
             result = finish(L, lanes[L], st, r["run"], state)
-            if result.get("done"): state.pop(L); save_state(state)
+            if result.get("done"):
+                release_lease(st.get("issue"))  # the run is over: the lease is not needed any more
+                state.pop(L); save_state(state)
             if result.get("error"): log(f"{L} #{st['issue']} run {st['run']}: {result['error']}", brain=False)
-        elif st and reconcile(L, lanes[L], st, r, state): state.pop(L); save_state(state)
+        elif st and reconcile(L, lanes[L], st, r, state):
+            release_lease(st.get("issue"))  # the orphaned run was requeued: the lease is not needed any more
+            state.pop(L); save_state(state)
+    # the in-progress leak sweep runs at most every LEAK_SWEEP_INTERVAL_S: an expired lease whose
+    # run is gone takes its `in-progress` label back (Refs #1364)
+    try: last_sweep = float(state.get("_leak_sweep_at") or 0)
+    except (TypeError, ValueError): last_sweep = 0
+    if time.time() - last_sweep >= LEAK_SWEEP_INTERVAL_S:
+        state["_leak_sweep_at"] = time.time(); save_state(state)
+        try: sweep_leaked_inprogress(state, res)
+        except Exception as e: log(f"leak-sweep exc: {e!r}", brain=False)
     try: q = queue()
     except Exception as e: log(f"queue error: {e}", brain=False); return last_warn
     for i in q: i["deps_ok"] = deps_met(i)
@@ -1254,13 +1427,20 @@ def tick(lanes, state, last_warn):
         if not pick: continue
         if base is None:
             _, out, _ = sh(["git", "ls-remote", BASE_REPO_URL, f"refs/heads/{BASE_BRANCH}"]); base = out.split()[0]
+        # The lease is taken BEFORE the label and the dispatch: a crash in that window leaves a
+        # lease the sweep can reclaim, not a label nobody owns (Refs #1364).
+        grant_lease(pick["n"], "", L)
         gh(["issue", "edit", str(pick["n"]), "--add-label", "in-progress"])
         try: run, ver = dispatch(L, cfg, pick, base)
         except Exception as e:
-            dispatch_failed(L, cfg, pick, e); continue
+            dispatch_failed(L, cfg, pick, e); release_lease(pick["n"]); continue
         q.remove(pick); state[L] = {"issue": pick["n"], "run": run, "host": cfg["host"], "base": base, "at": time.strftime("%F %T"), "verify": ver, "class": "verify" if pick.get("verify") else "work"}
         if AD_VERIFY_SHARE_ENABLED: log(f"queue share: dispatched {state[L]['class']} #{pick['n']} on {L}", brain=False)
-        save_state(state); log(f"dispatched #{pick['n']} → {L} ({cfg['host']}) run {run} base {base[:8]}")
+        save_state(state)
+        # the lease points at the run the lane executes now (the state knows the lane already, so
+        # a crash here leaves a pending lease that the sweep never reclaims while the run lives)
+        grant_lease(pick["n"], run, L)
+        log(f"dispatched #{pick['n']} → {L} ({cfg['host']}) run {run} base {base[:8]}")
     # stale search rows are not dispatchable: drop them (and log the skip) before counting
     q = freshen_queue(q, state)
     blocked = sum(not i["deps_ok"] for i in q)

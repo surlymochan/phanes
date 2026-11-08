@@ -12,6 +12,7 @@ only live on the box after that sync.
 phanes_only dispatch 扩展及其测试。当前自动派发使用 swrm 原生 batch/fleet。
 本目录仍保留独立的旧控制面镜像和离线测试，不包含旧 engine 的审查派发实现。
 `tools/check-ad-review-pause-uncounted.py` 的运行副本契约不适用于本镜像。
+in-progress 泄漏清扫由本镜像的 AD 承担（租约语义，见下文“in-progress 泄漏清扫”）。
 
 Base-commit validation: the base commit must exist in the target repo before a lane is assigned
 (`git -C <repo> cat-file -e <base>^{commit}`). A missing base is fetched into the target repo and
@@ -106,6 +107,82 @@ summary/tests、host verify rc）拼出 PR 标题与正文，再逐项校验：
 `lane-failed`，避免污染失败统计。告警模式（`AD_PR_VALIDATION=warn`）只记录缺项照常提 PR。
 校验结果写入 run 记录（lane 主机 `runs/<run>/pr-validation.json` 与 `pr-validation.log`）
 和 AD 侧 `~/phanes-ctl/autodispatch/runs/<run>.log`，供阻塞诊断引用。
+
+## in-progress 泄漏清扫：租约语义（Refs #1364）
+
+AD 给 issue 打 `in-progress` 标签的时刻早于 run 真的起来。AD 在这两步之间退出（或执行器根本没起来）
+时，标签留在 GitHub 上，issue 再也不会被派发——"幽灵 in-progress"。清扫因此改成租约语义，与 bus 的
+claim 租约（`tools/check-bus-claim-lease.py`）一致：租约给"占用"划定上界，过期即可被接管。
+
+| 环境变量 | 默认 | 含义 |
+| --- | --- | --- |
+| `AD_LEAK_GRACE_S` | `900` | 无租约的存量 `in-progress` 标签的宽限期（秒） |
+| `AD_LEASE_TTL_S` | `900`（不小于 `2 × AD_LEAK_SWEEP_INTERVAL_S`） | 租约有效期（秒） |
+| `AD_LEAK_SWEEP_INTERVAL_S` | `300` | 清扫的最短间隔（秒） |
+
+租约文件：`~/phanes-ctl/autodispatch/leases.json`（与 AD 状态同目录，原子写：临时文件 + `os.replace`）。
+
+规则：
+
+1. **先写租约，再打标签**：派发时先给 issue 建租约（run 暂为空），再打 `in-progress`，再派活；
+   派活成功后租约指向真正的 run。两步之间进程退出时留下的是**可回收的租约**，而不是没人认领的标签。
+2. **续约随车道心跳**：清扫也是车道心跳的一部分，给仍在跑 run 的车道续约。run 还在跑，租约即使过期
+   也只会被续上，不会回收标签。
+3. **过期且 lane 没有对应 run 才回收**：租约到期、且 AD 状态里那条车道已经不在跑这个 run，才摘掉
+   `in-progress` 标签并释放租约。run 仍在跑 → 不回收。
+4. **升级前的存量标签走原来的宽限规则**：没有租约的 `in-progress` 标签按 `updatedAt` 判龄，超过
+   `AD_LEAK_GRACE_S` 且没有任何车道持有该 issue 才摘掉；新鲜的、或仍有车道持有的，都保留。
+5. **摘标签失败就不释放租约**：`gh issue edit` 失败时租约保留，下一轮清扫重试；日志写失败原因，
+   不写成功。
+
+### 与上游实现的关系（重基后）
+
+上游 `lib/dispatch/engine.py` 已退役（#1894 把 vendored openswarm 换成 swrm 单源），所以上轮
+（`openswarm/lib/dispatch/engine.py`）的接线不能原样保留，等价迁移到 phanes 的 `openswarm/` 下：
+
+| 上游（`openswarm/lib/dispatch/`） | 本镜像（`tools/lane-autodispatch/autodispatch.py`） |
+| --- | --- |
+| `lease.py`：`LeaseStore.grant/renew/release/expired` | `grant_lease` / `renew_lease` / `release_lease` + 清扫里的到期判断 |
+| `lease_sweep.py`：`decide()` 给出每个 `in-progress` 标签的 keep/reclaim 与理由 | `sweep_leaked_inprogress()` |
+
+AD 以**单文件**方式部署到盒子（`~/phanes-ctl/bin/autodispatch.py`，靠 `cp` 同步），不能 import
+`openswarm/lib/dispatch/`，所以镜像自带一份实现；两侧的判定由
+`openswarm/tests/test_autodispatch.py` 的对拍用例（`SweepParityTests`）钉住，不会漂移。
+
+离线验证：
+
+```bash
+cd openswarm && python3 -m unittest discover -s tests -p 'test_autodispatch.py'
+cd openswarm && python3 -m unittest discover -s tests -p 'test_dispatch_lease*.py'
+```
+
+### 本轮 BLOCKER 逐条映射（写在 diff 内）
+
+上一轮审查（CX5 / codex-gpt-6.1-terra，第 2 轮）对 head `c5c29589b5` 给 CHANGES，三条 BLOCKER 逐条
+关账。映射写在本文档里：`.lane-review/` 下的文件在收割时会被剔除（见下文「收割前的越界产物过滤」），
+只放在那里的说明进不了 PR 的 diff，所以这里留一份逐条映射。
+
+| BLOCKER | 改动文件:行 | 测试名 | 结果 |
+| --- | --- | --- | --- |
+| B1：上轮 `openswarm/lib/dispatch/engine.py:421`、`:817`、`:1993` 与 `openswarm/tests/test_dispatch_engine.py:805` 的租约集成在本轮树中消失，上游改动要落在 `openswarm/` 下 | 上游租约库 `openswarm/lib/dispatch/lease.py:86`（`LeaseStore`：`grant():190` 允许 `run_id` 为空的待定租约、`renew():221`、`release():247`、`expired():126`）；上游清扫判定 `openswarm/lib/dispatch/lease_sweep.py:124`（`decide()`）、`:187`（`reclaimable()`）；运行路径镜像 `tools/lane-autodispatch/autodispatch.py:1226`（`grant_lease()`）、`:1241`（`renew_lease()`）、`:1253`（`release_lease()`）、`:1287`（`sweep_leaked_inprogress()`） | `openswarm/tests/test_dispatch_lease.py::LeaseStoreTests`（9 项）、`openswarm/tests/test_dispatch_lease_sweep.py::LeaseSweepDecisionTests`（12 项）与 `::LeaseStorePendingLeaseTests`（3 项）、`openswarm/tests/test_autodispatch.py::SweepParityTests::test_the_mirror_and_the_upstream_sweep_decide_the_same`（7 个场景对拍） | 通过：`cd openswarm && python3 -m unittest discover -s tests -p 'test_dispatch_lease*.py'` → `Ran 24 tests … OK`；对拍用例两侧结论逐一相同 |
+| B2：交付说明没有逐条给出 B1 → 修改 → 测试 的映射 | 本节（README 随 PR 进 diff）；`openswarm/tests/test_autodispatch.py` 的模块 docstring 是同一映射的第二份副本；`.lane-review/PR-1648.md` 是离线取证入口 | 本表每行的测试名；核对方式：按测试名逐条跑上表「结果」列的命令 | 通过（见本表「结果」列） |
+| B3：续约、过期回收、运行中保留只直接调用 sweep，没有走 tick 验证心跳、回收与真实调度 | `openswarm/tests/test_autodispatch.py:274`（`TickLeaseTests`：5 个用例全部走 `autodispatch.tick()`，不直接调用 `sweep_leaked_inprogress()`） | `test_the_tick_takes_the_lease_before_the_label_and_the_dispatch`、`test_the_tick_renews_the_lease_of_the_lane_that_still_runs`、`test_the_tick_keeps_the_label_while_the_run_still_runs`、`test_the_tick_reclaims_the_label_when_the_lease_expired_and_the_run_is_gone`、`test_a_failing_label_removal_keeps_the_lease` | 通过：`cd openswarm && python3 -m unittest discover -s tests -p 'test_autodispatch.py'` → `Ran 16 tests … OK` |
+| FOLLOW-UP：摘标签不检查返回码就释放租约，写入失败会退回无租约 grace 路径并误报成功 | `tools/lane-autodispatch/autodispatch.py:1321`（租约路径）与 `:1339`（遗留无租约路径）：`gh issue edit` 的 rc != 0 → 保留租约、下一轮清扫重试、写失败原因，不写成功日志 | `openswarm/tests/test_autodispatch.py:342`（`test_a_failing_label_removal_keeps_the_lease`） | 通过（同上） |
+
+### CI 复现（`Swrm tests` job）
+
+CI 报告 `Swrm tests (ubuntu-24.04, Python 3.11)` 失败。门禁脚本 `tools/ci-swrm.sh` 跑三段：①
+`swrm/` 全量单测；② 离线的 CLI 冒烟；③ 按改动路径追加 `tools/lane-autodispatch/` 的单测。本 PR 只改
+`openswarm/`（新增）与 `tools/lane-autodispatch/`（镜像），`swrm/` 一行未动；本机的等价复现结果：
+
+| 步骤 | 本机结果 | 说明 |
+| --- | --- | --- |
+| ① `cd swrm && python3 -m unittest discover -s tests` | `Ran 482 tests … FAILED (failures=3, skipped=4)` | 3 项失败全是沙箱限制，在 base（`a4a49b8318`）上同样失败：`test_pi_isolation` 两项要 `bwrap` 的用户命名空间（本机内核 `apparmor_restrict_unprivileged_userns=1`），`test_consult_outside_git_uses_temporary_worktrees` 要往仓库的 `.git/worktrees/` 写（本沙箱的 base 仓库是只读挂载） |
+| ② `python bin/swrm status`、`python bin/swrm route --type impl --difficulty 3` | 两个都 `rc=0` | 离线的 CLI 冒烟，通过 |
+| ③ `cd tools/lane-autodispatch && python3 -m unittest discover -s . -p 'test_*.py'` | `Ran 33 tests … OK` | 本 PR 改到的目录，全绿 |
+| 验收 `cd openswarm && python3 -m unittest discover -s tests -p 'test_autodispatch.py'` | `Ran 16 tests … OK` | 本 PR 自己的用例，全绿 |
+
+原始日志见 `docs/evidence/review-pack/pr-1648-ci-testlog.txt`（含 base 上的同一组对照）。
 
 ## 收割前的越界产物过滤（Refs #1835）
 

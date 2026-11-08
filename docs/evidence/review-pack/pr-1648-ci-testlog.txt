@@ -1,0 +1,76 @@
+CI 复现原始日志 —— PR #1648（Refs #1364）
+=========================================
+
+CI 报告：Swrm tests (ubuntu-24.04, Python 3.11) 失败（PR 头 fa7758f8b2）。
+本文件是本机的等价复现：门禁脚本 tools/ci-swrm.sh 的每一段都跑一遍，本 PR 的树与 base
+（a4a49b8318，即 PR 的 base / main tip）各跑一遍，逐段对照。
+
+环境（本沙箱）：
+  - HOME=<临时目录>，OPENSWARM_HOME/XDG_*/GH_CONFIG_DIR 全部指向临时目录（与门禁脚本一致）
+  - TMPDIR=<worktree>/.t/tmp（短路径；门禁脚本用 <repo>/.tmp/test-tmp，本沙箱的仓库路径太长，
+    会撞上 AF_UNIX 的 108 字节上限，那是本沙箱的限制，不是被测行为）
+  - 内核：Linux 7.0.0-14-generic，kernel.apparmor_restrict_unprivileged_userns=1
+
+--- 段 ①：swrm 全量单测（门禁脚本 Step A）—— 本 PR 的树 ---------------------------
+
+$ cd swrm && python3 -m unittest discover -s tests
+FAIL: test_consult_outside_git_uses_temporary_worktrees (test_consult.ConsultTests.test_consult_outside_git_uses_temporary_worktrees)
+AssertionError: 1 != 0
+FAIL: test_host_secrets_and_network_are_not_visible (test_pi_isolation.PiIsolationTests.test_host_secrets_and_network_are_not_visible)
+AssertionError: 1 != 0 : bwrap: No permissions to create a new namespace, likely because the kernel does not allow non-privileged user namespaces. See <https://deb.li/bubblewrap> or <file:///usr/share/doc/bubblewrap/README.Debian.gz>.
+FAIL: test_linked_git_worktree_and_node_remain_available (test_pi_isolation.PiIsolationTests.test_linked_git_worktree_and_node_remain_available)
+AssertionError: 1 != 0 : bwrap: No permissions to create a new namespace, likely because the kernel does not allow non-privileged user namespaces. See <https://deb.li/bubblewrap> or <file:///usr/share/doc/bubblewrap/README.Debian.gz>.
+Ran 482 tests in 260.738s
+FAILED (failures=3, skipped=4)
+
+--- 段 ①：同一段在 base（a4a49b8318，不含本 PR）上 ----------------------------------
+
+$ cd <base>/swrm && python3 -m unittest discover -s tests
+FAIL: test_consult_outside_git_uses_temporary_worktrees (test_consult.ConsultTests.test_consult_outside_git_uses_temporary_worktrees)
+AssertionError: 1 != 0
+FAIL: test_host_secrets_and_network_are_not_visible (test_pi_isolation.PiIsolationTests.test_host_secrets_and_network_are_not_visible)
+AssertionError: 1 != 0 : bwrap: No permissions to create a new namespace, likely because the kernel does not allow non-privileged user namespaces. See <https://deb.li/bubblewrap> or <file:///usr/share/doc/bubblewrap/README.Debian.gz>.
+FAIL: test_linked_git_worktree_and_node_remain_available (test_pi_isolation.PiIsolationTests.test_linked_git_worktree_and_node_remain_available)
+AssertionError: 1 != 0 : bwrap: No permissions to create a new namespace, likely because the kernel does not allow non-privileged user namespaces. See <https://deb.li/bubblewrap> or <file:///usr/share/doc/bubblewrap/README.Debian.gz>.
+Ran 482 tests in 263.026s
+FAILED (failures=3, skipped=4)
+
+=> 结论：两棵树的失败集合完全相同（同样的 3 项、同样的断言），本 PR 对 swrm/ 零改动，
+   也没有引入新的失败。3 项都是本沙箱的环境限制：
+   - test_pi_isolation 两项要 bwrap 的用户命名空间（本机内核禁止非特权用户命名空间）；
+   - test_consult_outside_git_uses_temporary_worktrees 要往仓库的 .git/worktrees/ 写
+     （本沙箱的 base 仓库是只读挂载，TMPDIR 又在 worktree 内）。
+
+--- 段 ②：离线的 CLI 冒烟（门禁脚本 Step B）------------------------------------------
+
+$ cd swrm && python bin/swrm status && python bin/swrm route --type impl --difficulty 3
+（通过，无输出）
+
+--- 段 ③：按改动路径追加的 tools/lane-autodispatch 单测（本 PR 改到的目录）-----------
+
+$ cd tools/lane-autodispatch && python3 -m unittest discover -s . -p 'test_*.py'
+Ran 33 tests in 0.445s
+OK
+
+--- 验收：openswarm 侧的用例 ---------------------------------------------------------
+
+$ cd openswarm && python3 -m unittest discover -s tests -p 'test_autodispatch.py'
+Ran 16 tests in 0.027s
+OK
+
+$ cd openswarm && python3 -m unittest discover -s tests -p 'test_dispatch_lease*.py'
+Ran 24 tests in 0.012s
+OK
+
+$ cd openswarm && python3 -m unittest discover -s tests
+Ran 49 tests in 0.045s
+OK (skipped=9)
+（9 项 skip 是 test_fusion_agreed_v02.py：那份 fusion 文档只在 phanes 树上存在）
+
+--- 结论 ---------------------------------------------------------------------------
+
+CI 报的 Swrm tests (ubuntu-24.04, Python 3.11) 在本机无法复现为本 PR 造成的失败：
+本 PR 改到的目录（tools/lane-autodispatch/）与新增的 openswarm/ 用例全绿；swrm/ 全量套件在本 PR
+的树与 base 上的失败集合逐项相同，都是沙箱环境限制（bwrap 用户命名空间、只读的 .git）。
+门禁脚本 tools/ci-swrm.sh 对本 PR 的改动路径选择也没有问题：tools/lane-autodispatch/ 命中追加段，
+swrm/ 与 tools/tests/ 未被本 PR 触及。
