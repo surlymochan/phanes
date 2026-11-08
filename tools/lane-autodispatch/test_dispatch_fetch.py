@@ -48,6 +48,46 @@ class DispatchFetchResilienceTest(unittest.TestCase):
             self.assertEqual(base_checks, 2, "base must be checked again after the successful fetch")
             self.assertIn("lane assign", " ".join(calls[-1]))
 
+    def test_tls_fetch_falls_back_to_seed_and_dispatches_only_after_base_check(self):
+        with tempfile.TemporaryDirectory(dir=Path(__file__).resolve().parents[2] / ".swrm-tmp") as scratch:
+            calls = []
+            fetch_attempts = 0
+            base_checks = 0
+
+            def fake_sh(command, timeout=None, inp=None):
+                nonlocal fetch_attempts, base_checks
+                text = " ".join(command) if isinstance(command, (list, tuple)) else command
+                calls.append(text)
+                if "cat > /tmp/task-CX10.md" in text:
+                    return 0, "", ""
+                if "cat-file -e" in text:
+                    base_checks += 1
+                    if base_checks == 1:
+                        return 1, "", "fatal: Not a valid object name abc123^{commit}"
+                    return 0, '{"id":"run-seed-fallback"}', ""
+                if " fetch -q https://github.com/" in text:
+                    fetch_attempts += 1
+                    return 1, "", "gnutls_handshake() failed: Error in the pull function"
+                if " fetch -q ssh://seed/phanes.git " in text:
+                    return 0, "", ""
+                raise AssertionError(f"unexpected dispatch command: {text}")
+
+            with mock.patch.object(AUTODISPATCH, "D", scratch), \
+                 mock.patch.object(AUTODISPATCH, "sh", side_effect=fake_sh), \
+                 mock.patch.object(AUTODISPATCH, "DISPATCH_FETCH_RETRIES", 3), \
+                 mock.patch.object(AUTODISPATCH, "DISPATCH_FETCH_FALLBACK_AFTER", 2), \
+                 mock.patch.dict("os.environ", {"AD_BASE_FETCH_MIRROR": "ssh://seed/phanes.git"}), \
+                 mock.patch.object(AUTODISPATCH.time, "sleep"), \
+                 mock.patch.object(AUTODISPATCH, "log"):
+                run, verify = AUTODISPATCH.dispatch(
+                    "CX10", {"host": "govpn"}, {"n": 1719, "title": "fetch resilience", "body": ""}, "abc123")
+
+            self.assertEqual((run, verify), ("run-seed-fallback", None))
+            self.assertEqual(fetch_attempts, 2, "mirror fallback should begin at its configured failure threshold")
+            self.assertEqual(base_checks, 2, "the fetched base must be verified before lane assignment")
+            self.assertTrue(any("ssh://seed/phanes.git" in command for command in calls))
+            self.assertIn("lane assign", calls[-1])
+
     def test_fetch_failure_health_is_recent_and_classified(self):
         AUTODISPATCH.DISPATCH_FETCH_FAILURES.clear()
         with mock.patch.object(AUTODISPATCH.time, "time", return_value=1000):

@@ -940,20 +940,26 @@ def dispatch_base_fetch(host, repo_path, base, fetch_command=None):
     """Fetch a missing base with bounded retries and a configured mirror fallback."""
     command = fetch_command or base_fetch_command(repo_path, BASE_REPO_URL, BASE_BRANCH)
     attempts = max(1, DISPATCH_FETCH_RETRIES)
+    fallback_after = max(1, DISPATCH_FETCH_FALLBACK_AFTER)
+    mirror = os.environ.get("AD_BASE_FETCH_MIRROR")
     last_error = ""
     for attempt in range(1, attempts + 1):
         rc, _, last_error = sh(ssh_argv(ssh_opts(host), host, command), timeout=180)
         if not rc:
             return
         record_dispatch_fetch_failure(host, last_error)
-        if attempt < attempts:
+        # Once the configured fallback threshold is reached, stop spending time on
+        # the flaky upstream and try the mirror. Without a mirror, keep using the
+        # full bounded retry budget.
+        if attempt < attempts and not (mirror and attempt >= fallback_after):
             delay = DISPATCH_FETCH_RETRY_DELAY * (2 ** (attempt - 1))
             log(f"{host} base fetch failed ({attempt}/{attempts}); retrying in {delay:g}s: {last_error.strip()[-100:]}", brain=False)
             time.sleep(delay)
+        elif mirror and attempt >= fallback_after:
+            break
     # Operators can configure a reachable mirror/seed endpoint per host. The object is
     # still validated by cat-file in dispatch() before lane assignment.
-    mirror = os.environ.get("AD_BASE_FETCH_MIRROR")
-    if mirror and attempts >= DISPATCH_FETCH_FALLBACK_AFTER:
+    if mirror and attempt >= fallback_after:
         log(f"{host} base fetch threshold reached; falling back to configured seed mirror {mirror}", brain=False)
         rc, _, fallback_error = sh(ssh_argv(ssh_opts(host), host,
             base_fetch_command(repo_path, mirror, BASE_BRANCH)), timeout=180)
