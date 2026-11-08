@@ -344,5 +344,39 @@ class TickWorkClassCapTest(TickHarness, unittest.TestCase):
         self.assertEqual(dispatched, [("CX2", 1)])  # the cap limits the work class only
 
 
+class ReviewBacklogAssignmentTest(unittest.TestCase):
+    """Review lanes must be assigned by in-flight review load (Refs #1701)."""
+
+    LANES = ("CX2", "CX4", "CX5")
+
+    def test_selects_the_lane_with_the_smallest_queue_plus_active_reviews(self):
+        lane, loads = AUTODISPATCH.pick_reviewer(
+            self.LANES,
+            {"CX2": 2, "CX4": 0, "CX5": 1},
+        )
+        self.assertEqual(lane, "CX4")
+        self.assertEqual(loads, {"CX2": 2, "CX4": 0, "CX5": 1})
+
+    def test_equal_load_rotates_across_review_lanes(self):
+        first, _ = AUTODISPATCH.pick_reviewer(self.LANES, {lane: 1 for lane in self.LANES})
+        second, _ = AUTODISPATCH.pick_reviewer(self.LANES, {lane: 1 for lane in self.LANES})
+        third, _ = AUTODISPATCH.pick_reviewer(self.LANES, {lane: 1 for lane in self.LANES})
+        self.assertEqual((first, second, third), self.LANES)
+
+    def test_at_capacity_lane_is_skipped_and_decision_logs_snapshot(self):
+        lines = []
+        lane, loads = AUTODISPATCH.pick_reviewer(
+            self.LANES,
+            {"CX2": 3, "CX4": 1, "CX5": 2},
+            max_in_flight=2,
+            log=lines.append,
+            pr=1701,
+        )
+        self.assertEqual(lane, "CX4")
+        self.assertIn("PR #1701", lines[0])
+        for lane_name, count in loads.items():
+            self.assertIn(f"{lane_name}={count}", lines[0])
+
+
 if __name__ == "__main__":
     unittest.main()
