@@ -7178,6 +7178,7 @@ def lane_write_state(lane_name, **changes):
             (changes.get("current_run") and changes.get("current_run") != old_run)):
         state.pop("stale_since", None)
         state.pop("stale_run", None)
+        state.pop("activity_observed_since", None)
     state["updated"] = NOW()
     jsave(lane_state_path(lane_name), state)
     return state
@@ -8891,6 +8892,13 @@ def lane_status_rows():
             lane_state = "crashed"
         if state.get("state") == "busy" and state.get("current_run"):
             activity = state.get("last_activity")
+            if not (isinstance(activity, (int, float)) and not isinstance(activity, bool) and
+                    math.isfinite(activity) and activity > 0):
+                # Pre-upgrade runs have no activity clock. Start one persisted
+                # grace window, without treating periodic `updated` as progress.
+                if "activity_observed_since" not in state:
+                    state = lane_write_state(lane["name"], activity_observed_since=now)
+                activity = state["activity_observed_since"]
             if state.get("stale_run") == state.get("current_run"):
                 lane_state = "stale"
             elif (isinstance(activity, (int, float)) and not isinstance(activity, bool) and
