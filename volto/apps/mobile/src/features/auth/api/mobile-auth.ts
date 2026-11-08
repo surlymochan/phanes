@@ -115,10 +115,17 @@ async function redeemMobileConnectSession(value: string): Promise<MobileSession>
   return session;
 }
 
-/** The account service for email sign-in. A development build can name a local one. */
+/**
+ * The account service for email sign-in. A build names its own account service in the build
+ * environment, so a self-compiled or TestFlight build uses a self-hosted account service. A build
+ * that names no account service keeps the hosted one.
+ */
 function mobileAccountApiUrl(): string {
-  const override = process.env.EXPO_PUBLIC_VOLTO_API_URL ?? process.env.EXPO_PUBLIC_OPENBOT_API_URL;
-  return (override && __DEV__ && normalizeAccountApiUrl(override)) || VOLTO_CONTROL_PLANE_ORIGIN;
+  return (
+    normalizeAccountApiUrl(process.env.EXPO_PUBLIC_VOLTO_API_URL ?? "") ??
+    normalizeAccountApiUrl(process.env.EXPO_PUBLIC_OPENBOT_API_URL ?? "") ??
+    VOLTO_CONTROL_PLANE_ORIGIN
+  );
 }
 
 export interface MobileEmailChallenge {

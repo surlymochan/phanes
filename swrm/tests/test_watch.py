@@ -23,6 +23,51 @@ def update(kind, **fields):
 
 
 class WatchTests(unittest.TestCase):
+    def test_run_snapshot_keeps_assistant_text_from_event_without_lane(self):
+        event = update("agent_message_chunk", content={"type": "text", "text": "heartbeat text"})
+        state = {"state": "running", "events": "events.jsonl", "started": 60}
+        with mock.patch.object(xs, "jload", side_effect=[state, {}]), \
+                mock.patch.object(xs, "NOW", return_value=120), \
+                mock.patch.object(xs.os.path, "exists", return_value=True), \
+                mock.patch.object(xs.os.path, "getmtime", return_value=60), \
+                mock.patch.object(xs, "open", mock.mock_open(read_data=json.dumps(event) + "\n"), create=True):
+            snapshot = xs.run_digest("r1")
+
+        self.assertEqual(snapshot["last_msg"], "heartbeat text")
+        self.assertNotIn("lane", snapshot)
+        json.dumps(snapshot)
+
+    def test_run_snapshot_keeps_latest_message_with_buffered_chunks(self):
+        chunk = update("agent_message_chunk", content={"type": "text", "text": "older"})
+        steer = {"type": "steer", "text": "newer"}
+        latest = update("agent_message_chunk", content={"type": "text", "text": "latest"})
+        completed = {"type": "item.completed", "item": {"type": "agent_message", "text": "newer"}}
+        for events, expected in [
+                ([chunk, steer], "Steer (queued): newer"),
+                ([steer, chunk], "older"),
+                ([chunk, steer, latest], "latest"),
+                ([chunk, completed], "newer")]:
+            with self.subTest(events=events):
+                state = {"state": "running", "events": "events.jsonl", "started": 60}
+                data = "".join(json.dumps(event) + "\n" for event in events)
+                with mock.patch.object(xs, "jload", side_effect=[state, {}]), \
+                        mock.patch.object(xs, "NOW", return_value=120), \
+                        mock.patch.object(xs.os.path, "exists", return_value=True), \
+                        mock.patch.object(xs.os.path, "getmtime", return_value=60), \
+                        mock.patch.object(xs, "open", mock.mock_open(read_data=data), create=True):
+                    snapshot = xs.run_digest("r1")
+
+                self.assertEqual(snapshot["last_msg"], expected)
+                self.assertNotIn("lane", snapshot)
+                json.dumps(snapshot)
+
+    def test_cursor_flushes_chunks_before_steer_message(self):
+        messages = xs.WatchMessages()
+        self.assertEqual(messages.feed(update("agent_message_chunk", content={"type": "text", "text": "older"})), [])
+        self.assertEqual(messages.feed({"type": "steer", "text": "newer"}),
+                         [("msg", "older"), ("msg", "Steer (queued): newer")])
+        self.assertEqual(messages.flush(), [])
+
     def test_pi_only_emits_completed_assistant_messages(self):
         messages = xs.WatchMessages()
         self.assertEqual(messages.feed({"type": "message_update", "assistantMessageEvent": {
@@ -43,6 +88,19 @@ class WatchTests(unittest.TestCase):
         messages.feed(update("agent_message_chunk", content={"type": "text", "text": "finished"}))
         self.assertEqual(messages.feed({"id": "prompt-1", "result": {"stopReason": "end_turn"}}),
                          [("msg", "finished")])
+        self.assertEqual(messages.flush(), [])
+
+    def test_mixed_events_ignore_empty_and_malformed_messages(self):
+        messages = xs.WatchMessages()
+        self.assertEqual(messages.feed(update("agent_message_chunk", content={
+            "type": "text", "text": "intermediate"})), [])
+        self.assertEqual(messages.feed(update("tool_call", toolCallId="one", title="inspect")),
+                         [("msg", "intermediate"), ("cmd", "inspect")])
+        self.assertEqual(messages.feed(update("agent_message_chunk", content={})), [])
+        self.assertEqual(messages.feed({"type": "message_end", "message": "malformed message"}), [])
+        self.assertEqual(messages.feed({"type": "message_end", "message": {
+            "role": "assistant", "content": [{"type": "text", "text": "final message"}]}}),
+            [("msg", "final message")])
         self.assertEqual(messages.flush(), [])
 
     def test_cursor_one_shot_and_codex_messages(self):
@@ -73,8 +131,12 @@ class WatchTests(unittest.TestCase):
             rdir.mkdir(parents=True)
             events = rdir / "events.jsonl"
             events.write_text("\n".join(json.dumps(e) for e in [
+                update("agent_message_chunk", content={"type": "text", "text": "intermediate"}),
+                update("tool_call", toolCallId="one", title="inspect"),
+                update("agent_message_chunk", content={}),
+                {"type": "message_end", "message": "malformed message"},
                 {"type": "message_end", "message": {"role": "assistant", "content": [
-                    {"type": "text", "text": "last message " + "x" * 250}]}},
+                    {"type": "text", "text": "final message " + "x" * 250}]}},
                 {"type": "tool_execution_start", "args": {"command": "git push"}},
                 {"type": "risk_blocked", "risk": "secret print", "command": "echo [redacted]"},
                 {"type": "error", "error": "expected test error"}]) + "\n")
@@ -92,9 +154,9 @@ class WatchTests(unittest.TestCase):
             self.assertTrue(any("ERROR:" in line for line in lines))
             beat = next(line for line in lines if "HEARTBEAT:" in line)
             self.assertIn("2m/", beat)
-            self.assertIn("cmds=1", beat)
+            self.assertIn("cmds=2", beat)
             self.assertIn("1 file changed", beat)
-            self.assertTrue(beat.endswith(xs.short("last message " + "x" * 250, 200)))
+            self.assertTrue(beat.endswith(xs.short("final message " + "x" * 250, 200)))
             self.assertFalse(any(token in output.getvalue() for token in ("MSG:", "CMD:", "WATCH-EXPIRED:")))
 
     def test_wake_reads_actionable_event_and_persists_byte_cursor(self):
