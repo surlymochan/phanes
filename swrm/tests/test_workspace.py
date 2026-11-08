@@ -1,5 +1,6 @@
 """Regression tests for worktrees, dependency links, host-side verification, risk rules and credential opt-ins."""
-import base64, json, os, shlex, shutil, subprocess, sys, tempfile, threading, unittest
+import base64, json, os, shlex, shutil, subprocess, sys, tempfile, threading, unittest, uuid
+from unittest import mock
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
@@ -243,21 +244,60 @@ class WorkspaceTest(unittest.TestCase):
                         subprocess.run(["git", "reset", "--quiet", "--", probe_path], cwd=root,
                                        capture_output=True, text=True)
 
-            ref = f"refs/l2-1872-probe/{os.getpid()}"
-            updated = subprocess.run(["git", "update-ref", ref, "HEAD"], cwd=root,
-                                     capture_output=True, text=True)
-            print(f"git update-ref rc={updated.returncode} worktree={root} ref={git_path(ref)} "
-                  f"stderr={updated.stderr.strip()}", flush=True)
             with self.subTest(operation="git update-ref"):
-                try:
-                    self.assertEqual(updated.returncode, 0,
-                                     f"git update-ref failed for the current worktree metadata: {updated.stderr.strip()}")
-                finally:
-                    if updated.returncode == 0:
-                        subprocess.run(["git", "update-ref", "-d", ref], cwd=root,
-                                       capture_output=True, text=True)
+                self._check_git_ref_writable(root, f"refs/l2-1872-probe/{uuid.uuid4().hex}")
         finally:
             os.unlink(probe_path)
+
+    def _check_git_ref_writable(self, root, ref):
+        head = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=root, text=True).strip()
+        ref_path = subprocess.check_output(
+            ["git", "rev-parse", "--path-format=absolute", "--git-path", ref], cwd=root, text=True).strip()
+        # An empty old value requires an absent ref, even if a random name collides.
+        updated = subprocess.run(["git", "update-ref", ref, head, ""], cwd=root,
+                                 capture_output=True, text=True)
+        print(f"git update-ref rc={updated.returncode} worktree={root} ref={ref_path} "
+              f"stderr={updated.stderr.strip()}", flush=True)
+        try:
+            self.assertEqual(updated.returncode, 0,
+                             f"git update-ref failed for the current worktree metadata: {updated.stderr.strip()}")
+        finally:
+            if updated.returncode == 0:
+                # Never remove a ref another writer changed after our creation.
+                removed = subprocess.run(["git", "update-ref", "-d", ref, head], cwd=root,
+                                         capture_output=True, text=True)
+                self.assertEqual(removed.returncode, 0, f"probe ref cleanup failed: {removed.stderr.strip()}")
+
+    def test_git_ref_probe_preserves_existing_ref(self):
+        ref = "refs/l2-1872-probe/collision"
+        sh("git", "update-ref", ref, "HEAD", cwd=self.repo)
+        before = subprocess.check_output(["git", "rev-parse", ref], cwd=self.repo, text=True)
+        with self.assertRaisesRegex(self.failureException, "git update-ref failed"):
+            self._check_git_ref_writable(self.repo, ref)
+        self.assertEqual(subprocess.check_output(["git", "rev-parse", ref], cwd=self.repo, text=True), before)
+
+    def test_git_ref_probe_preserves_concurrent_ref_update(self):
+        ref = "refs/l2-1872-probe/concurrent"
+        previous = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=self.repo, text=True).strip()
+        sh("git", "-c", "user.name=t", "-c", "user.email=t@t", "commit", "--allow-empty", "-qm", "next",
+           cwd=self.repo)
+        run = subprocess.run
+
+        def concurrent_update(args, **kwargs):
+            if args[:4] == ["git", "update-ref", "-d", ref]:
+                run(["git", "update-ref", ref, previous], cwd=self.repo, check=True, capture_output=True)
+            return run(args, **kwargs)
+
+        with mock.patch.object(subprocess, "run", side_effect=concurrent_update):
+            with self.assertRaisesRegex(self.failureException, "probe ref cleanup failed"):
+                self._check_git_ref_writable(self.repo, ref)
+        self.assertEqual(subprocess.check_output(["git", "rev-parse", ref], cwd=self.repo, text=True).strip(), previous)
+
+    def test_git_ref_probe_removes_its_own_ref(self):
+        ref = "refs/l2-1872-probe/owned"
+        self._check_git_ref_writable(self.repo, ref)
+        self.assertEqual(subprocess.run(["git", "show-ref", "--verify", "--quiet", ref],
+                                        cwd=self.repo).returncode, 1)
 
     def test_watch_accepts_several_runs(self):
         home = os.path.join(self.tmp, "home")
