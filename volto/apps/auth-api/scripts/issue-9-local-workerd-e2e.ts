@@ -2,10 +2,12 @@
 // Run from `volto`: bun apps/auth-api/scripts/issue-9-local-workerd-e2e.ts
 // The report is written to .volto-build/issue-9-local-workerd-e2e/report.json.
 import assert from "node:assert/strict";
-import { mkdir, writeFile } from "node:fs/promises";
 import { spawn } from "node:child_process";
+import { mkdir, writeFile } from "node:fs/promises";
 import { createServer } from "node:net";
+import { networkInterfaces } from "node:os";
 import { join, resolve } from "node:path";
+import { isDynamicRecord, isString } from "@volto/contracts/runtime-values";
 import { createDevelopmentTicketKeyPair } from "../../../scripts/development-secrets";
 
 const ROOT = resolve(import.meta.dirname, "../../..");
@@ -57,6 +59,48 @@ async function request(base: string, path: string, init?: RequestInit): Promise<
   return response;
 }
 
+/** The error code of an error answer. */
+function errorCodeOf(body: unknown): string | null {
+  if (!isDynamicRecord(body) || !isDynamicRecord(body.error)) return null;
+  return isString(body.error.code) ? body.error.code : null;
+}
+
+/** A string field of an answer. */
+function stringField(body: unknown, key: string): string | null {
+  if (!isDynamicRecord(body)) return null;
+  const field = body[key];
+  return isString(field) ? field : null;
+}
+
+/** The email of the signed-in user in a redeemed answer. */
+function redeemedEmail(body: unknown): string | null {
+  if (!isDynamicRecord(body) || !isDynamicRecord(body.user)) return null;
+  return isString(body.user.email) ? body.user.email : null;
+}
+
+/** The local Worker must answer on the loopback address only, so a machine on the network cannot reach it. */
+async function assertLoopbackOnly(port: number): Promise<void> {
+  const addresses = Object.values(networkInterfaces())
+    .flatMap((entries) => entries ?? [])
+    .filter((entry) => entry.family === "IPv4" && !entry.internal);
+  for (const address of addresses) {
+    let answered = false;
+    try {
+      const response = await fetch(`http://${address.address}:${port}/health/live`, {
+        signal: AbortSignal.timeout(2_000),
+      });
+      answered = response.ok;
+    } catch {
+      // A refused or dropped connection is the expected answer on a non-loopback address.
+    }
+    assert.equal(
+      answered,
+      false,
+      `The local Worker answered on ${address.address}, so it does not listen on the loopback address only.`,
+    );
+  }
+}
+
 async function waitForWorker(base: string): Promise<void> {
   const deadline = Date.now() + STARTUP_TIMEOUT_MS;
   while (Date.now() < deadline) {
@@ -77,7 +121,9 @@ async function waitForWorker(base: string): Promise<void> {
 let passed = false;
 try {
   // Build the local D1 schema before starting workerd. This uses Wrangler's local SQLite state only.
-  const migrate = spawn("bun", ["run", "wrangler", "d1", "migrations", "apply", "DB", "--local", "--yes"], {
+  // Wrangler 4.x has no `--yes` flag here: it skips the confirmation when the command runs without
+  // a terminal, which the piped output of this script already is.
+  const migrate = spawn("bun", ["run", "wrangler", "d1", "migrations", "apply", "DB", "--local"], {
     cwd: APP,
     env: cleanEnvironment(),
     stdio: ["ignore", "pipe", "pipe"],
@@ -99,15 +145,26 @@ try {
     env: environment,
     stdio: ["ignore", "pipe", "pipe"],
   });
-  child.stdout.on("data", (chunk: Buffer) => logs.push(chunk.toString()));
-  child.stderr.on("data", (chunk: Buffer) => logs.push(chunk.toString()));
+  child.stdout?.on("data", (chunk: Buffer) => logs.push(chunk.toString()));
+  child.stderr?.on("data", (chunk: Buffer) => logs.push(chunk.toString()));
 
   const base = `http://127.0.0.1:${port}`;
   await waitForWorker(base);
+  await assertLoopbackOnly(port);
   const health = await request(base, "/health/live");
   assert.equal(health.status, 200);
   const jwks = await request(base, "/.well-known/jwks.json");
   assert.equal(jwks.status, 200);
+
+  // The local run leaves the mail settings empty and does not expose the development code. A Worker
+  // that kept either one answers this request with a code or with a failed mail setup.
+  const signIn = await request(base, "/v1/auth/email/start", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ email: `issue-9-signin-${crypto.randomUUID()}@example.test` }),
+  });
+  assert.equal(signIn.status, 503);
+  assert.equal(errorCodeOf(await signIn.json()), "email_delivery_not_configured");
 
   const anonymous = await request(base, "/v2/admin/server-claims", {
     method: "POST",
@@ -122,18 +179,18 @@ try {
     body: JSON.stringify({ email }),
   });
   assert.equal(signed.status, 200, "SERVER_CLAIMS_ADMIN_TOKEN must reach the local Worker runtime");
-  const claim = (await signed.json()) as { claim?: unknown };
-  assert.equal(typeof claim.claim, "string");
+  const claim = stringField(await signed.json(), "claim");
+  assert.ok(claim);
 
   const redeemed = await request(base, "/v2/server-claims/redeem", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ claim: claim.claim }),
+    body: JSON.stringify({ claim }),
   });
   assert.equal(redeemed.status, 200);
-  const session = (await redeemed.json()) as { sessionToken?: unknown; user?: { email?: unknown } };
-  assert.equal(typeof session.sessionToken, "string");
-  assert.equal(session.user?.email, email);
+  const session = await redeemed.json();
+  assert.ok(stringField(session, "sessionToken"));
+  assert.equal(redeemedEmail(session), email);
   passed = true;
 } catch (cause) {
   error = cause instanceof Error ? cause.message : String(cause);
@@ -152,7 +209,10 @@ try {
     });
   }
   await mkdir(join(ROOT, ".volto-build/issue-9-local-workerd-e2e"), { recursive: true });
-  await writeFile(REPORT, `${JSON.stringify({ passed, requests, error, logs: logs.join("").slice(-8_000) }, null, 2)}\n`);
+  await writeFile(
+    REPORT,
+    `${JSON.stringify({ passed, requests, error, logs: logs.join("").slice(-8_000) }, null, 2)}\n`,
+  );
   process.stdout.write(`${passed ? "PASS" : "FAIL"}${error ? `: ${error}` : ""}: report in ${REPORT}\n`);
   if (!passed) process.exitCode = 1;
 }
