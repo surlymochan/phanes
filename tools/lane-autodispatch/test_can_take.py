@@ -541,6 +541,18 @@ class ReviewBacklogTickTest(TickHarness, unittest.TestCase):
                                       self.LANES, state)
         self.assertEqual(dispatched, [("CX4", 1)])
 
+    def test_the_balanced_review_lane_passes_the_host_memory_admission(self):
+        # The balancer would pick CX4 (smaller backlog), but CX4's host is short of memory:
+        # the review must go to CX2, whose host passes the check - never to CX4.
+        lanes = {name: dict(cfg, min_available_memory_mb=400) for name, cfg in self.LANES.items()}
+        state = self.busy("CX5", "verify")
+        state["_review_waiting"] = {"CX2": 2}
+        probe = lambda args, *a, **k: (0, f"{(100 if 'h4' in args else 500) * 1024}\n", "")
+        dispatched, logs = self.run_tick([issue(1, VERIFY_BODY, ("lane-ready", "verify-intent"))],
+                                         lanes, state, memory_probe=probe)
+        self.assertEqual(dispatched, [("CX2", 1)])
+        self.assertTrue(any("CX4 #1 review skipped: blocked-by-host-memory" in row for row in logs))
+
     def test_work_dispatch_does_not_strand_a_review_on_its_old_plan(self):
         rows = [issue(1, VERIFY_BODY, ("lane-ready", "verify-intent")),
                 issue(10, "work", ("lane-ready", "backend:codex"))]

@@ -2704,8 +2704,18 @@ def tick(lanes, state, last_warn):
             # in-flight cap is skipped - the review waits for a free lane (Refs #1701).
             running = review_running(review_ids, state)
             waiting = [i for i in q if i is not pick and i.get("deps_ok", True) and i.get("verify")]
-            eligible = [lane for lane in idle if lane in review_ids
-                        and can_take(lanes[lane]["backend"], pick, lane)]
+            # Memory admission applies to the lane that finally takes the review, not only to the
+            # lane that was asked: a balanced-away review must not land on a host short of memory.
+            eligible = []
+            for lane in idle:
+                if lane not in review_ids or not can_take(lanes[lane]["backend"], pick, lane): continue
+                rejection = memory_preflight(lane, lanes[lane], pick, memory_cache)
+                if rejection:
+                    memory_rejections.setdefault(pick["n"], {})[lane] = rejection
+                    shown = "unavailable" if rejection["available_mb"] is None else f"{rejection['available_mb']}MB"
+                    log(f"{lane} #{pick['n']} review skipped: blocked-by-host-memory host={rejection['host']} available={shown} threshold={rejection['threshold_mb']}MB", brain=False)
+                    continue
+                eligible.append(lane)
             queued = review_waiting_counts(review_ids, waiting, running, head_eligible=eligible)
             # Rank and log the running + waiting forecast, but cap only admitted runs.
             # Shared waiting demand must not prevent an idle lane from draining it.
