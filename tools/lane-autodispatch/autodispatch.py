@@ -132,7 +132,6 @@ def marker_scope(name):
     if name.startswith("PAUSE-") and len(name) > len("PAUSE-"): return f"lane:{name[len('PAUSE-'):]}"
     return None
 
-<<<<<<< HEAD
 # The disk watermark guard of the box control plane (Refs #1666) measures a remote lane host and
 # pauses it when the disk is too full. The health sweep can clear the `auto:` host pause, so the
 # dispatcher reads the state file of the guard as well: that is an independent gate that keeps the
@@ -167,8 +166,6 @@ def disk_watermark_blocked(host, states=None):
     if not record: return False
     return bool(record.get("blocked"))
 
-def pause_records(now=None):
-=======
 # The deadline of a legacy pause marker: the health loop writes `auto:cooldown:until=<epoch|ISO>`
 # (`tools/check-health-pause.py`), the quota loop `mm_remains:until=<ISO>`
 # (`tools/check-health-quota-fresh.py`). The deadline is separated from the rest of the body by a
@@ -217,7 +214,6 @@ def log_expired_pause(name, deadline):
     except Exception: pass
 
 def pause_records(now=None, home=None):
->>>>>>> e10376015100591e0fc16b53c94009676407945a
     """The active pause records: the swrm pause store plus the legacy PAUSE markers.
 
     A store record carries a TTL (`expires_at`); an expired record is no pause. A legacy
@@ -226,12 +222,8 @@ def pause_records(now=None, home=None):
     removal). The result is sorted by scope."""
     now = time.time() if now is None else now
     records = []
-<<<<<<< HEAD
     disk_states = disk_watermark_states(now)
-    store = pause_store_dir()
-=======
     store = pause_store_dir(home)
->>>>>>> e10376015100591e0fc16b53c94009676407945a
     try: names = sorted(os.listdir(store))
     except OSError: names = []
     for name in names:
@@ -263,7 +255,7 @@ def pause_records(now=None, home=None):
             continue
         scope = marker_scope(name)
         if scope is None: continue
-<<<<<<< HEAD
+        body = marker_body(name)
         # Version 2 stopped writing shared host markers. Retain old files
         # untouched, but use its independent state instead of its legacy marker.
         # Other writers do not share a lock with the guard; deleting the legacy
@@ -272,12 +264,13 @@ def pause_records(now=None, home=None):
             host = name[len("PAUSE-HOST-"):]
             version = disk_states.get(host, {}).get("guard", 0)
             if isinstance(version, int) and version >= 2:
-                try:
-                    with open(os.path.join(D, name)) as stream: body = stream.read()
-                except OSError: body = ""
                 if body.startswith(f"auto:disk-watermark host={host} "): continue
-        records.append({"scope": scope, "reason": f"legacy marker: {name}", "created_at": 0.0,
-                        "expires_at": None, "source": "marker"})
+        deadline = pause_until(body)
+        if deadline is not None and deadline <= now:
+            log_expired_pause(name, deadline)  # the hold ends here, the marker file stays
+            continue
+        records.append({"scope": scope, "reason": marker_reason(name, body), "created_at": 0.0,
+                        "expires_at": deadline, "source": "marker"})
     # The disk watermark gate (Refs #1666): a blocked lane host stays blocked even when the
     # health sweep removed its pause marker, as long as the guard reports the block.
     for host, record in disk_states.items():
@@ -285,15 +278,6 @@ def pause_records(now=None, home=None):
         records.append({"scope": f"host:{host}", "reason": f"disk watermark guard: {record.get('state')}",
                         "created_at": record.get("updated_at"), "expires_at": None,
                         "source": "disk-watermark"})
-=======
-        body = marker_body(name)
-        deadline = pause_until(body)
-        if deadline is not None and deadline <= now:
-            log_expired_pause(name, deadline)  # the hold ends here, the marker file stays
-            continue
-        records.append({"scope": scope, "reason": marker_reason(name, body), "created_at": 0.0,
-                        "expires_at": deadline, "source": "marker"})
->>>>>>> e10376015100591e0fc16b53c94009676407945a
     return sorted(records, key=lambda row: row["scope"])
 
 def paused_scopes(now=None, records=None):

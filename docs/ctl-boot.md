@@ -610,7 +610,6 @@ never read, written or removed):
 python3 tools/check-health-hosts-ok-pause.py
 ```
 
-<<<<<<< HEAD
 ## Lane host disk watermark guard (Refs #1666)
 
 `govpn2` runs the CX2/CX4 review lanes; a full disk there stalls the reviews.  The
@@ -724,7 +723,6 @@ unittest suite also exercises installation and replacement of the resident guard
 inside an isolated fake control-plane tree. Passing these offline checks does not
 claim a production deployment or a successful SSH probe of the live lane host;
 those remain separate operator verification steps above.
-=======
 ### Executor task / zombie watermark probe (Refs #1826)
 
 The executor services of a lane leak: their cgroup fills up with zombie children until
@@ -897,7 +895,6 @@ Fifth implementation review (baseline `32cf3ae6d`), regression in `ExecutorRevie
 |---|---|---|
 | B1 - normal process exits abort the bulk cgroup sample and suppress all host alerts | skip failed or empty reads only after confirming that the process directory disappeared; continue to fail sampling for unreadable surviving processes or malformed records | `test_bulk_cgroup_command_skips_exited_processes_and_keeps_alerts` forces an exit during the actual shell command, covering both failed and empty reads, then verifies 51 descendant zombies, their parent PID, soft and hard service alerts, persisted health payload and the full ps snapshot; existing read-failure and incomplete-record regressions remain in place |
 
->>>>>>> e10376015100591e0fc16b53c94009676407945a
 
 ## ctl-loop child reaping and restart (Refs #951)
 
