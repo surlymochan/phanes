@@ -354,12 +354,10 @@ def _is_active(state: str, finished: Optional[float]) -> bool:
     under ``issue`` and the run under ``run``) still occupies the card: the
     dispatcher only drops the entry when the run is over.
     """
-    if state in TERMINAL_STATES:
+    if state in TERMINAL_STATES or finished is not None:
         return False
     if state in ACTIVE_STATES:
         return True
-    if finished is not None:
-        return False
     return True
 
 
@@ -459,7 +457,18 @@ def audit(leases: Any, runs: Any, now: Any, grace_s: Any = 0.0) -> Dict[str, Any
     moment = _number(now)
     grace = _number(grace_s) or 0.0
     lease_rows = _leases(leases)
-    run_rows = [row for row in (_normalize_run(record) for record in _rows(runs)) if row]
+    rows = [row for row in (_normalize_run(record) for record in _rows(runs)) if row]
+    by_id: Dict[str, Dict[str, Any]] = {}
+    for row in rows:
+        merged = by_id.setdefault(row["run_id"], dict(row))
+        active = merged["active"] and row["active"]
+        alive = active and (merged["alive"] or row["alive"])
+        for key, value in row.items():
+            if merged.get(key) is None or merged.get(key) == "":
+                merged[key] = value
+        merged["active"] = active
+        merged["alive"] = alive
+    run_rows = list(by_id.values())
 
     alerts: List[Dict[str, Any]] = []
     metrics, grants = _metrics(lease_rows, run_rows, alerts, moment, grace)

@@ -158,6 +158,28 @@ class AuditTests(unittest.TestCase):
         ], NOW)
         self.assertEqual(result["metrics"]["dual_executions"], 1)
 
+    def test_terminal_record_overrides_duplicate_lane_record(self):
+        records = [
+            {"run_id": "a", "state": "finished"},
+            {"run": "a", "issue": 123},
+            {"run_id": "b", "issue": 123, "state": "running"},
+        ]
+        for rows in (records, list(reversed(records))):
+            with self.subTest(rows=rows):
+                result = audit_module.audit([], rows, NOW)
+                self.assertEqual(result["metrics"]["active_runs"], 1)
+                self.assertNotIn("dual_execution", kinds(result["alerts"]))
+
+    def test_terminal_record_overrides_running_for_expired_lease(self):
+        for terminal in ({"state": "finished"}, {"state": "running", "finished": NOW - 1}):
+            with self.subTest(terminal=terminal):
+                rows = [dict(run_id="a", **terminal),
+                        {"run_id": "a", "issue": 123, "state": "running"}]
+                result = audit_module.audit([lease(123, "a", NOW - 5000)], rows, NOW)
+                self.assertEqual(result["metrics"]["active_runs"], 0)
+                self.assertEqual(kinds(result["alerts"]), ["expired_lease"])
+                self.assertEqual(result["alerts"][0]["detail"]["confidence"], "confirmed")
+
     def test_two_active_runs_of_one_card_are_a_double_execution(self):
         result = audit_module.audit(
             [lease(1795, "run-a", NOW - 100)],
