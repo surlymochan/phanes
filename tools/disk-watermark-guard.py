@@ -43,7 +43,6 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 GUARD_VERSION = 2
-DEFAULT_HOST = "<host>"
 BLOCK_PCT = 95          # at or above this usage the lane host is paused
 RECOVER_PCT = 87        # at or below this usage the guard releases its own pause
 INTERVAL = 300          # seconds between two measurements of the resident loop
@@ -262,8 +261,8 @@ def main(argv=None):
                         help="the brain log the alert rows are appended to")
     parser.add_argument("--path", default="/",
                         help="the remote filesystem to measure")
-    parser.add_argument("--host", default=DEFAULT_HOST,
-                        help="the remote lane host to measure")
+    parser.add_argument("--host", default=os.environ.get("DISK_WATERMARK_HOST", ""),
+                        help="the remote lane host to measure (required; or set DISK_WATERMARK_HOST)")
     parser.add_argument("--block-pct", type=int, default=BLOCK_PCT,
                         help="the usage percentage that pauses the lane host")
     parser.add_argument("--recover-pct", type=int, default=RECOVER_PCT,
@@ -277,6 +276,8 @@ def main(argv=None):
     parser.add_argument("--loop", action="store_true",
                         help="keep measuring the host instead of running once")
     options = parser.parse_args(argv)
+    if not options.host:
+        parser.error("--host (or DISK_WATERMARK_HOST) is required: no lane host is built in")
     if options.recover_pct > options.block_pct:
         parser.error("--recover-pct must not be above --block-pct")
     if not options.loop:

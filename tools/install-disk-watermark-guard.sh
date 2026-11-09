@@ -22,7 +22,7 @@ set -euo pipefail
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 repo_root="$(cd "$script_dir/.." && pwd)"
 ctl="${1:-$HOME/phanes-ctl}"
-host="${DISK_WATERMARK_HOST:-govpn2}"
+host="${DISK_WATERMARK_HOST:?set DISK_WATERMARK_HOST to the lane host to guard}"
 bin="$ctl/bin"
 pause_dir="$ctl/autodispatch"
 brain_log="${DISK_WATERMARK_BRAIN_LOG:-/workspace/phanes/brain/log.md}"

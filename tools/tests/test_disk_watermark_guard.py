@@ -43,7 +43,7 @@ START_EXAMPLE = TOOLS / "lane-autodispatch" / "start-control-plane.example"
 CTL_BOOT = ROOT / "docs" / "ctl-boot.md"
 AUTODISPATCH = TOOLS / "lane-autodispatch" / "autodispatch.py"
 
-HOST = "<host>"
+HOST = "lane-host-a"
 # The guard owns a separate namespace; health/operator markers remain shared.
 PAUSE_MARKER = f".disk-watermark/PAUSE-HOST-{HOST}"
 
@@ -208,6 +208,7 @@ class FakeSsh:
     @property
     def env(self):
         env = dict(os.environ)
+        env["DISK_WATERMARK_HOST"] = HOST
         env["PATH"] = f"{self.bin}{os.pathsep}{env.get('PATH', '')}"
         return env
 
@@ -434,7 +435,7 @@ class GuardHysteresisTests(unittest.TestCase):
 class DispatchGateTests(unittest.TestCase):
     """The dispatcher must not hand out <host> while the guard blocks it."""
 
-    def test_the_dispatcher_holds_govpn2_while_the_guard_blocks_it(self):
+    def test_the_dispatcher_holds_lane_host_while_the_guard_blocks_it(self):
         with scratch() as tmp, control_plane_home(tmp):
             home = Path(tmp)
             pause_dir = home / "phanes-ctl" / "autodispatch"
@@ -641,6 +642,7 @@ echo "status:"
         require(INSTALLER, "the disk watermark guard installer")
         environment = dict(env)
         environment["HOME"] = str(home)
+        environment["DISK_WATERMARK_HOST"] = HOST
         environment["DISK_WATERMARK_BRAIN_LOG"] = str(Path(home) / "workspace" / "brain" / "log.md")
         return subprocess.run(["bash", str(INSTALLER), str(ctl)],
                               capture_output=True, text=True, env=environment, timeout=180)
@@ -870,6 +872,7 @@ class ControlPlaneWiringTests(unittest.TestCase):
         spec.loader.exec_module(guard)
         environment = dict(os.environ)
         environment.pop("DISK_WATERMARK_BRAIN_LOG", None)
+        environment["DISK_WATERMARK_HOST"] = HOST
         with mock.patch.dict(os.environ, environment, clear=True), \
                 mock.patch.object(guard, "run_once", return_value=0) as run_once:
             self.assertEqual(guard.main([]), 0)
@@ -877,6 +880,16 @@ class ControlPlaneWiringTests(unittest.TestCase):
         for path in (INSTALLER, START_EXAMPLE):
             self.assertIn("${DISK_WATERMARK_BRAIN_LOG:-" + dispatcher.BRAIN_LOG + "}",
                           path.read_text(), f"{path} must wire the actual dispatcher brain log")
+
+    def test_the_lane_host_is_required_not_built_in(self):
+        environment = dict(os.environ)
+        environment.pop("DISK_WATERMARK_HOST", None)
+        done = subprocess.run([sys.executable, str(GUARD)], capture_output=True, text=True,
+                              env=environment, timeout=60)
+        self.assertNotEqual(done.returncode, 0)
+        self.assertIn("--host", done.stderr)
+        text = START_EXAMPLE.read_text()
+        self.assertNotIn("--host <", text, "a <...> placeholder is a shell redirection")
 
     def test_ctl_boot_documents_the_guard_and_its_probe(self):
         require(CTL_BOOT, "the control plane boot documentation")
