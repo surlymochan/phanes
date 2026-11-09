@@ -248,7 +248,6 @@ class LaneTests(unittest.TestCase):
         self.assertEqual(result["workspace"]["base"], expected_head)
         self.assertTrue(wt.is_dir())
 
-<<<<<<< HEAD
     def child_command(self, pid=None):
         """The command line of a lane process (what `ps` shows)."""
         pid = pid or self.lane_state().get("child_pid")
@@ -296,7 +295,7 @@ class LaneTests(unittest.TestCase):
         # The lane keeps its own level: the resident child of the lane runs without one, so the
         # review tasks of the same lane are not touched by the fix round.
         self.assertNotIn("--thinking", self.child_command())
-=======
+
     def test_lane_git_metadata_is_inside_executor_writable_worktree(self):
         wt = self.data / "lanes" / self.lane_name / "wt"
         wt.parent.mkdir(parents=True)
@@ -499,7 +498,6 @@ class LaneTests(unittest.TestCase):
         backup, = self.root.glob("wt.backup-*/wt")
         self.assertEqual((backup / "untracked.txt").read_text(), "unfinished\n")
         self.assertEqual(self.git("-C", str(backup), "show", ":README.md"), "staged")
->>>>>>> 9fbdfb105d73c6b84aa060041d6b68bf26d8afe8
 
     def test_pi_rate_limit_retries_in_session_and_watch_shows_alert(self):
         self.set_config("pi")
