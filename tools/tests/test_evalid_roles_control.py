@@ -3,6 +3,7 @@ import importlib.util
 import inspect
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -12,7 +13,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from tools.evalid_roles_control import (LocalEvidence, MockSwrm, NativeEvidence, Rejected, RoleController,
-                                        _tree_snapshot_digest, digest)
+                                        RECORDED_REJECTIONS, UNRECORDED_REJECTIONS, _tree_snapshot_digest, digest)
 
 
 ROOT = Path(__file__).resolve().parent
@@ -348,6 +349,27 @@ class TestEvalidRolesControl(unittest.TestCase):
                 "command": [sys.executable, "-m", "unittest", "discover", "-s", "tests"],
                 "proof_digest": digest("green proof"), "snapshot_digest": digest("unbound snapshot"),
                 "test_manifest": self.test_manifest})
+
+    def test_every_stage_rejection_is_recorded_in_the_attempt_history(self):
+        # Not one code at a time: any refusal of the awaited stage lands in the history.
+        self._accept_through_red()
+        self._git("checkout", "-q", "--detach", self.green_head)
+        with self.assertRaisesRegex(Rejected, "snapshot_mismatch"):
+            self.controller.accept("offline-demo", "green", {
+                "head_commit": self.green_head, "status": "PASS",
+                "command": [sys.executable, "-m", "unittest", "discover", "-s", "tests"],
+                "proof_digest": digest("green proof"), "snapshot_digest": digest("unbound snapshot"),
+                "test_manifest": self.test_manifest})
+        item = self.controller._attempt_history("offline-demo")[0]
+        self.assertEqual(item["stages"][-1], "green")
+        self.assertEqual((item["terminal"], item["rejection_reason"]), ("REJECTED", "GREEN_REJECTED"))
+        self.controller._validate_attempt_history("offline-demo", [item])
+
+    def test_every_rejection_code_is_classified_as_recorded_or_not(self):
+        source = inspect.getsource(sys.modules[Rejected.__module__])
+        raised = set(re.findall(r'Rejected\("([a-z_]+)"\)', source))
+        self.assertFalse(RECORDED_REJECTIONS & UNRECORDED_REJECTIONS)
+        self.assertEqual(raised, RECORDED_REJECTIONS | UNRECORDED_REJECTIONS)
 
     def test_delivery_rejects_caller_supplied_short_commit_chain(self):
         controller = self._controller(self.root / "control-short-chain")

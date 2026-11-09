@@ -33,6 +33,38 @@ PUBLIC_REJECTION_REASONS = {"SPEC_REJECTED", "SPEC_CHECK_REJECTED", "RED_REJECTE
                             "GREEN_REJECTED", "HOLDOUT_REJECTED", "REVIEW_REJECTED",
                             "CONTROLLER_REJECTED"}
 MAX_SPEC_REVISIONS = 2
+# Every rejection code is classified. A RECORDED code is a verdict on the evidence of the stage the
+# attempt is waiting for: it is appended to the log, so the public attempt history shows the refused
+# stage. An UNRECORDED code is a precondition, a malformed call or a later-phase refusal and leaves
+# the log untouched. A test requires every code raised here to be classified.
+RECORDED_REJECTIONS = frozenset({
+    "spec_not_accepted", "spec_check_failed", "spec_check_verdict_unknown",
+    "red_not_assertion", "red_not_replayed", "red_base_mismatch",
+    "red_contains_production_change", "red_manifest_missing", "red_manifest_changed",
+    "green_not_replayed", "green_does_not_contain_red", "green_out_of_scope",
+    "green_evidence_missing", "evidence_replay_failed", "snapshot_mismatch",
+    "test_manifest_invalid", "test_manifest_mismatch", "test_manifest_missing",
+    "dirty_worktree", "commit_chain_mismatch"
+})
+UNRECORDED_REJECTIONS = frozenset({
+    "attempt_history_chain", "attempt_history_limit", "controller_order",
+    "evidence_must_be_outside_evalid", "evidence_must_be_outside_project",
+    "evidence_replay_unavailable", "head_drift", "holdout_binding", "holdout_failed",
+    "holdout_isolation", "holdout_isolation_unknown", "holdout_not_frozen",
+    "holdout_placeholder_required", "holdout_result_missing", "holdout_runner_failed",
+    "holdout_runner_missing", "holdout_status_unknown", "holdout_suite_required",
+    "input_digest_mismatch", "intake_frozen", "invalid_base_commit", "invalid_change",
+    "invalid_holdout_path", "invalid_intake", "invalid_native_output", "invalid_review",
+    "invalid_stage", "missing_evidence", "missing_parent_receipt", "missing_run_id",
+    "native_attempt_mismatch", "native_capture_failed", "native_commit_mismatch",
+    "native_identity_mismatch", "native_sealed_evidence_mismatch", "native_verify_failed",
+    "parent_receipt_invalid", "parent_receipt_mismatch", "review_evidence_mismatch",
+    "review_failed", "review_field_unknown", "review_run_rejected", "review_spec_mismatch",
+    "review_tdd_mismatch", "run_not_complete", "spec_check_parent_mismatch",
+    "spec_check_parent_missing", "spec_not_revised", "spec_revision_limit",
+    "spec_version_invalid", "spec_version_mismatch", "spec_version_missing",
+    "stale_spec_check_receipt"
+})
 CHANGE_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]*$")
 OID = re.compile(r"^[0-9a-f]{40,64}$")
 DIGEST = re.compile(r"^sha256:[0-9a-f]{64}$")
@@ -381,9 +413,7 @@ class RoleController:
                                 run_context=run_context)
         except Rejected as error:
             state = self.state(change_id, attempt)
-            outcomes = {"spec_not_accepted", "spec_check_failed", "red_not_assertion", "green_not_replayed",
-                        "evidence_replay_failed"}
-            if state and state["next"] == stage and str(error) in outcomes:
+            if state and state["next"] == stage and str(error) in RECORDED_REJECTIONS:
                 self._record_rejection(change_id, attempt, stage, run_id=run_context.get("run_id"))
             raise
 
