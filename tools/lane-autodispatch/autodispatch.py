@@ -1606,7 +1606,6 @@ def dispatch_failed(lane, cfg, item, error, busy=False):
         return
     host_fail(cfg["host"], f"dispatch #{item['n']}: {error}")
 
-<<<<<<< HEAD
 def is_fix_round_card(labels, title, body):
     """True when the card asks a lane to redo a rejected PR (rubric F1..F6, Refs #1851).
 
@@ -1627,10 +1626,9 @@ def fix_round_pr(body, title=""):
 def fix_round_brief(body, title=""):
     """The fix round brief, with the PR of the round when the card names one."""
     return FIX_ROUND_TASK_BOOK.replace("{pr}", fix_round_pr(body, title) or "<N>")
-=======
+
 LANE_BUSY_RE = re.compile(r"lane \S+ is busy", re.I)  # the host still runs the finished run
 CAPACITY_EXHAUSTED_RE = re.compile(r"\b(?:capacity exhausted|no (?:available )?capacity)\b", re.I)
->>>>>>> e10376015100591e0fc16b53c94009676407945a
 
 def dispatch(lane, cfg, item, base):
     n = item["n"]
