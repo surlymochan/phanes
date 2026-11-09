@@ -143,6 +143,29 @@ class LedgerTests(unittest.TestCase):
             sys.argv = original_argv
         self.assertEqual(json.loads(output.getvalue()), [old])
 
+    def test_legacy_records_with_missing_times_and_empty_metadata_export_offline(self):
+        records = [
+            {"id": "no-created", "status": "done", "finished_at": "2020-01-02T00:00:00Z"},
+            {"id": "no-finished", "status": "running", "created_at": "2020-01-01T00:00:00Z"},
+            {"id": "empty-metadata", "status": "failed", "metadata": {}},
+            {"id": "null-metadata", "status": "done", "metadata": None},
+        ]
+        path = Path(xs.LEDGER)
+        path.parent.mkdir(parents=True)
+        fixture = "".join(json.dumps(record) + "\n" for record in records)
+        path.write_text(fixture)
+
+        output, error = io.StringIO(), io.StringIO()
+        with mock.patch.object(sys, "argv", ["swrm", "ledger", "--json"]), \
+                mock.patch.object(xs, "gh_transport", side_effect=AssertionError("unexpected GitHub access")), \
+                contextlib.redirect_stdout(output), contextlib.redirect_stderr(error):
+            self.assertEqual(list(xs.ledger_entries()), records)
+            xs.main()
+
+        self.assertEqual(json.loads(output.getvalue()), records)
+        self.assertEqual(error.getvalue(), "")
+        self.assertEqual(path.read_text(), fixture)
+
     def test_known_card_types_reject_unknown_before_creating_run(self):
         knowledge = self.root / "knowledge"
         knowledge.mkdir()
