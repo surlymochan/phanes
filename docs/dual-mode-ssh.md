@@ -27,10 +27,11 @@
 在 box 的 `~/.ssh/swrm-hub/config` 中使用已经部署的控制面 key
 `~/.ssh/id_ed25519_fleet_operator`。这里只引用 key 路径，不复制或打印 key 内容。
 `ControlMaster` 复用同一个控制连接，减少 fleet 查询和 lane assignment 的
-重复握手：
+重复握手。在 `~/.ssh/config` 中加入 `Include ~/.ssh/swrm-hub/config`，
+使原生 `fleet exec` 和结果 bundle 使用的 `ssh` 都能读取这些 alias：
 
 ```sshconfig
-Host node-1.example.invalid node-2.example.invalid node-3.example.invalid node-4.example.invalid node-5.example.invalid broker relay.example.invalid worker-a.example.invalid worker-b.example.invalid
+Host gores1 gores2 govpn govpn2 gorelay gocc
     IdentityFile ~/.ssh/id_ed25519_fleet_operator
     IdentitiesOnly yes
     ControlMaster auto
@@ -43,30 +44,33 @@ Host node-1.example.invalid node-2.example.invalid node-3.example.invalid node-4
 首次部署后只在 box 上验证连通性和远端命令，例如：
 
 ```bash
-ssh -F ~/.ssh/swrm-hub/config node-1.example.invalid -- true
-ssh -F ~/.ssh/swrm-hub/config broker -- true
+ssh -F ~/.ssh/swrm-hub/config gores1 -- true
+ssh -F ~/.ssh/swrm-hub/config gocc -- true
 ```
 
 不要把私钥、密码、known-hosts 内容或 agent socket 放进仓库或 bridge 配置。
 
-box 上 `ib-refresh` 约每 15 分钟续签 instabox 证书，派发机需保持该循环。
+Instabox fleet 及其证书续签循环随 2026-11-02 基线一起退役，派发机不再
+需要维持该循环。
 
 ## 跳板 / ProxyCommand 拓扑
 
 跳板拓扑的事实来源是 box 端真正生效的 ssh config：AD 用 `~/.ssh/config`
 （AD 的 `ssh` 不带 `-F`，见 `tools/lane-autodispatch/autodispatch.py`），
-`swrm-fleet` 用上面那段 `~/.ssh/swrm-hub/config`。仓库里能核对到的
+`swrm-fleet` 也通过 `~/.ssh/config` 的 `Include` 读取上面那段
+`~/.ssh/swrm-hub/config`。仓库里能核对到的
 只有这几点：
 
-- 受控 fleet 主机集合固定为 `node-1.example.invalid`–`node-5.example.invalid`、`broker`、`relay.example.invalid`、`worker-a.example.invalid`、`worker-b.example.invalid`
-  （`docs/fleet-topology-expected.md:12-14`）。`bastion` **不是** fleet 主机，
+- 受控 fleet 主机集合固定为 `gores1`、`gores2`、`govpn`、`govpn2`、
+  `gorelay`、`gocc`
+  （`docs/fleet-topology-expected.md:15-17`）。`bastion` **不是** fleet 主机，
   在本仓库里只作为引用回归样例出现（`tools/check-ssh-opts-quote.py:18`、
   `swrm/tests/test_autodispatch.py:17`），不是可核对的跳板拓扑。
-- 上面那段示例 ssh config 对这 9 台主机只配了 `IdentityFile` 与 ControlMaster，
+- 上面那段示例 ssh config 对这 6 台主机只配了 `IdentityFile` 与 ControlMaster，
   没有 `ProxyJump` / `ProxyCommand`；真实跳板链以 box 上实际生效的 ssh config 为准。
-- 方向：coordinator 部署在 `broker`，是 `relay.example.invalid` 通过反向隧道连 `broker`
-  （relay.example.invalid→broker，见 `docs/fleet-coordinator-ssh-backoff.md:21-22`）；
-  `broker` 并不是“经 relay.example.invalid 跳板”的机器。
+- 方向：coordinator 部署在 `gocc`，是 `gorelay` 通过反向隧道连 `gocc`
+  （gorelay→gocc，见 `docs/fleet-coordinator-ssh-backoff.md:21-22`）；
+  `gocc` 并不是“经 gorelay 跳板”的机器。
 
 因此 **AD 代码里不写死任何跳板主机名**：
 
@@ -82,7 +86,7 @@ box 上 `ib-refresh` 约每 15 分钟续签 instabox 证书，派发机需保持
 
 ```json
 {
-  "node-1.example.invalid": "ssh -o BatchMode=yes -o ConnectTimeout=20 -W %h:%p <跳板别名>"
+  "gocc": "ssh -o BatchMode=yes -o ConnectTimeout=20 -W %h:%p <跳板别名>"
 }
 ```
 
@@ -94,34 +98,50 @@ box 上 `ib-refresh` 约每 15 分钟续签 instabox 证书，派发机需保持
 `python3 tools/check-ad-ssh-command.py`）。表里只放跳板路由，不要放凭据（key 路径由
 ssh config 的 `IdentityFile` 负责）。
 
-## Fleet 主机和十 lane 拓扑
+## Fleet 主机和十一 lane 拓扑（2026-11-02 基线）
 
-自动路由的主机集合固定为 `node-1.example.invalid`–`node-5.example.invalid`、`broker`、`relay.example.invalid`、`worker-a.example.invalid`、
-`worker-b.example.invalid`；不加入 `local`、`worker` 或 copilot。当前十 lane 的容量分配为：
+事实基线以 2026-11-02 为准：Instabox 主机已退役，自动路由的远端主机集合
+固定为 `gores1`、`gores2`、`govpn`、`govpn2`、
+`gorelay`、`gocc`；控制面在 **box**，box 是本机，不加入受控
+fleet host。当前十一 lane 的容量分配为：
 
 | 主机 | lane 容量 | 允许的 backend |
 |---|---:|---|
-| node-1.example.invalid | 2 | pi |
-| node-2.example.invalid | 1 | pi |
-| node-3.example.invalid | 1 | pi |
-| node-4.example.invalid | 1 | pi |
-| node-5.example.invalid | 1 | pi |
-| broker | 1 | agy |
-| relay.example.invalid | 1 | codex |
-| worker-a.example.invalid | 1 | codex |
-| worker-b.example.invalid | 1 | codex |
+| gores1 | 3 | pi |
+| gores2 | 2 | pi |
+| govpn | 1 | codex |
+| govpn2 | 1 | codex |
+| gorelay | 2 | codex |
+| gocc | 2 | agy |
 
-因此总容量是 10，`broker` 最多 1 个 lane；配置中不得出现 `copilot` 或
-`worker`。在 box 的 bridge/service 环境中设置（JSON 的引号要保留）：
+因此总容量是 11，`gocc` 最多 2 个 lane；配置中不得出现 `copilot` 或
+box 本机 lane backend。限额与 backend 配比的机器可读约定见
+[`docs/fleet-topology-expected.md`](fleet-topology-expected.md)。在 box 的
+bridge/service 环境中设置（JSON 的引号要保留）：
 
 ```bash
-export OPENSWARM_AUTO_FLEET_HOSTS='["node-1.example.invalid","node-2.example.invalid","node-3.example.invalid","node-4.example.invalid","node-5.example.invalid","broker","relay.example.invalid","worker-a.example.invalid","worker-b.example.invalid"]'
-export OPENSWARM_AUTO_HOST_BACKENDS='{"local":[],"node-1.example.invalid":["pi"],"node-2.example.invalid":["pi"],"node-3.example.invalid":["pi"],"node-4.example.invalid":["pi"],"node-5.example.invalid":["pi"],"broker":["agy"],"relay.example.invalid":["codex"],"worker-a.example.invalid":["codex"],"worker-b.example.invalid":["codex"]}'
+export OPENSWARM_AUTO_CLI=/absolute/path/to/swrm-fleet
+export OPENSWARM_HUB_LOCAL_ROUTER=1
+export OPENSWARM_AUTO_LOCAL_HOST=box
+export OPENSWARM_AUTO_FLEET_HOSTS='["gores1","gores2","govpn","govpn2","gorelay","gocc"]'
+export OPENSWARM_AUTO_HOST_BACKENDS='{"box":[],"gores1":["pi"],"gores2":["pi"],"govpn":["codex"],"govpn2":["codex"],"gorelay":["codex"],"gocc":["agy"]}'
 ```
 
-`OPENSWARM_AUTO_HOST_BACKENDS` 是主机 backend 白名单，不是凭据配置。部署后
+`OPENSWARM_AUTO_HOST_BACKENDS` 是主机 backend 白名单，不是凭据配置；box 的
+空白名单确保控制面本机的 lane 不被探测或接收自动派发。
+受控 host 还须登记在 `swrm-fleet` 的 `$OPENSWARM_HOME/fleet.json` 中
+（默认 `~/.claude/swrm-executor-candidate/fleet.json`），使用 `kind: "ssh"`
+及已经配置好的 `ssh` alias；环境中的 host 名称按该 inventory 查找。
+`OPENSWARM_HUB_LOCAL_ROUTER=1` 使 bridge 直接使用本机 fleet inventory，
+无需旧 gateway 的 `ssh_host` 配置；交接记录保存路由，后续状态、停止及结果
+bundle 都发往原执行主机。旧 gateway 的交接记录继续使用原路由。部署后
 以 `swrm-fleet fleet status --json` 观察实际 lane 名称和状态；若实际
-lane 数量不是 10，应先修正 fleet/topology 配置，再启用自动派发。
+lane 数量不是 11，应先修正 fleet/topology 配置，再启用自动派发。
+
+已退役主机（2026-11-02 起不再探测、不再派发）：Instabox fleet
+`node-1.example.invalid`–`node-5.example.invalid`，以及
+`worker-b.example.invalid`（其容量由 `gores1` 承接）。这些名字只作为退役
+记录出现，不得写进自动派发配置。
 
 ## 从 box 手动冒烟
 
@@ -139,8 +159,8 @@ Task type: docs
 EOF
 
 swrm-fleet fleet status --json
-swrm-fleet fleet exec node-1.example.invalid -- lane status
-swrm-fleet fleet exec node-1.example.invalid -- lane assign M1 --task-file "$task" \
+swrm-fleet fleet exec gores1 -- lane status
+swrm-fleet fleet exec gores1 -- lane assign M1 --task-file "$task" \
   --title "SSH fleet smoke" --budget-minutes 5
 ```
 
@@ -149,8 +169,8 @@ swrm-fleet fleet exec node-1.example.invalid -- lane assign M1 --task-file "$tas
 示例）：
 
 ```bash
-scp -q -F ~/.ssh/swrm-hub/config "$task" node-1.example.invalid:/tmp/swrm-ssh-smoke.md
-ssh -F ~/.ssh/swrm-hub/config node-1.example.invalid -- \
+scp -q -F ~/.ssh/swrm-hub/config "$task" gores1:/tmp/swrm-ssh-smoke.md
+ssh -F ~/.ssh/swrm-hub/config gores1 -- \
   swrm-fleet lane assign M1 --task-file /tmp/swrm-ssh-smoke.md \
   --title "SSH fleet smoke" --budget-minutes 5
 ```
@@ -158,8 +178,8 @@ ssh -F ~/.ssh/swrm-hub/config node-1.example.invalid -- \
 `lane assign` 返回 run id 后，用同一 host 查询并等待结果：
 
 ```bash
-swrm-fleet fleet exec node-1.example.invalid -- runs --active --json
-swrm-fleet fleet exec node-1.example.invalid -- lane status
+swrm-fleet fleet exec gores1 -- runs --active --json
+swrm-fleet fleet exec gores1 -- lane status
 ```
 
 也可针对当前空闲 lane，把上例中的 `M1` 替换为 `fleet status` 显示的 lane

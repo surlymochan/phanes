@@ -609,6 +609,19 @@ class LaneTests(unittest.TestCase):
         self.assertIn("Selected model is at capacity", result["attempts"][0]["error_tail"])
         self.assertIn("codex/fake-model", json.loads((self.data / "breakers.json").read_text()))
 
+    def test_codex_thread_start_failure_is_exposed_as_run_diagnostic(self):
+        error = ("Failed to create session: failed to load AGENTS.md instructions for environment local: "
+                 "fs sandbox helper failed: bwrap: Can't mkdir /var/lib/gorelay-codex/control: Permission denied")
+        self.env["FAKE_APP_SERVER_THREAD_START_ERROR"] = error
+        self.start_lane()
+        run_id = self.assign("reproduce gorelay codex sandbox initialization failure")
+        state = self.wait_run(run_id)
+        result = json.loads((self.data / "runs" / run_id / "result.json").read_text())
+        self.assertEqual(state["status"], "failed")
+        self.assertEqual(result["error_class"], "exec_error")
+        self.assertIn(error, result["attempts"][0]["error_tail"] or "",
+                      "thread/start failure must be visible in the run's executor diagnostic")
+
     def cursor_log(self):
         path = pathlib.Path(self.env["FAKE_CURSOR_ACP_LOG"])
         if not path.exists():

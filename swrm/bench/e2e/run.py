@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import locale
 import os
 import platform
 import shutil
@@ -70,10 +71,17 @@ def existing_keys(path: Path) -> set[tuple]:
             row = json.loads(line)
         except json.JSONDecodeError:
             continue
-        if row.get("type") not in (None, "run"):
+        if not isinstance(row, dict) or row.get("type") not in (None, "run"):
             continue
-        if "task" in row and "arm" in row and "repeat" in row:
-            keys.add((row["task"], row["arm"], int(row["repeat"])))
+        task, arm, repeat = row.get("task"), row.get("arm"), row.get("repeat")
+        if not isinstance(task, str) or not isinstance(arm, str):
+            continue
+        if type(repeat) not in (int, str):
+            continue
+        try:
+            keys.add((task, arm, int(repeat)))
+        except ValueError:
+            continue
     return keys
 
 
@@ -114,29 +122,31 @@ def copy_repo(src: Path, dest: Path) -> None:
 
 def run_shell(command: str, cwd: Path, timeout: int) -> dict:
     started = time.monotonic()
+    proc = subprocess.Popen(
+        command,
+        cwd=cwd,
+        shell=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        stdin=subprocess.DEVNULL,
+        start_new_session=True,
+    )
     try:
-        proc = subprocess.run(
-            command,
-            cwd=cwd,
-            shell=True,
-            text=True,
-            capture_output=True,
-            timeout=timeout,
-            stdin=subprocess.DEVNULL,
-        )
+        stdout, stderr = proc.communicate(timeout=timeout)
         timed_out = False
         code = proc.returncode
-        stdout = proc.stdout
-        stderr = proc.stderr
-    except subprocess.TimeoutExpired as exc:
+    except subprocess.TimeoutExpired:
         timed_out = True
         code = 124
-        stdout = exc.stdout or ""
-        stderr = exc.stderr or ""
-        if isinstance(stdout, bytes):
-            stdout = stdout.decode("utf-8", "replace")
-        if isinstance(stderr, bytes):
-            stderr = stderr.decode("utf-8", "replace")
+        kill_process_group(proc.pid)
+        stdout, stderr = proc.communicate()
+    if timed_out:
+        stdout = stdout.decode("utf-8", "replace")
+        stderr = stderr.decode("utf-8", "replace")
+    else:
+        encoding = locale.getpreferredencoding(False)
+        stdout = stdout.decode(encoding).replace("\r\n", "\n").replace("\r", "\n")
+        stderr = stderr.decode(encoding).replace("\r\n", "\n").replace("\r", "\n")
     return {
         "command": command,
         "exit_code": code,
@@ -149,15 +159,18 @@ def run_shell(command: str, cwd: Path, timeout: int) -> dict:
 
 
 def diff_against(repo: Path, baseline: str) -> tuple[list[str], str]:
-    names = git_cmd(repo, "diff", "--name-only", baseline)
+    # NUL records avoid Git quoting and preserve whitespace/newlines in names.
+    # Decode using the filesystem codec so non-UTF-8 names also round-trip.
+    files = []
+    seen = set()
+    for args in (("diff", "--name-only", "-z", baseline, "--"),
+                 ("ls-files", "--others", "--exclude-standard", "-z")):
+        result = subprocess.run(["git", *args], cwd=repo, capture_output=True, check=False)
+        for record in result.stdout.split(b"\0"):
+            if record and record not in seen:
+                seen.add(record)
+                files.append(os.fsdecode(record))
     stat = git_cmd(repo, "diff", "--stat", baseline)
-    status = git_cmd(repo, "status", "--porcelain")
-    files = [line for line in (names.stdout or "").splitlines() if line]
-    for line in (status.stdout or "").splitlines():
-        if line.startswith("??"):
-            path = line[3:].strip()
-            if path and path not in files:
-                files.append(path)
     stat_text = stat.stdout or ""
     if len(stat_text) > 8000:
         stat_text = stat_text[:8000] + "\n…\n"

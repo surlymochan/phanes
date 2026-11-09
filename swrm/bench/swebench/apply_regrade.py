@@ -14,6 +14,23 @@ import sys
 GRADE_FIELDS = ("f2p", "p2p", "f2p_failed", "p2p_failed", "error")
 
 
+def identity(record, location="record"):
+    """Validate a complete join key without normalizing distinct identities."""
+    if not isinstance(record, dict):
+        raise ValueError(f"{location}: expected a JSON object with identity fields")
+    values = []
+    for field in ("instance_id", "arm", "rep"):
+        value = record.get(field)
+        if value is None or (isinstance(value, str) and not value.strip()):
+            raise ValueError(f"{location}: missing or empty identity field {field}")
+        try:
+            hash(value)
+        except TypeError as exc:
+            raise ValueError(f"{location}: identity field {field} must be a scalar") from exc
+        values.append(value)
+    return tuple(values)
+
+
 def _read_jsonl(path):
     """Yield JSON objects from a JSON-lines file, skipping blank lines."""
     with open(path, "r", encoding="utf-8") as fh:
@@ -22,13 +39,15 @@ def _read_jsonl(path):
             if not line:
                 continue
             try:
-                yield json.loads(line)
+                record = json.loads(line)
             except json.JSONDecodeError as exc:
                 raise ValueError(
                     "invalid JSON in {} at line {}: {}".format(
                         path, line_number, exc
                     )
                 ) from exc
+            identity(record, f"{path}:{line_number}")
+            yield record
 
 
 def load_runs(path):
@@ -46,7 +65,7 @@ def load_regrades(paths):
         for record in _read_jsonl(path):
             if record.get("harness_error"):
                 continue
-            key = (record.get("instance_id"), record.get("arm"), record.get("rep"))
+            key = identity(record)
             regrades[key] = record
     return regrades
 
@@ -57,7 +76,7 @@ def apply_regrades(runs, regrades):
     changed = []
 
     for run in runs:
-        key = (run.get("instance_id"), run.get("arm"), run.get("rep"))
+        key = identity(run)
         regrade = regrades.get(key)
         if regrade is None:
             output.append(run)
