@@ -108,7 +108,7 @@ The `start-control-plane` suite manages the five core resident loops (五件套:
    - **Status / alert snapshot**: `~/phanes-ctl/autodispatch/health.json`, `health.alert`
 
 6. **`disk-watermark`** (remote lane host disk watermark guard, Refs #1666):
-   - **Startup command**: `~/phanes-ctl/bin/disk-watermark-guard.py --loop --pause-dir ~/phanes-ctl/autodispatch --brain-log /workspace/phanes/brain/log.md --host <host>`
+   - **Startup command**: `~/phanes-ctl/bin/disk-watermark-guard.py --loop --pause-dir ~/phanes-ctl/autodispatch --brain-log /workspace/phanes/brain/log.md --host lane-host-a`
      (installed by `bash tools/install-disk-watermark-guard.sh`)
    - **Heartbeat path**: none; the guard writes its state into `~/phanes-ctl/autodispatch/disk-watermark-<host>.json`
    - **Status / alert snapshot**: `~/phanes-ctl/autodispatch/disk-watermark-<host>.json`, `/workspace/phanes/brain/log.md`
@@ -657,7 +657,7 @@ hold the host, including when they replace the legacy marker during recovery.
 Deploy (on the box, from the repository mirror):
 
 ```bash
-bash tools/install-disk-watermark-guard.sh            # default: $HOME/phanes-ctl
+DISK_WATERMARK_HOST=lane-host-a bash tools/install-disk-watermark-guard.sh  # default: $HOME/phanes-ctl
 ```
 
 The installer stops the resident guard that is still running (an old process would
@@ -700,7 +700,7 @@ Manual one-shots:
 
 ```bash
 python3 ~/phanes-ctl/bin/disk-watermark-guard.py --pause-dir ~/phanes-ctl/autodispatch \
-    --brain-log /workspace/phanes/brain/log.md --host <host>      # measure once and apply the policy
+    --brain-log /workspace/phanes/brain/log.md --host lane-host-a      # measure once and apply the policy
 python3 ~/phanes-ctl/bin/disk-usage-probe.py --path / --top 10   # the usage probe of a host
 ```
 
@@ -840,7 +840,7 @@ health loop is not rewritten by the probe:
 The matching alert line (appended to `health.alert`, one line per alerting service):
 
 ```
-2026-11-03 19:15:00 level=hard source=executor-tasks host=<host>.example.invalid service=openswarm-executor-M19.service zombies=844 tasks=869/1552 ratio=0.56 parents=1210977 snapshot=/home/phanes-ctl/autodispatch/executor-task-snapshots/executor-tasks-gores1.example.invalid-20261103-191500-000000.ps
+2026-11-03 19:15:00 level=hard source=executor-tasks host=lane-host-a service=openswarm-executor-M19.service zombies=844 tasks=869/1552 ratio=0.56 parents=1210977 snapshot=/path/to/state/executor-tasks-snapshot.ps
 ```
 
 Offline proof (a fake fleet host answers the ssh commands of the probe; no network, no
@@ -1128,7 +1128,7 @@ setsid nohup ~/phanes-ctl/bin/bus-worker-loop >/dev/null 2>&1 &
 setsid nohup ~/phanes-ctl/bin/lane-merge >/dev/null 2>&1 &
 setsid nohup ~/phanes-ctl/bin/ctl-loop >/dev/null 2>&1 &
 setsid nohup ~/phanes-ctl/bin/health-loop >/dev/null 2>&1 &
-setsid nohup ~/phanes-ctl/bin/disk-watermark-guard.py --loop --pause-dir ~/phanes-ctl/autodispatch --brain-log /workspace/phanes/brain/log.md --host <host> >/dev/null 2>&1 &
+setsid nohup ~/phanes-ctl/bin/disk-watermark-guard.py --loop --pause-dir ~/phanes-ctl/autodispatch --brain-log /workspace/phanes/brain/log.md --host lane-host-a >/dev/null 2>&1 &
 ~/phanes-ctl/bin/ib-refresh                  # manual certificate refresh preflight
 ```
 
