@@ -2216,9 +2216,7 @@ def tick(lanes, state, last_warn):
             dispatch_failed(L, cfg, pick, e, busy=bool(LANE_BUSY_RE.search(str(e))))
             return "no-capacity"
         q.remove(pick); state[L] = {"issue": pick["n"], "run": run, "host": cfg["host"], "base": commit, "at": time.strftime("%F %T"), "verify": ver, "class": "verify" if pick.get("verify") else "work"}
-<<<<<<< HEAD
         if pick.get("verify"): state[L]["tester_risk"] = pick["tester_risk"]
-=======
         metrics = verify_metrics(state)
         # The snapshot and saved state must reflect the slot just occupied.
         if AD_VERIFY_SHARE_ENABLED: metrics["deficit"] = queue_class_limits(lanes, state, idle)[0]
@@ -2226,7 +2224,6 @@ def tick(lanes, state, last_warn):
         if pick.get("verify"):
             metrics["dispatches"]["verify"] += 1
             record_verify_time(state, pick["n"], "dispatched", time.time())
->>>>>>> 2d6690586c7922c633ca702fab3f67728e9b68fb
         # Stop this lane's gap at its own successful dispatch. Later lanes may take
         # minutes to assign; their work cannot extend an already occupied lane's gap.
         closed = idle_close(state, L, time.time(), last_alive, tick_started_at=now)
