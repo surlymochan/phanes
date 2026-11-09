@@ -8996,15 +8996,6 @@ def lane_do_run(lane, spec, child, server, current):
                            **({"regress_label": spec["regress_label"]} if spec.get("regress_label") else {}),
                            **exec_pass_fields(False, False, bool(spec.get("verify")), None)})
             return status
-<<<<<<< HEAD
-        return lane_finalize_run(lane, spec, ws, None, {}, error_class, 1, evp)
-    finally:
-        if child is not None and child is not resident_child:
-            try:
-                child.close()
-            except Exception:
-                pass
-=======
         return lane_finalize_run(
             lane, spec, ws, None, {}, error_class, 1, evp,
             attempts=[{"backend": lane["backend"], "model": lane["model"],
@@ -9012,7 +9003,12 @@ def lane_do_run(lane, spec, child, server, current):
                        "seconds": round(NOW() - spec.get("started", NOW()), 3),
                        "error_class": error_class, "meta": {"usage": {}},
                        "events": evp, "error_tail": short(e, 500)}])
->>>>>>> 2d6690586c7922c633ca702fab3f67728e9b68fb
+    finally:
+        if child is not None and child is not resident_child:
+            try:
+                child.close()
+            except Exception:
+                pass
 
 
 def agy_quota_available(lane, child):
