@@ -42,6 +42,27 @@ export function prepareWorkflowRerun({
   phaseId,
   atomId = null,
 }) {
+  if (!workflow || typeof workflow !== 'object' || typeof workflow.name !== 'string' || !workflow.name.trim()) {
+    throw new Error('Invalid workflow: workflow name is required');
+  }
+  if (!Array.isArray(phases)) {
+    throw new Error('Invalid workflow phases: phases must be an array');
+  }
+
+  const phaseIds = new Set();
+  for (const [index, phase] of phases.entries()) {
+    if (!phase || typeof phase !== 'object' || typeof phase.id !== 'string' || !phase.id.trim()) {
+      throw new Error(`Invalid workflow phase at index ${index}: phase id is required`);
+    }
+    if (phaseIds.has(phase.id)) {
+      throw new Error(`Invalid workflow phases: duplicate phase id "${phase.id}"`);
+    }
+    phaseIds.add(phase.id);
+    if (phase.atoms !== undefined && !Array.isArray(phase.atoms)) {
+      throw new Error(`Invalid workflow phase "${phase.id}": atoms must be an array`);
+    }
+  }
+
   const targetPhase = phases.find((phase) => phase.id === phaseId);
   if (!targetPhase) {
     throw new Error(`Unknown rerun phase: ${phaseId}`);
