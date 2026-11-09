@@ -26,7 +26,7 @@ class CodexSandboxTests(unittest.TestCase):
     """
 
     def setUp(self):
-        from swrm.tests._load import load
+        from _load import load
         self.swrm = load()
         self.tmp = tempfile.TemporaryDirectory(prefix="codex-gitdir-", dir=tempfile.gettempdir())
         self.addCleanup(self.tmp.cleanup)
@@ -702,7 +702,7 @@ class LaneTests(unittest.TestCase):
                     return {"thread": {"id": "fake-thread"}}
                 return {"turn": {"id": "fake-turn"}}
 
-        from swrm.tests._load import load
+        from _load import load
         swrm = load()
         pathlib.Path(swrm.DATA, "policy.local.json").write_text(json.dumps(
             {"codex": {"network_access": False}}))
