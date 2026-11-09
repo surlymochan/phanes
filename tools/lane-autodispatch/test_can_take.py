@@ -224,7 +224,7 @@ class TickHarness:
                 AUTODISPATCH.dispatch = fake_dispatch
                 AUTODISPATCH.replenish = lambda k, state: []
                 AUTODISPATCH.save_state = lambda state: None
-                AUTODISPATCH.status_snapshot = lambda lanes, state, res, ready, blocked: self.last_status.update(
+                AUTODISPATCH.status_snapshot = lambda lanes, state, res, ready, blocked, records=None: self.last_status.update(
                     {"_ready": ready, "_blocked": blocked}) or self.last_status
                 AUTODISPATCH.VERIFY_REJECT_LOGGED.clear()
                 # tick() writes lanes-status.json without closing it: the warning is pre-existing
