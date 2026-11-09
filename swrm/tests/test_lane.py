@@ -77,7 +77,7 @@ class CodexSandboxTests(unittest.TestCase):
                     if mode == "workspace-write":
                         self.assertEqual(policy["writableRoots"], [
                             self.git(self.worktrees[0], "rev-parse", "--absolute-git-dir"),
-                            str(self.repo / ".git")])
+                            os.path.realpath(self.repo / ".git")])
                     else:
                         self.assertNotIn("writableRoots", policy)
 
