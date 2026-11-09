@@ -28,6 +28,10 @@ def slow_line(ts, status, lane, ms, err=""):
 # 07:31:44 -> 07:49:46 (local, UTC+8), one healthy 200 and one fast 429.
 PAUSE_RECORD = {"from": "2026-11-02T07:31:44", "to": "2026-11-02T07:49:46", "tz": "+08:00"}
 PAUSE_WINDOW = "2026-11-02T07:31:44+08:00→2026-11-02T07:49:46+08:00"
+# Pause stamps that no platform can represent: epoch seconds far outside the
+# datetime range and the non-finite floats.  They must be skipped, not fatal.
+OUT_OF_RANGE_STAMPS = [1e30, -1e30, float("inf"), float("-inf"), float("nan"),
+                       99999999999999]
 SLOW_FRAGMENT = [
     slow_line("2026-11-01T23:49:45Z", 502, "M6", 1091840, "provider unavailable"),
     slow_line("2026-11-01T23:49:47Z", 502, "M7", 1100282, "provider unavailable"),
@@ -209,6 +213,30 @@ class BrokerLogSummaryTests(unittest.TestCase):
         self.assertIsNone(bls.find_pause_overlap(start, end, [utc]))
         self.assertIsNotNone(bls.find_pause_overlap(start, end, [default]))
 
+    def test_out_of_range_pause_stamps_are_skipped(self):
+        for value in OUT_OF_RANGE_STAMPS:
+            self.assertIsNone(bls.parse_pause_dt(value, bls.timezone.utc),
+                              f"stamp {value!r} should be skipped, not fatal")
+
+    def test_parse_pause_record_rejects_out_of_range_stamps(self):
+        self.assertIsNone(bls.parse_pause_record(
+            {"from": 1e30, "to": 1e30, "tz": "+08:00"}))
+        self.assertIsNone(bls.parse_pause_record(
+            {"from": float("nan"), "tz": "+08:00"}))
+        self.assertIsNone(bls.parse_pause_record(
+            {"from": 99999999999999, "to": "2026-11-02T07:49:46", "tz": "+08:00"}))
+
+    def test_pause_lines_keep_the_valid_windows_of_a_mixed_log(self):
+        lines = [
+            json.dumps({"from": 1e30, "to": 1e30 + 1, "tz": "+08:00"}),
+            json.dumps({"from": float("nan"), "to": 1e30, "tz": "+08:00"}),
+            json.dumps({"from": 99999999999999, "tz": "+08:00"}),
+            json.dumps(PAUSE_RECORD),
+        ]
+        pauses = bls.parse_pause_lines(lines)
+        self.assertEqual(len(pauses), 1)
+        self.assertEqual(bls.pause_window_text(pauses[0]), PAUSE_WINDOW)
+
     def test_cli_json_carries_slow_and_pause_overlaps(self):
         with tempfile.TemporaryDirectory() as tmp:
             log = Path(tmp) / "broker3-requests.jsonl"
@@ -223,6 +251,26 @@ class BrokerLogSummaryTests(unittest.TestCase):
         data = json.loads(out.getvalue())
         self.assertEqual(len(data["slow"]), 4)
         self.assertEqual(data["slow"][0]["during_pause"], PAUSE_WINDOW)
+        self.assertEqual(data["pause_overlaps"]["failed"], 3)
+
+    def test_report_skips_out_of_range_pause_stamps(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            log = Path(tmp) / "broker4-requests.jsonl"
+            log.write_text("\n".join(SLOW_FRAGMENT) + "\n", encoding="utf-8")
+            pauses = Path(tmp) / "box-pauses.jsonl"
+            pauses.write_text("\n".join([
+                json.dumps({"from": 1e30, "to": 1e30 + 1, "tz": "+08:00"}),
+                json.dumps(PAUSE_RECORD),
+            ]) + "\n", encoding="utf-8")
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                code = bls.main([str(log), "--json", "--slow", "60000",
+                                 "--pauses", str(pauses)])
+        self.assertEqual(code, 0)
+        data = json.loads(out.getvalue())
+        self.assertEqual(data["pause_overlaps"]["pauses"], 1)
+        self.assertEqual(data["pause_overlaps"]["windows"][0]["from"],
+                         "2026-11-02T07:31:44+08:00")
         self.assertEqual(data["pause_overlaps"]["failed"], 3)
 
     def test_self_test_runs(self):
