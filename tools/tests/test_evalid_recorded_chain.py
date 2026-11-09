@@ -65,6 +65,13 @@ class RecordedChainTests(unittest.TestCase):
     def test_valid_recording(self):
         self.assertEqual(self.verify(self.chain), [])
 
+    def test_recording_must_be_a_mapping(self):
+        self.assertEqual(self.verify([]), ['recording_not_a_mapping'])
+
+    def test_unsupported_recording_version(self):
+        self.chain['version'] = 2
+        self.assert_rejected(self.chain)
+
     def test_missing_spec_check(self):
         self.chain['receipts'] = [r for r in self.chain['receipts']
                                   if r['stage'] != 'spec-check']
@@ -107,6 +114,58 @@ class RecordedChainTests(unittest.TestCase):
         self.chain['receipts'][-1]['controller_status'] = 'REVIEW_PENDING'
         reseal(self.chain)
         self.assert_rejected(self.chain)
+
+    def test_chain_level_base_and_head_drift(self):
+        for field in ('base_commit', 'head_commit'):
+            with self.subTest(field=field):
+                chain = copy.deepcopy(self.chain)
+                chain[field] = 'e' * 40
+                self.assert_rejected(chain)
+
+    def test_tampered_receipt_digest(self):
+        self.chain['receipts'][1]['status'] = 'FAIL'
+        self.assert_rejected(self.chain)
+
+    def test_private_content_is_not_a_receipt_field(self):
+        holdout = next(r for r in self.chain['receipts'] if r['stage'] == 'holdout')
+        holdout['holdout_tests'] = ['assert reserved_value == 739281']
+        reseal(self.chain)
+        self.assert_rejected(self.chain)
+
+    def test_holdout_isolation_must_be_verified(self):
+        holdout = next(r for r in self.chain['receipts'] if r['stage'] == 'holdout')
+        holdout['isolation'] = 'unisolated'
+        reseal(self.chain)
+        self.assert_rejected(self.chain)
+
+    def test_review_blocker_finding(self):
+        review = next(r for r in self.chain['receipts'] if r['stage'] == 'review')
+        review['findings'] = [{'severity': 'BLOCKER', 'reason': 'public requirement unmet'}]
+        reseal(self.chain)
+        self.assert_rejected(self.chain)
+
+    def test_spec_artifact_must_exist(self):
+        spec = next(r for r in self.chain['receipts'] if r['stage'] == 'spec')
+        spec['artifact'] = 'absent.md'
+        reseal(self.chain)
+        self.assert_rejected(self.chain)
+
+    def test_stage_order_mismatch(self):
+        receipts = self.chain['receipts']
+        receipts[2], receipts[3] = receipts[3], receipts[2]
+        reseal(self.chain)
+        self.assert_rejected(self.chain)
+
+    def test_cli_reports_the_violated_bindings(self):
+        with tempfile.TemporaryDirectory(dir=ROOT) as directory:
+            invalid = Path(directory) / 'invalid.json'
+            self.chain['receipts'][-1]['controller_status'] = 'REVIEW_PENDING'
+            reseal(self.chain)
+            invalid.write_text(json.dumps(self.chain), encoding='utf-8')
+            result = subprocess.run([sys.executable, '-m', MODULE, str(invalid)],
+                                    cwd=ROOT, capture_output=True, text=True, timeout=15)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn('delivery_not_verified', result.stdout + result.stderr)
 
     def test_cli_exits_nonzero_for_invalid_recording(self):
         self.assertIsNotNone(importlib.util.find_spec(MODULE),
