@@ -138,7 +138,7 @@ class DispatchPriorityTest(unittest.TestCase):
                         "remote": lambda *a: {"lane": "idle", "run": {"ended_at": self.NOW}},
                         "finish": lambda *a: {"done": True},
                         "audit_switches": lambda: None,
-                        "paused_scopes": lambda: {"mint"},
+                        "paused_scopes": lambda **k: {"mint"},
                         "log": lambda message, brain=True: logs.append(message),
                     }
                     for name, value in replacements.items():
@@ -246,7 +246,7 @@ class DispatchPriorityTest(unittest.TestCase):
                         "sh": lambda *a, **k: (0, "a" * 40, ""),
                         "remote": lambda *a: {"lane": "idle" if index == 2 else "busy"},
                         "audit_switches": lambda: None,
-                        "paused_scopes": lambda: {"mint"},
+                        "paused_scopes": lambda **k: {"mint"},
                         "log": lambda *a, **k: None,
                     }
                     for name, value in replacements.items():
