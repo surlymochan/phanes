@@ -245,6 +245,16 @@ class ConsultTests(unittest.TestCase):
         self.assertLess(elapsed, 3.0)
         self.assertTrue(all(row["valid"] for row in result["answers"]))
 
+    def test_total_concurrency_cap_does_not_depend_on_executor_clocks(self):
+        # Executors can report identical/coarse timestamps despite serial admission.
+        with open(self.script, encoding="utf-8") as stream:
+            script = stream.read()
+        clock = 'time.clock_gettime(time.CLOCK_MONOTONIC) if hasattr(time, "clock_gettime") else time.time()'
+        self.assertIn(clock, script)
+        with open(self.script, "w", encoding="utf-8") as stream:
+            stream.write(script.replace(clock, "0.0"))
+        self.test_total_concurrency_cap_serializes_admission()
+
     def test_total_concurrency_cap_serializes_admission(self):
         os.environ["FAKE_CONSULT_SLEEP_SECONDS"] = "0.6"
         self.policy["concurrency"]["total"] = 1
