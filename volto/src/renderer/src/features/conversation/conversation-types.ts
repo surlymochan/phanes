@@ -1,3 +1,4 @@
+import type { JSX } from "@solidjs/web";
 import type {
   AccountUsage,
   AgentApproval,
@@ -39,7 +40,6 @@ import type { ChatMessageAuthor } from "@volto/ui/features/conversation/ChatMess
 import type { UnloadedHistory } from "@volto/ui/features/conversation/ChatScrollRail";
 import type { ThreadHeaderProps } from "@volto/ui/features/conversation/threads/thread-types";
 import type { SidebarAgentWait } from "@volto/ui/features/sidebar/sidebar-agent-states";
-import type { JSX } from "@solidjs/web";
 import type { ConnectorRegistry } from "../connectors/connector-registry";
 import type { ConversationRuntime } from "./conversation-runtime";
 import type { TurnStepLines } from "./turn-step-lines";
@@ -407,6 +407,8 @@ export interface ConversationThreads {
   header: ThreadHeaderProps;
   /** The open side thread, or null for a new thread. Undefined while the agent's own chat is open. */
   open: AgentTask | null | undefined;
+  /** Every goal of the agent: the open ones first, then the newest closed ones. */
+  goals: readonly AgentTask[];
   /** How many side threads of the agent can run at the same time. */
   limit: number;
   /** The side threads that run a turn now. */

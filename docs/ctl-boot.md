@@ -603,6 +603,179 @@ never read, written or removed):
 python3 tools/check-health-hosts-ok-pause.py
 ```
 
+### Executor task / zombie watermark probe (Refs #1826)
+
+The executor services of a lane leak: their cgroup fills up with zombie children until
+`TasksMax` is hit and `fork` fails (`exec_error` storm, 13 h unnoticed).  Neither the
+disk/mem/ssh probes of `health-loop` nor the lane reaper carries a task or zombie
+counter.
+
+The repo mirror of that probe is `tools/executor-task-health.py`.  It samples one fleet
+host over ssh, enumerates every `openswarm-executor-*.service` of the host, reads
+`TasksCurrent` / `TasksMax` of the unit and the pids of its cgroup, counts the `Z` state
+processes of that cgroup and its descendants (and their parent pids), writes the result
+into `health.json` and raises the watermark alert. **It only alerts**: it never restarts,
+stops or kills a service (the restart of a leaking lane is a decision of the coordinator).
+
+```bash
+python3 tools/executor-task-health.py <host> \
+  --health-json ~/phanes-ctl/autodispatch/health.json \
+  --alert-file ~/phanes-ctl/autodispatch/health.alert \
+  --snapshot-dir ~/phanes-ctl/autodispatch/executor-task-snapshots
+```
+
+The box runtime (`~/phanes-ctl/bin/health-check.py`) lives outside this repository; wiring
+the probe into that loop is a deployment step, not part of this card.
+
+`health.json` updates use an exclusive `flock` on the stable sidecar
+`health.json.lock`, held from **before reading** the current summary until the merged
+JSON has been atomically replaced. All writers, including the external health-check
+loop, must use that same sidecar and reread the summary under the lock; advisory
+locking cannot protect against a writer that ignores it. Do not lock the JSON inode
+itself or delete the sidecar, since replacement would let writers lock different
+inodes. A malformed or unreadable existing summary fails the probe write instead of
+being overwritten with an empty summary. Temporary JSON files are created beside the
+target, flushed and replaced atomically, and removed if writing fails.
+Replacement preserves the existing JSON file's permission bits; a newly created
+summary keeps the temporary file's default `0600` permissions.
+
+| watermark | level | condition |
+|---|---|---|
+| zombie count | `soft` | `Z > 50` |
+| zombie count | `hard` | `Z > 200` |
+| task ratio | `soft` | `TasksCurrent / TasksMax > 0.6` |
+| task ratio | `hard` | `TasksCurrent / TasksMax > 0.85` |
+
+Rules of the probe:
+
+- a host without systemd (the macOS box `gocc`) is **skipped** - not degraded, and it is
+  not sampled at all;
+- a failed sample (ssh error, missing `systemctl show`) is recorded as **not collected**
+  (`"level": "uncollected"`) and never alerts;
+- a failed bulk `/proc` cgroup mapping marks the host and every enumerated service
+  **not collected**, without alerts, because descendant cgroup zombies cannot be
+  counted reliably without that mapping. A failed or empty `/proc/<pid>/cgroup` read
+  is skipped only if `/proc/<pid>` has disappeared (the process exited during the
+  sample); otherwise it aborts the remote command. PID-only or malformed mapping
+  records also fail sampling;
+- when an alert fires, the full `ps -eo pid,ppid,stat,etimes,args` table is written to the
+  snapshot directory **before** the alert is appended to `health.alert`; if the snapshot
+  cannot be saved, no alert is written (no evidence, no alert);
+- the duplicate `fleet-capacity --sweep-loop` processes are grouped by their full command
+  line: more than two instances of the same command alert with that command, its parent
+  processes and the run id of the parent. `sweep_loop.count` summarizes all sweep
+  processes; thresholds apply separately to each entry in `sweep_loop.groups`. They are
+  never killed.
+
+The probe adds one field to `health.json`; the summary of the control plane (`at`,
+`hosts`, `hosts_ok`, `hosts_degraded`) stays untouched - the host status string of the
+health loop is not rewritten by the probe:
+
+```json
+{
+  "at": "2026-11-03 19:15:00",
+  "hosts": {"gores1.example.invalid": "degraded"},
+  "hosts_ok": ["m9.example.invalid"],
+  "hosts_degraded": ["gores1.example.invalid"],
+  "executor_tasks": {
+    "gores1.example.invalid": {
+      "status": "collected",
+      "host": "gores1.example.invalid",
+      "at": "2026-11-03 19:15:00",
+      "services": [
+        {
+          "service": "openswarm-executor-M19.service",
+          "collected": true,
+          "level": "hard",
+          "tasks_current": 869,
+          "tasks_max": 1552,
+          "tasks_ratio": 0.56,
+          "zombie_count": 844,
+          "zombie_parent_pids": [1210977],
+          "control_group": "/system.slice/openswarm-executor-M19.service"
+        }
+      ],
+      "sweep_loop": {
+        "count": 3,
+        "limit": 2,
+        "pids": [627900, 627901, 627902],
+        "parent_pids": [627802],
+        "run_ids": ["20261103-214705-b66c3f"],
+        "groups": [
+          {
+            "command": "/usr/bin/fleet-capacity --sweep-loop gocc",
+            "count": 3,
+            "limit": 2,
+            "pids": [627900, 627901, 627902],
+            "parent_pids": [627802],
+            "run_ids": ["20261103-214705-b66c3f"]
+          }
+        ]
+      }
+    }
+  }
+}
+```
+
+The matching alert line (appended to `health.alert`, one line per alerting service):
+
+```
+2026-11-03 19:15:00 level=hard source=executor-tasks host=gores1.example.invalid service=openswarm-executor-M19.service zombies=844 tasks=869/1552 ratio=0.56 parents=1210977 snapshot=/home/phanes-ctl/autodispatch/executor-task-snapshots/executor-tasks-gores1.example.invalid-20261103-191500-000000.ps
+```
+
+Offline proof (a fake fleet host answers the ssh commands of the probe; no network, no
+ssh, no systemd, no root):
+
+```bash
+python3 -m pytest -q tools/tests/test_executor_task_health.py
+```
+
+Review mapping (the open findings of the pull request of the issue):
+
+| finding | change | test |
+|---|---|---|
+| B1 - no service enumeration / collection / `health.json` write / no-systemd skip | `collect()` enumerates the units over ssh, samples `systemctl show` + `cgroup.procs` + `ps`, `write_health_payload()` adds `executor_tasks` to `health.json` without touching the summary, a host without systemd returns `skipped` | `ExecutorServiceCollectionTests` (4 tests), `ExecutorProbePresenceTests` |
+| B2 - no snapshot/alert chain, the tests only covered the parser | `update()` saves the `ps` snapshot before it appends the alert, `build_alerts()` names the service, the level and the zombie parent pids; a failed sample never alerts | `ExecutorAlertChainTests` (6 tests), `ExecutorWatermarkThresholdTests` (7 tests) |
+| B3 - the zombie count of `cgroup.procs` misses the not yet reaped zombies | the zombie count comes from the `ps` table; a zombie belongs to the unit cgroup when the cgroup lists it, when its parent lives in that cgroup, or when the bulk `/proc` cgroup dump says so | `ExecutorWatermarkThresholdTests.test_the_zombie_parent_pids_are_reported`, `...test_more_than_fifty_zombies_is_soft` |
+| B4 - the chain tests were not in the CI discovery path | the tests live in `tools/tests/` (`unittest discover -s tools/tests` picks them up) and every test class sits above `unittest.main()`, so a direct run finds them too | `python3 -m unittest discover -s tools/tests -p 'test_*.py'` |
+| card - the duplicate sweep loops of #1826 | `detect_sweep()` groups the `fleet-capacity --sweep-loop` processes by full command line and reports their parents and the run id of the parent | `ExecutorSweepLoopTests` (2 tests) |
+
+Implementation review follow-up (baseline `e05a8f2ee`):
+
+| blocker | fix | regression in `ExecutorReviewRegressionTests` |
+|---|---|---|
+| 1 - SSH strips remote shell quotes, losing bulk cgroup attribution | pass the complete remote command as one SSH argument, preserving shell quotes | `test_ssh_preserves_shell_quotes_for_the_bulk_cgroup_map` executes the command through a real shell with fixture `/proc` files, then verifies 51 zombies outside `cgroup.procs` trigger `soft` with the parent PID |
+| 2 - failed `cgroup.procs` read looks like a healthy empty cgroup | return `uncollected` on read failure or missing `ControlGroup`, without a service alert | `test_failed_cgroup_read_is_uncollected_and_never_alerts`, `test_missing_control_group_is_uncollected` |
+| 3 - concurrent health writers lose summary updates | lock before reading, merge the latest summary, atomically replace it under the same lock | `test_health_update_waits_for_writer_and_reads_its_latest_summary` uses a separate probe process; `test_failed_atomic_replace_preserves_the_existing_summary` and `test_invalid_health_json_is_preserved_instead_of_overwritten` verify failure safety |
+
+Second implementation review (baseline `42425ead7`), regressions in `ExecutorReviewRegressionTests`:
+
+| blocker | fix | regression |
+|---|---|---|
+| 1 - zombies in descendant cgroups are missed when the root PID list is empty | match the service cgroup itself or descendants separated by `/`, excluding similarly prefixed sibling paths | `test_nested_cgroup_zombies_alert_without_root_cgroup_pids` verifies 51 zombies, parent PID, snapshot and soft alert; `test_similarly_prefixed_cgroup_is_not_part_of_the_service` excludes unrelated paths |
+| 2 - different sweep commands combine into a false alert | group by the full command line and apply the threshold to each group, with only its own parent PIDs and run IDs in its alert | `test_different_sweep_commands_do_not_combine_into_an_alert`, `test_only_duplicate_sweep_commands_alert_with_their_own_parents` |
+
+Third implementation review (baseline `a22027eaa`), regressions in `ExecutorReviewRegressionTests`:
+
+| finding | fix | regression |
+|---|---|---|
+| B1 - failed bulk cgroup mapping silently becomes an empty mapping | record the host and every enumerated service as `uncollected`, persist the error in `health.json`, and suppress alerts for the failed sample | `test_failed_cgroup_map_marks_each_service_uncollected_without_alerting` covers an empty root cgroup, 51 zombies, a second service above the hard task threshold, and duplicate sweep loops |
+| B2 - systemd's failed-unit marker hides executor services | accept the optional leading `●` in `list-units` output and sample the unit normally | `test_failed_unit_marker_is_parsed_and_the_service_is_sampled` covers marked and unmarked executor services and verifies the marked service's zombie alert |
+| follow-up - atomic replacement changes existing summary permissions to `0600` | copy the existing permission bits to the temporary file before replacement | `test_health_atomic_replace_preserves_existing_permissions` covers `0644`, `0640`, and `0600` |
+
+Fourth implementation review (baseline `1c890c4e4`), regressions in `ExecutorReviewRegressionTests`:
+
+| blocker | fix | regression |
+|---|---|---|
+| B1 - `printf` masks failed bulk cgroup reads and parsing ignores incomplete records | exit nonzero immediately on a failed read and reject PID-only or malformed records, using the existing host/service `uncollected` path | `test_bulk_cgroup_command_propagates_a_read_failure` executes the remote command in a real shell with a missing middle file; `test_incomplete_cgroup_map_is_uncollected_instead_of_zero_zombies` verifies 51 zombies with an empty root PID list, persisted failure for every service, and no alerts or snapshots |
+
+Fifth implementation review (baseline `32cf3ae6d`), regression in `ExecutorReviewRegressionTests`:
+
+| blocker | fix | regression |
+|---|---|---|
+| B1 - normal process exits abort the bulk cgroup sample and suppress all host alerts | skip failed or empty reads only after confirming that the process directory disappeared; continue to fail sampling for unreadable surviving processes or malformed records | `test_bulk_cgroup_command_skips_exited_processes_and_keeps_alerts` forces an exit during the actual shell command, covering both failed and empty reads, then verifies 51 descendant zombies, their parent PID, soft and hard service alerts, persisted health payload and the full ps snapshot; existing read-failure and incomplete-record regressions remain in place |
+
+
 ## ctl-loop child reaping and restart (Refs #951)
 
 `~/phanes-ctl/bin/ctl-loop` is the supervisor for the resident `ad` (`lane-autodispatch`),

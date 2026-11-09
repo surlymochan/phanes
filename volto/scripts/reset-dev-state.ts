@@ -24,6 +24,9 @@ const USAGE = [
 ].join("\n");
 
 export function developmentStatePaths(appDataRoot: string): string[] {
+  if (!appDataRoot.trim()) {
+    throw new Error("The application data root cannot be empty.");
+  }
   const safeRoot = resolve(appDataRoot);
   if (safeRoot === parse(safeRoot).root) {
     throw new Error("The application data root cannot be a filesystem root.");
