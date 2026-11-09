@@ -27,6 +27,11 @@ from typing import Any
 
 
 STAGES = ("spec", "spec-check", "red", "green", "holdout", "review", "delivery")
+ATTEMPT_HISTORY_LIMIT = 8
+PUBLIC_TERMINALS = {"PASS", "FAIL", "NEEDS-BOSS", "IN_PROGRESS", "REJECTED"}
+PUBLIC_REJECTION_REASONS = {"SPEC_REJECTED", "SPEC_CHECK_REJECTED", "RED_REJECTED",
+                            "GREEN_REJECTED", "HOLDOUT_REJECTED", "REVIEW_REJECTED",
+                            "CONTROLLER_REJECTED"}
 MAX_SPEC_REVISIONS = 2
 CHANGE_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]*$")
 OID = re.compile(r"^[0-9a-f]{40,64}$")
@@ -170,7 +175,7 @@ class RoleController:
             existing = [json.loads(raw) for raw in stream if raw.strip()]
             key = self._key(event)
             attempts = [item for item in existing if (item["change_id"], item["attempt"]) ==
-                        (event["change_id"], event["attempt"])]
+                        (event["change_id"], event["attempt"]) and item["stage"] != "rejection"]
             if event["stage"] == "spec-check":
                 specs = [item for item in attempts if item["stage"] == "spec"]
                 if (not specs or event["data"].get("parent_spec_digest") !=
@@ -187,7 +192,7 @@ class RoleController:
                 if attempts:
                     fcntl.flock(stream.fileno(), fcntl.LOCK_UN)
                     raise Rejected("intake_frozen")
-            else:
+            elif event["stage"] != "rejection":
                 expected = self._expected_stage(attempts)
                 if expected == "needs-boss":
                     fcntl.flock(stream.fileno(), fcntl.LOCK_UN)
@@ -282,6 +287,8 @@ class RoleController:
 
     def _reduce(self, event: dict[str, Any]) -> None:
         self._event_keys[self._key(event)] = event
+        if event["stage"] == "rejection":
+            return
         key = (event["change_id"], event["attempt"])
         state = self._changes.setdefault(key, {"change_id": key[0], "attempt": key[1],
             "status": "INTAKE_PENDING", "next": "intake", "receipts": {}, "intake": None,
@@ -368,6 +375,20 @@ class RoleController:
 
     def accept(self, change_id: str, stage: str, evidence: dict[str, Any], *, attempt: int = 0,
                input_digest: str | None = None) -> dict[str, Any]:
+        run_context: dict[str, Any] = {}
+        try:
+            return self._accept(change_id, stage, evidence, attempt=attempt, input_digest=input_digest,
+                                run_context=run_context)
+        except Rejected as error:
+            state = self.state(change_id, attempt)
+            outcomes = {"spec_not_accepted", "spec_check_failed", "red_not_assertion", "green_not_replayed",
+                        "evidence_replay_failed"}
+            if state and state["next"] == stage and str(error) in outcomes:
+                self._record_rejection(change_id, attempt, stage, run_id=run_context.get("run_id"))
+            raise
+
+    def _accept(self, change_id: str, stage: str, evidence: dict[str, Any], *, attempt: int = 0,
+                input_digest: str | None = None, run_context: dict[str, Any] | None = None) -> dict[str, Any]:
         self._refresh()
         if stage not in STAGES or stage in ("holdout", "delivery"):
             raise Rejected("invalid_stage")
@@ -417,6 +438,8 @@ class RoleController:
                 raise Rejected("missing_run_id")
             if run.get("status") != "done":
                 raise Rejected("run_not_complete")
+            if run_context is not None:
+                run_context["run_id"] = run.get("run_id")
             evidence = dict(evidence, run_id=run["run_id"], model=run.get("model"))
         spec_version = None
         if stage == "spec":
@@ -665,6 +688,15 @@ class RoleController:
 
     def deliver(self, change_id: str, review: dict[str, Any], *, attempt: int = 0,
                 commits: list[str] | None = None) -> dict[str, Any]:
+        try:
+            return self._deliver(change_id, review, attempt=attempt, commits=commits)
+        except Rejected as error:
+            if str(error) == "review_run_rejected":
+                self._record_rejection(change_id, attempt, "review")
+            raise
+
+    def _deliver(self, change_id: str, review: dict[str, Any], *, attempt: int = 0,
+                 commits: list[str] | None = None) -> dict[str, Any]:
         self._refresh()
         state = self.state(change_id, attempt)
         if not state or state["next"] != "delivery":
@@ -693,15 +725,119 @@ class RoleController:
         if holdout.get("status") == "NOT_APPLICABLE" and state["intake"].get("holdout_required"):
             raise Rejected("holdout_not_frozen")
         if self._review_run is not None:
-            verdict = self._review_run.review({"review": review, "intake": state["intake"],
-                "spec": state["receipts"]["spec"], "green": green, "holdout": state["receipts"]["holdout"],
-                "base_commit": base, "head_commit": head, "commits": chain})
+            verdict = self._review_run.review(self._review_context(change_id, review, attempt=attempt))
             if verdict != "PASS":
                 raise Rejected("review_run_rejected")
         data = dict(review, commits=chain, controller_status="VERIFIED")
         data["evidence_digest"] = digest(review)
         result = self._record(change_id, attempt, "delivery", data)
         return self._public(result, change_id=change_id, attempt=attempt)
+
+    def _record_rejection(self, change_id: str, attempt: int, stage: str, *, run_id: Any = None) -> None:
+        reason = stage.upper().replace("-", "_") + "_REJECTED"
+        data = {"stage": stage, "reason": reason}
+        if run_id is not None:
+            data["run_id"] = run_id
+        self._record(change_id, attempt, "rejection", data,
+                     dedupe_digest=digest({"stage": stage, "reason": reason, "sequence": len(self._events)}))
+
+    def _review_context(self, change_id: str, review: dict[str, Any], *, attempt: int = 0) -> dict[str, Any]:
+        """Return the fixed public inputs supplied to the semantic reviewer."""
+        state = self.state(change_id, attempt)
+        if not state:
+            raise Rejected("controller_order")
+        base = state["intake"]["base_commit"]
+        head = state["receipts"]["green"]["head_commit"]
+        chain = git(self.project, "rev-list", "--reverse", f"{base}..{head}").splitlines()
+        history = self._attempt_history(change_id)
+        self._validate_attempt_history(change_id, history)
+        return {"review": review, "intake": state["intake"],
+                "spec": state["receipts"]["spec"], "green": state["receipts"]["green"],
+                "holdout": state["receipts"]["holdout"], "base_commit": base,
+                "head_commit": head, "commits": chain, "attempt_history": history}
+
+    def _attempt_history(self, change_id: str) -> list[dict[str, Any]]:
+        """Summarize recorded attempts using only bounded public enums and digests."""
+        attempts: dict[int, dict[str, Any]] = {}
+        for event in self._events:
+            if event.get("change_id") != change_id:
+                continue
+            attempt = event.get("attempt")
+            stage = event.get("stage")
+            if type(attempt) is not int or attempt < 0 or stage not in ("intake", *STAGES, "rejection"):
+                continue
+            item = attempts.setdefault(attempt, {"attempt": attempt, "stages": [], "run_ids": [],
+                "terminal": "IN_PROGRESS", "parent_attempt": attempt - 1 if attempt else None,
+                "rejection_reason": None})
+            if stage not in ("delivery", "rejection") and stage not in item["stages"]:
+                item["stages"].append(stage)
+            data = event.get("data", {})
+            if stage == "rejection" and isinstance(data, dict):
+                rejected_stage = data.get("stage")
+                if rejected_stage in ("intake", *STAGES[:-1]) and rejected_stage not in item["stages"]:
+                    item["stages"].append(rejected_stage)
+                run_id = data.get("run_id")
+                if isinstance(run_id, str):
+                    item["run_ids"].append(run_id)
+                reason = data.get("reason")
+                if reason in PUBLIC_REJECTION_REASONS:
+                    item["terminal"] = "REJECTED"
+                    item["rejection_reason"] = reason
+                continue
+            if stage == "delivery":
+                item["terminal"] = "PASS"
+            if stage != "delivery" and isinstance(data, dict):
+                # Preserve a prior public rejection enum after a successful retry.
+                if item["rejection_reason"] == stage.upper().replace("-", "_") + "_REJECTED":
+                    item["terminal"] = "IN_PROGRESS"
+                run_id = data.get("run_id")
+                if isinstance(run_id, str):
+                    item["run_ids"].append(run_id)
+                if stage == "review":
+                    verdict = data.get("verdict")
+                    if verdict in ("PASS", "FAIL", "NEEDS-BOSS") and item["rejection_reason"] != "HOLDOUT_REJECTED":
+                        item["terminal"] = verdict
+                        if verdict != "PASS":
+                            item["rejection_reason"] = "REVIEW_REJECTED"
+                elif stage == "holdout" and (
+                        (data.get("required") is True and data.get("status") != "PASS") or
+                        (data.get("status") == "PASS" and data.get("isolation") != "verified")):
+                    item["terminal"] = "FAIL"
+                    item["rejection_reason"] = "HOLDOUT_REJECTED"
+
+        if len(attempts) > ATTEMPT_HISTORY_LIMIT:
+            raise Rejected("attempt_history_limit")
+        history = []
+        for attempt in sorted(attempts):
+            item = attempts[attempt]
+            item["stages"] = [stage for stage in ("intake", *STAGES[:-1]) if stage in item["stages"]]
+            item["run_id"] = digest(item.pop("run_ids"))
+            history.append(item)
+        return history
+
+    def _validate_attempt_history(self, change_id: str, history: Any) -> None:
+        """Reject malformed or disconnected public attempt summaries."""
+        if not isinstance(history, list) or len(history) > ATTEMPT_HISTORY_LIMIT:
+            raise Rejected("attempt_history_chain")
+        expected_fields = {"attempt", "stages", "run_id", "terminal", "parent_attempt", "rejection_reason"}
+        previous = None
+        for index, item in enumerate(history):
+            if not isinstance(item, dict) or set(item) != expected_fields:
+                raise Rejected("attempt_history_chain")
+            attempt = item.get("attempt")
+            parent = item.get("parent_attempt")
+            if (type(attempt) is not int or attempt != index or
+                    parent != (None if index == 0 else index - 1) or
+                    (previous is not None and attempt != previous + 1)):
+                raise Rejected("attempt_history_chain")
+            stages = item.get("stages")
+            if (not isinstance(stages, list) or any(stage not in ("intake", *STAGES[:-1]) for stage in stages) or
+                    stages != [stage for stage in ("intake", *STAGES[:-1]) if stage in stages] or
+                    item.get("terminal") not in PUBLIC_TERMINALS or
+                    item.get("rejection_reason") not in (None, *PUBLIC_REJECTION_REASONS) or
+                    not isinstance(item.get("run_id"), str) or not DIGEST.fullmatch(item["run_id"])):
+                raise Rejected("attempt_history_chain")
+            previous = attempt
 
     def _holdout_context(self, state: dict[str, Any]) -> dict[str, Any]:
         return {"change_id": state["change_id"], "attempt": state["attempt"],
