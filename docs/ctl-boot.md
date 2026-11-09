@@ -674,7 +674,7 @@ summary keeps the temporary file's default `0600` permissions.
 
 Rules of the probe:
 
-- a host without systemd (the macOS box `gocc`) is **skipped** - not degraded, and it is
+- a host without systemd (the macOS box `<host>`) is **skipped** - not degraded, and it is
   not sampled at all;
 - a failed sample (ssh error, missing `systemctl show`) is recorded as **not collected**
   (`"level": "uncollected"`) and never alerts;
@@ -700,13 +700,13 @@ health loop is not rewritten by the probe:
 ```json
 {
   "at": "2026-11-03 19:15:00",
-  "hosts": {"gores1.example.invalid": "degraded"},
+  "hosts": {"<host>.example.invalid": "degraded"},
   "hosts_ok": ["m9.example.invalid"],
-  "hosts_degraded": ["gores1.example.invalid"],
+  "hosts_degraded": ["<host>.example.invalid"],
   "executor_tasks": {
-    "gores1.example.invalid": {
+    "<host>.example.invalid": {
       "status": "collected",
-      "host": "gores1.example.invalid",
+      "host": "<host>.example.invalid",
       "at": "2026-11-03 19:15:00",
       "services": [
         {
@@ -729,7 +729,7 @@ health loop is not rewritten by the probe:
         "run_ids": ["20261103-214705-b66c3f"],
         "groups": [
           {
-            "command": "/usr/bin/fleet-capacity --sweep-loop gocc",
+            "command": "/usr/bin/fleet-capacity --sweep-loop <host>",
             "count": 3,
             "limit": 2,
             "pids": [627900, 627901, 627902],
@@ -746,7 +746,7 @@ health loop is not rewritten by the probe:
 The matching alert line (appended to `health.alert`, one line per alerting service):
 
 ```
-2026-11-03 19:15:00 level=hard source=executor-tasks host=gores1.example.invalid service=openswarm-executor-M19.service zombies=844 tasks=869/1552 ratio=0.56 parents=1210977 snapshot=/home/phanes-ctl/autodispatch/executor-task-snapshots/executor-tasks-gores1.example.invalid-20261103-191500-000000.ps
+2026-11-03 19:15:00 level=hard source=executor-tasks host=<host>.example.invalid service=openswarm-executor-M19.service zombies=844 tasks=869/1552 ratio=0.56 parents=1210977 snapshot=/home/phanes-ctl/autodispatch/executor-task-snapshots/executor-tasks-gores1.example.invalid-20261103-191500-000000.ps
 ```
 
 Offline proof (a fake fleet host answers the ssh commands of the probe; no network, no
