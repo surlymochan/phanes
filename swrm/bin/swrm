@@ -427,6 +427,11 @@ AGY_DEFAULT_MODEL = "gemini-3.8-flash-medium"
 BACKEND_ALIASES = {"gemini": "agy"}
 AGY_LOGIN_TIMEOUT = 5
 _AGY_LOGIN_CACHE = {}
+# Providers that publish an account balance endpoint for the Pi backend, and the environment
+# variable that holds their key. Providers without an entry keep an unknown quota.
+PI_BALANCE_ENDPOINTS = {
+    "deepseek": ("https://api.deepseek.com/user/balance", "DEEPSEEK_API_KEY"),
+}
 
 
 # ---------------------------------------------------------------- utils
@@ -3550,10 +3555,64 @@ def pi_bin():
     return None
 
 
+def pi_quota_from_balance(payload):
+    """Summarize a provider balance payload into the Pi quota.
+
+    The provider lists one balance per currency, so the account holds funds when any of them
+    is funded; reading the first entry alone reports an empty balance for a funded account.
+    """
+    balances = []
+    for entry in payload.get("balance_infos") or []:
+        try:
+            amount = float(entry.get("total_balance") or 0)
+        except (TypeError, ValueError):
+            continue
+        balances.append({"currency": entry.get("currency"), "balance": amount})
+    funded = next((b for b in balances if b["balance"] > 0), balances[0] if balances else None)
+    return {"balance": funded["balance"] if funded else 0.0,
+            "currency": funded["currency"] if funded else None,
+            "available": payload.get("is_available"),
+            "balances": balances}
+
+
+def pi_quota_exhausted(quota):
+    """Whether the provider account is spent: the provider says so, or no currency holds funds."""
+    if quota.get("available") is False:
+        return True
+    balances = quota.get("balances")
+    if balances:
+        funded = False
+        for entry in balances:
+            try:
+                funded = funded or float(entry.get("balance") or 0) > 0
+            except (TypeError, ValueError):
+                continue
+        return not funded
+    balance = quota.get("balance")
+    return balance is not None and balance <= 0
+
+
 def probe_pi(policy):
+    """Pi is an opt-in executor. Its quota is unknown unless the provider publishes a balance
+    endpoint (DeepSeek does), so routing can tell an exhausted Pi provider from a healthy one."""
     cfg = policy.get("pi") or {}
-    return {"binary": pi_bin(), "provider": cfg.get("provider"), "default_model": cfg.get("default_model"),
-            "quota": None}
+    res = {"binary": pi_bin(), "provider": cfg.get("provider"), "default_model": cfg.get("default_model"),
+           "quota": None}
+    endpoint = PI_BALANCE_ENDPOINTS.get(str(cfg.get("provider") or ""))
+    if not endpoint:
+        return res
+    url, env_name = endpoint
+    key = os.environ.get(env_name)
+    if not key:
+        res["quota_error"] = f"no {env_name} in the environment"
+        return res
+    try:
+        hdr = {"Authorization": f"Bearer {key}", "Accept": "application/json"}
+        d = json.load(urllib.request.urlopen(urllib.request.Request(url, headers=hdr), timeout=15))
+        res["quota"] = pi_quota_from_balance(d)
+    except Exception as e:  # noqa: BLE001
+        res["quota_error"] = str(e)[:200]
+    return res
 
 
 def plan_pi(prof, st, policy, forced, notes):
@@ -3563,6 +3622,9 @@ def plan_pi(prof, st, policy, forced, notes):
         known.get("binary") if known is not None and "binary" in known else pi_bin())
     if not binary:
         return None, "no working pi binary"
+    quota = (known or {}).get("quota") or {}
+    if quota and pi_quota_exhausted(quota):
+        return None, "pi provider balance exhausted"
     if cfg.get("require_isolation", sys.platform != "darwin"):
         expected = os.path.join(os.path.dirname(os.path.realpath(__file__)), "pi-isolated")
         if os.path.realpath(binary) != os.path.realpath(expected):
@@ -3574,7 +3636,8 @@ def plan_pi(prof, st, policy, forced, notes):
             return None, "isolated Pi provider or model does not match the broker"
     if f"pi/{model or 'default'}" in breakers() or "pi/all" in breakers():
         return None, "pi breaker open"
-    notes.append("pi quota unknown (opt-in backend; not metered by swrm)")
+    notes.append(f"pi provider balance {quota.get('balance')} {quota.get('currency') or ''}".strip()
+                 if quota else "pi quota unknown (opt-in backend; not metered by swrm)")
     tier = policy["difficulty_map"][str(prof["difficulty"])]["tier"]
     return {"backend": "pi", "model": model, "effort": None, "tier": tier}, None
 
@@ -3651,9 +3714,27 @@ def concurrency(st, policy):
     return {"codex": 1, "ocgo": 1}
 
 
+def planner_decision(prof, policy):
+    """Whether the task still needs a planner turn before the executor runs.
+
+    The route resolves one task to one executor (the fallbacks are only spill options for a
+    failed attempt), so a small task goes straight to the executor instead of paying for a
+    separate planner turn first (optimization backlog #4, P1-3).
+    """
+    limit = (policy.get("routing") or {}).get("planner_skip_max_difficulty", 2)
+    difficulty = prof.get("difficulty")
+    if isinstance(difficulty, int) and not isinstance(difficulty, bool) and difficulty <= limit:
+        return "skipped"
+    return "used"
+
+
 def route(prof, st, policy, exclude=()):
     r = policy["routing"]
     default_order = list(r["default_order"])
+    # Unknown and omitted task types use the ordinary implementation route.
+    # Keep the caller's profile untouched while giving the planner a stable
+    # type for the special review and low-difficulty routing checks below.
+    route_prof = {**prof, "type": prof.get("type") or "impl"}
 
     def prioritize(preferred):
         return [backend for backend in preferred if backend in default_order] + [
@@ -3685,6 +3766,10 @@ def route(prof, st, policy, exclude=()):
         order = [b for b in order if b not in exclude]
         skipped = {}
         for b in order:
+            backend_state = st.get(b) or {}
+            if backend_state.get("disabled"):
+                skipped[b] = "backend is disabled"
+                continue
             d, why = PLANNERS[b](p, st, policy, bool(p.get("backend")), notes)
             if d:
                 if p.get("model"):
@@ -3699,18 +3784,18 @@ def route(prof, st, policy, exclude=()):
         return None, order, skipped
 
     notes = []
-    plan_prof = prof
+    plan_prof = route_prof
     proxy = None
-    if prof["type"] in r["review_types"] and not prof.get("backend") and not prof.get("model"):
+    if route_prof["type"] in r["review_types"] and not route_prof.get("backend") and not route_prof.get("model"):
         # Resolve who would implement this work, so the review can be checked
         # against the implementer's family instead of a per-tier proxy. The
         # planners see the family/model as private profile keys; the caller's
         # profile is never mutated.
-        proxy_d, _, _ = attempt({**prof, "type": "impl"}, [])
+        proxy_d, _, _ = attempt({**route_prof, "type": "impl"}, [])
         if proxy_d:
             proxy = {"backend": proxy_d["backend"], "model": proxy_d.get("model"),
                      "family": compare_backend_family(proxy_d["backend"], proxy_d.get("model"), policy, st)}
-            plan_prof = {**prof, "_impl_family": proxy["family"], "_impl_model": proxy["model"]}
+            plan_prof = {**route_prof, "_impl_family": proxy["family"], "_impl_model": proxy["model"]}
     d, order, skipped = attempt(plan_prof, notes)
     if d and proxy:
         fam = compare_backend_family(d["backend"], d.get("model"), policy, st)
@@ -3735,8 +3820,9 @@ def route(prof, st, policy, exclude=()):
         mode, why_c = claude_mode(st, policy)
         return {"ok": True, **d, "fallbacks": [x for x in order if x != d["backend"]],
                 "claude_review": mode, "reasons": list(dict.fromkeys(notes + [why_c])), "skipped": skipped,
-                "concurrency": concurrency(st, policy), "profile": prof}
-    return {"ok": False, "reasons": list(dict.fromkeys(notes)), "skipped": skipped, "profile": prof}
+                "concurrency": concurrency(st, policy), "planner": planner_decision(prof, policy), "profile": prof}
+    return {"ok": False, "reasons": list(dict.fromkeys(notes)), "skipped": skipped,
+            "planner": planner_decision(prof, policy), "profile": prof}
 
 
 # ---------------------------------------------------------------- execution
@@ -3758,6 +3844,9 @@ REPORT_INSTRUCTION = """When finished, your FINAL message must be ONLY a JSON ob
 status ("done"|"partial"|"failed"), summary (string), files_changed (array of paths), tests (string), followups (array of strings).
 """
 RATE_LIMIT_CONTINUE_PROMPT = "You were interrupted by a provider rate limit. Continue the task from where you stopped; finish with the final JSON report."
+STREAM_RETRY_CONTINUE_PROMPT = ("The upstream provider stream broke before the answer was complete (a transient "
+                                "upstream failure). Continue the task from where you stopped; finish with the final "
+                                "JSON report.")
 
 PROMPT_TMPL = """You are an execution agent dispatched by a planning agent. Complete the task below.
 
@@ -3788,6 +3877,69 @@ MODEL_UNAVAILABLE_RE = re.compile(r"(at capacity|server.?overloaded|overloaded|t
 OPENCODE_ABORT_RE = re.compile(r"stream error.*(usage limit exceeded|insufficient balance|quota exceeded|rate.?limit)", re.I)
 RATE_LIMIT_RE = re.compile(r"(\b429\b|resource[_ -]?exhausted|rate.?limit|usage limit|quota|too many requests|insufficient balance|spend.?control)", re.I)
 AUTH_ERROR_RE = re.compile(r"(authentication required|not authenticated|unauthenticated|not logged in|please log ?in|login required|auth(?:entication)? error|FatalAuthenticationError)", re.I)
+# #1535: the Token Plan is exhausted.  A quota class error is not transient: retrying the request
+# only burns the run budget, so the lane reports the quota instead of asking for a retry.
+QUOTA_EXHAUSTED_RE = re.compile(r"token plan|用量上限|\b2056\b|\(2056\)|usage limit|insufficient balance|"
+                                r"insufficient.?quota|quota.?(?:exceeded|exhausted)", re.I)
+# #1594: the upstream stream broke before the answer was complete (a VM pause makes the broker
+# answer 502).  Such a turn is transient and may be retried.
+PI_STREAM_RETRY_RE = re.compile(r"stream ended before|message_stop|provider unavailable|ECONNRESET|premature close", re.I)
+
+
+def quota_exhausted_error(text):
+    """Whether a provider error is an exhausted quota (the Token Plan ran out)."""
+    return bool(QUOTA_EXHAUSTED_RE.search(str(text or "")))
+
+
+def pi_retry_kind(text):
+    """The retry class of a provider error: "quota", "stream" or None.
+
+    #1535 wins over #1594: an exhausted quota is not transient and must not be retried; only the
+    stream class errors (a broken upstream stream) are.
+    """
+    text = str(text or "")
+    if not text:
+        return None
+    if quota_exhausted_error(text):
+        return "quota"
+    if PI_STREAM_RETRY_RE.search(text):
+        return "stream"
+    return None
+
+
+def pi_stream_retry_max():
+    """How many times a broken upstream stream may be retried (PI_STREAM_RETRY_MAX, default 3)."""
+    raw = os.environ.get("PI_STREAM_RETRY_MAX") or envvar("PI_STREAM_RETRY_MAX") or 3
+    try:
+        return max(0, int(raw))
+    except (TypeError, ValueError):
+        return 3
+
+
+def pi_stream_retry_delay(retry):
+    """Backoff before the next stream retry: 5s, 10s, 15s, ... capped at 30s."""
+    return min(30.0, 5.0 * max(1, int(retry)))
+
+
+def pi_stream_retry_decision(backend, error_class, error_tail, retries, max_retries=None, can_retry=True):
+    """What a lane does with a turn whose provider stream broke (#1594).
+
+    Returns ``(action, error_class, detail)``:
+
+    * ``("retry", ...)`` -- the upstream stream broke; the turn is transient and may be retried
+      while the retry budget lasts.
+    * ``("stop", ...)`` -- the turn failed for good.  An exhausted quota (#1535) is never retried;
+      a stream error past its budget keeps ``exec_error`` and the detail names the retries:
+      ``stream_retries=N``.
+    """
+    text = str(error_tail or "")
+    cap = pi_stream_retry_max() if max_retries is None else max(0, int(max_retries))
+    if (backend != "pi" or error_class not in ("exec_error", "rate_limit")
+            or pi_retry_kind(text) != "stream"):
+        return "stop", error_class, error_tail
+    if can_retry and retries < cap:
+        return "retry", "exec_error", error_tail
+    return "stop", "exec_error", f"{text} (stream_retries={retries})"
 
 
 def set_status(rdir, **kw):
@@ -3825,9 +3977,10 @@ def provider_concurrency_limits(policy, keys):
     return limits
 
 
-# Tokens stay in this supervisor process. Lost supervisors intentionally leave a
-# persistent reservation for manual, evidence-backed recovery: no unsafe TTL.
+# Tokens stay in this supervisor process. Lost supervisors leave reservations
+# until the coordinator independently verifies an owner reboot and the lease expires.
 _FLEET_RESERVATIONS = {}
+_FLEET_RENEWALS = {}
 
 
 def fleet_guard_command():
@@ -3860,10 +4013,14 @@ def fleet_guard_call(command, payload):
 
 
 def release_fleet_slot(rdir):
-    item = _FLEET_RESERVATIONS.get(os.path.realpath(rdir))
+    key = os.path.realpath(rdir)
+    item = _FLEET_RESERVATIONS.get(key)
     if not item:
         return True
     command, payload = item
+    renewal = _FLEET_RENEWALS.pop(key, None)
+    if renewal:
+        renewal[0].set()
     for attempt in range(3):
         try:
             fleet_guard_call(command, {"op": "release", "run_id": payload["run_id"], "token": payload["token"]})
@@ -3875,6 +4032,17 @@ def release_fleet_slot(rdir):
             time.sleep(0.2 * (attempt + 1))
     _FLEET_RESERVATIONS.pop(os.path.realpath(rdir), None)
     return True
+
+
+def renew_fleet_slot(command, payload, interval, stop):
+    """Keep a coordinator lease alive while this supervisor owns the run."""
+    while not stop.wait(interval):
+        try:
+            fleet_guard_call(command, {"op": "renew", "run_id": payload["run_id"], "token": payload["token"]})
+        except RuntimeError:
+            # Keep retrying. A coordinator outage must never be converted to a
+            # local release. TTL alone never authorizes coordinator recovery.
+            continue
 
 
 def executor_boundary_empty(rdir, boundary):
@@ -3903,6 +4071,7 @@ def reserve_provider_slot(rdir, backend, provider, policy, lane_name=None, keep_
     command = fleet_guard_command()
     reservation_key = os.path.realpath(rdir)
     token = uuid.uuid4().hex
+    # The coordinator obtains kernel boot evidence over its own trusted channel.
     payload = {"op": "acquire", "token": token, "run_id": os.path.basename(rdir),
                "backend": backend, "provider": provider}
     while True:
@@ -3937,14 +4106,22 @@ def reserve_provider_slot(rdir, backend, provider, policy, lane_name=None, keep_
                         counts[key] += 1
             if all(counts[key] < cap for key, cap in limits.items()):
                 admitted = True
+                answer = {}
                 if command:
                     try:
-                        admitted = bool(fleet_guard_call(command, payload).get("admitted"))
+                        answer = fleet_guard_call(command, payload)
+                        admitted = bool(answer.get("admitted"))
                     except RuntimeError as error:
                         admitted = False
                         set_status(rdir, fleet_reservation_error=str(error))
                 if admitted and command:
                     _FLEET_RESERVATIONS[reservation_key] = (command, payload)
+                    interval = max(0.1, float(answer.get("lease_ttl_seconds", 300)) / 3)
+                    stop = threading.Event()
+                    thread = threading.Thread(target=renew_fleet_slot, args=(command, payload, interval, stop),
+                                              daemon=True)
+                    _FLEET_RENEWALS[reservation_key] = (stop, thread)
+                    thread.start()
             else:
                 admitted = False
             if admitted and keep_waiting and not keep_waiting():
@@ -4756,8 +4933,8 @@ def cursor_usage(raw):
     for k in CURSOR_USAGE_KEYS:
         v = raw.get(k)
         try:
-            out[k] = int(v) if v is not None else 0
-        except (TypeError, ValueError):
+            out[k] = max(0, int(v)) if not isinstance(v, bool) else 0
+        except (TypeError, ValueError, OverflowError):
             out[k] = 0
     return out
 
@@ -4978,9 +5155,10 @@ def pi_usage(events_path):
                 continue
             u = m.get("usage") or {}
             for k in PI_USAGE_KEYS:
+                value = u.get(k)
                 try:
-                    usage[k] += int(u.get(k) or 0)
-                except (TypeError, ValueError):
+                    usage[k] += max(0, int(value)) if not isinstance(value, bool) else 0
+                except (TypeError, ValueError, OverflowError):
                     pass
             if m.get("stopReason") == "error" or m.get("errorMessage"):
                 errors.append(str(m.get("errorMessage") or "error")[:500])
@@ -5350,7 +5528,8 @@ def adjust_status_for_change_evidence(status, verify_note, *, commit, workspace_
 
 
 JUNK = ["__pycache__/**", "*.pyc", ".DS_Store", "node_modules/**", ".pytest_cache/**", ".venv/**", "*.egg-info/**"]
-NEVER_COMMIT = ["*_????????-????-????-????-????????????.jsonl", ".pi/", ".codex/", ".cursor/", ".agy/",
+NEVER_COMMIT = ["*_????????-????-????-????-????????????.jsonl", "openswarm-card-*.md",
+                ".pi/", ".codex/", ".cursor/", ".agy/",
                 "pi-session*.jsonl", "codex-session*.jsonl", "cursor-session*.jsonl",
                 "pi*.log", "codex*.log", "cursor*.log", "agy*.log"]
 
@@ -8329,6 +8508,9 @@ def lane_run_turn(lane, child, spec, prompt, ws, rdir, server, turn, pending, at
             error_class = "upstream_forbidden"
         elif AUTH_ERROR_RE.search(text):
             error_class = "auth"
+        elif lane["backend"] == "pi" and pi_retry_kind(text) == "stream":
+            # Stream failures use their own retry budget even when the provider also reports 429.
+            error_class = "exec_error"
         elif RATE_LIMIT_RE.search(text):
             error_class = "rate_limit"
         else:
@@ -8350,6 +8532,25 @@ def lane_wait_rate_limit(seconds, lane, spec, child, server, turn, pending):
             return False
         time.sleep(min(0.1, max(0, deadline - NOW())))
     return NOW() < budget_deadline
+
+
+def lane_wait_stream_retry(seconds, lane, spec, child, server, turn, pending):
+    """Wait before the next stream retry (#1594): honour an abort and the run budget."""
+    budget_deadline = spec["started"] + max(0, float(spec.get("budget_minutes") or 0)) * 60
+    deadline = min(NOW() + seconds, budget_deadline)
+    while NOW() < deadline:
+        lane_control_messages(server, lane, spec, child, turn, pending)
+        if spec.get("abort_requested") or spec.get("down_requested") or not child.alive():
+            return False
+        time.sleep(min(0.1, max(0, deadline - NOW())))
+    return NOW() < budget_deadline
+
+
+def lane_note_stream_retry(rdir, event_file, retries, max_retries, error_text, wait_seconds):
+    """Record a stream retry (#1594): the counter goes to status.json, the attempt to the events."""
+    set_status(rdir, stream_retries=retries)
+    lane_record_event(event_file, {"type": "STREAM_RETRY", "retry": retries, "max_retries": max_retries,
+                                   "wait_seconds": round(wait_seconds, 3), "error": error_text})
 
 
 def lane_finalize_run(lane, spec, ws, final, usage, error_class, rc, event_file, attempts=None):
@@ -8566,6 +8767,7 @@ def lane_do_run(lane, spec, child, server, current):
         attempt_lane = lane
         attempt_number = 0
         forbidden_retried = False
+        stream_retries = 0
         _, max_rate_retries = rate_limit_policy(load_policy())
         for number, model in enumerate(models, 1):
             attempt_lane = dict(lane, model=model)
@@ -8636,6 +8838,25 @@ def lane_do_run(lane, spec, child, server, current):
                     break
                 if allow_fallback and error_class == "exec_error" and MODEL_UNAVAILABLE_RE.search(error_tail or ""):
                     error_class = attempts[-1]["error_class"] = "model_unavailable"
+                # #1594: retry transient upstream stream failures with a separate budget.
+                can_retry = (child.alive() and not spec.get("abort_requested")
+                             and NOW() + pi_stream_retry_delay(stream_retries + 1) < deadline)
+                action, error_class, error_tail = pi_stream_retry_decision(
+                    attempt_lane["backend"], error_class, error_tail, stream_retries, can_retry=can_retry)
+                attempts[-1]["error_class"] = error_class
+                attempts[-1]["error_tail"] = error_tail
+                if action == "retry":
+                    stream_retries += 1
+                    wait_seconds = pi_stream_retry_delay(stream_retries)
+                    lane_note_stream_retry(rdir, evp, stream_retries, pi_stream_retry_max(),
+                                           error_tail, wait_seconds)
+                    if not lane_wait_stream_retry(wait_seconds, lane, spec, child, server, turn, pending):
+                        error_class = "stopped" if spec.get("abort_requested") or spec.get("down_requested") else "budget_exceeded"
+                        rc = 130 if error_class == "stopped" else 124
+                        break
+                    continuation = True
+                    retry_prompt = STREAM_RETRY_CONTINUE_PROMPT
+                    continue
                 # A transient Google 403 can occur before any work starts. Retry once
                 # only after the old request released its slot and left no edits.
                 if (error_class == "upstream_forbidden" and lane["backend"] == "agy" and not forbidden_retried
@@ -8656,6 +8877,7 @@ def lane_do_run(lane, spec, child, server, current):
                 if reset_seconds is not None and reset_seconds > 0:
                     lane_write_state(lane["name"], quota_model=model, quota_until=NOW() + min(reset_seconds, 3600))
                 can_retry = (retries < max_rate_retries and not spec.get("abort_requested")
+                             and not quota_exhausted_error(error_tail)
                              and (reset_seconds is None or NOW() + reset_seconds < deadline))
                 wait_seconds = max(rate_limit_delay(load_policy(), retries), reset_seconds or 0) if can_retry else 0
                 rate_event = {"type": "RATELIMIT", "retry": retries + 1 if can_retry else retries,
@@ -8711,7 +8933,13 @@ def lane_do_run(lane, spec, child, server, current):
                            **({"regress_label": spec["regress_label"]} if spec.get("regress_label") else {}),
                            **exec_pass_fields(False, False, bool(spec.get("verify")), None)})
             return status
-        return lane_finalize_run(lane, spec, ws, None, {}, error_class, 1, evp)
+        return lane_finalize_run(
+            lane, spec, ws, None, {}, error_class, 1, evp,
+            attempts=[{"backend": lane["backend"], "model": lane["model"],
+                       "effort": lane.get("effort"), "rc": 1,
+                       "seconds": round(NOW() - spec.get("started", NOW()), 3),
+                       "error_class": error_class, "meta": {"usage": {}},
+                       "events": evp, "error_tail": short(e, 500)}])
 
 
 def agy_quota_available(lane, child):
@@ -10162,6 +10390,20 @@ def cmd_batch(args, policy):
     validate_card_type(policy, getattr(args, "card_type", None))
     if args.per_host < 1 or args.poll_seconds <= 0 or (args.budget_minutes is not None and args.budget_minutes <= 0):
         raise ValueError("batch concurrency, budget and poll interval must be positive")
+    cards_directory = os.path.abspath(args.cards)
+    if not os.path.isdir(cards_directory):
+        raise ValueError("cards path must be a directory")
+    paths = sorted(path for path in glob.glob(os.path.join(glob.escape(cards_directory), "*"))
+                   if os.path.isfile(path))
+    if not paths:
+        bid = new_run_id()
+        summary = {"id": bid, "repo": args.repo, "base": args.base,
+                   "scope": getattr(args, "scope", "repo"), "state": "finished",
+                   "started": NOW(), "cards": [], "finished": NOW()}
+        batch_save(summary)
+        if args.detach:
+            print(json.dumps({"id": bid}))
+        return
     hosts = fleet_config()
     names = args.hosts.split(",")
     if len(set(names)) != len(names):
@@ -10173,9 +10415,6 @@ def cmd_batch(args, policy):
     repo = os.path.realpath(os.path.expanduser(host_repo(local, args.repo, local=True)))
     base = host_require(local, host_git(local, repo, ["rev-parse", "--verify", "--end-of-options",
                                                     (args.base or "HEAD") + "^{commit}"]), "base resolution").decode().strip()
-    paths = sorted(path for path in glob.glob(os.path.join(os.path.abspath(args.cards), "*")) if os.path.isfile(path))
-    if not paths:
-        raise ValueError("cards directory contains no files")
     minutes = args.budget_minutes if args.budget_minutes is not None else policy["run"]["timeout_seconds"] / 60
     backend = args.backend
     decision = None
@@ -10459,6 +10698,9 @@ class WatchMessages:
             if tool_id:
                 self.tools.add(tool_id)
         kind, text = summarize_event(event)
+        if kind == "msg":
+            # Buffered chunks precede this message in the event stream.
+            rows.extend(self.flush())
         return rows + ([(kind, text)] if kind else [])
 
 
@@ -10887,6 +11129,9 @@ def run_digest(rid):
                         cmds += 1
                     if kind == "msg":
                         last = text
+        for kind, text in messages.flush():
+            if kind == "msg":
+                last = text
     end = st.get("finished") or now
     out = {"id": rid, "state": state, "status": st.get("status") or r.get("status"), "title": st.get("title"),
            "scope": st.get("scope", r.get("scope", "repo")),
@@ -11393,9 +11638,14 @@ def cmd_status(policy, refresh):
           f"model={cu.get('default_model') or (policy.get('cursor') or {}).get('default_model') or 'composer-2.5[fast=false]'} "
           f"quota=unknown")
     pi = st.get("pi") or {}
+    pi_quota = pi.get("quota") or {}
+    pi_quota_text = "unknown"
+    if pi_quota:
+        pi_quota_text = f"balance={pi_quota.get('balance')} {pi_quota.get('currency') or ''}".strip()
     print(f"Pi       opt-in (--backend pi) bin={pi.get('binary') or '-'} "
           f"model={pi.get('default_model') or (policy.get('pi') or {}).get('default_model') or 'pi default'} "
-          f"quota=unknown")
+          f"quota={pi_quota_text}"
+          f"{' ERROR ' + str(pi['quota_error']) if pi.get('quota_error') else ''}")
     ag = st.get("agy") or {}
     print(f"Antigravity opt-in (--backend agy, alias gemini) bin={ag.get('binary') or '-'} "
           f"model={ag.get('default_model') or (policy.get('agy') or {}).get('default_model') or AGY_DEFAULT_MODEL} "

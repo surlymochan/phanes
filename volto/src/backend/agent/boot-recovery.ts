@@ -1,6 +1,7 @@
 import { Cause, Effect, Schema } from "effect";
 import type { AgentProvider } from "../agent-client";
 import type { AgentStore } from "../agent-store";
+import { AgentThreadStore } from "../agent-threads/agent-thread-store";
 import { mergeConversationSnapshots } from "../conversation-snapshots";
 import { causeHelpers, reportOriginalFailure } from "../effect-boundary";
 import { LineTooLongError } from "../jsonl";
@@ -274,6 +275,17 @@ export class BootRecovery {
         // Clear the cached turn before queue listeners can read or change the agent.
         this.#conversation.setSnapshot(agent.id, snapshot);
         this.#conversation.publishConversation(snapshot);
+      }
+      // Recovery has no live turn-completed event. Persist the task outcome before the
+      // queue event publishes its task snapshot, as normal turn completion does.
+      const taskId = this.#mailbox.taskIdForDelivery(delivery.id);
+      if (taskId) {
+        const tasks = new AgentThreadStore(this.#store.database);
+        const task = tasks.task(taskId);
+        if (task?.agentId === delivery.recipientAgentId && task.threadId === threadId) {
+          tasks.setOutcome(taskId, terminal);
+          tasks.setError(taskId, terminal === "failed" ? reason : null);
+        }
       }
       this.#mailboxSync.emitQueue(delivery.recipientAgentId);
       this.#hooks.deliverySettled?.(delivery.id, terminal);

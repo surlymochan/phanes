@@ -255,9 +255,18 @@ def arm_swrm(inst, repo, venv, events, tid):
     commit = E.sh(["git", "-C", str(OPENSWARM_DIR), "rev-parse", "HEAD"]).stdout.strip()
     (events / "tool-version.json").write_text(json.dumps({"name": "swrm", "commit": commit, "backend": "pi"}))
     t0 = time.time()
-    plan = PLANNER.format(task_file=task_file, verify_file=verify_file, python=f"{venv}/bin/python", repo=repo,
-                          skill=(OPENSWARM_DIR / "SKILL.md").read_text(), task=base_prompt(inst, repo, venv))
-    calls = [run_pi(tid + "-plan", rundir, plan, events, 300, path_env(venv), label="planner")]
+    decision = "used"
+    if inst.get("difficulty") is not None:
+        import runpy
+        routing = runpy.run_path(str(OPENSWARM_DIR / "bin" / "swrm"))
+        decision = routing["planner_decision"]({"difficulty": inst["difficulty"]}, routing["load_policy"]())
+    if decision == "skipped":
+        task_file.write_text(base_prompt(inst, repo, venv))
+        calls = []
+    else:
+        plan = PLANNER.format(task_file=task_file, verify_file=verify_file, python=f"{venv}/bin/python", repo=repo,
+                              skill=(OPENSWARM_DIR / "SKILL.md").read_text(), task=base_prompt(inst, repo, venv))
+        calls = [run_pi(tid + "-plan", rundir, plan, events, 300, path_env(venv), label="planner")]
     if task_file.exists():
         shutil.copy(task_file, events / "executor-task.md")
     if verify_file.exists():
