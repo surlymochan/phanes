@@ -17,10 +17,10 @@ No host-A logs, mounts, tester commits, CX10 recovery or other-host verification
 have been obtained. Do not resume CX10 based on this inventory.
 
 Delivery mapping (line anchors refer to this delivery):
-B1 -> swrm/bin/swrm:7625; swrm/tests/test_lane.py:84 ->
+B1 -> swrm/bin/swrm:7625; swrm/tests/test_lane.py:88 ->
   CodexSandboxTests.test_real_codex_sandbox_two_lanes_commit -> namespace-blocked here; host required;
   two real command/exec sandboxes commit tracked files; negative write control.
-B2 -> tools/check-codex-sandbox-gitdir.py:59; swrm/tests/test_lane.py:127 ->
+B2 -> tools/check-codex-sandbox-gitdir.py:59; swrm/tests/test_lane.py:131 ->
   CodexSandboxTests.test_host_checker_uses_actual_lane_paths -> PASS locally;
   --sandbox-test runs B1 on the host; inventory alone is not mount/commit proof.
 B3 -> tools/check-codex-sandbox-gitdir.py:4 -> manual_failure_ledger_review ->
@@ -29,7 +29,7 @@ B4 -> tools/check-codex-sandbox-gitdir.py:19 -> manual_delivery_mapping_review -
   PASS: all four mappings present (manual checks, not automated test claims).
 Configuration review -> swrm/bin/swrm:7625 ->
   CodexSandboxTests.test_policy_modes_and_network_restrictions -> PASS (18 cases).
-Original 06e4cb428 regression remains -> swrm/tests/test_lane.py:479 ->
+Original 06e4cb428 regression remains -> swrm/tests/test_lane.py:686 ->
   LaneTests.test_codex_two_lanes_allow_writes_to_each_worktree_gitdir -> PASS.
 
 Migration: openswarm/bin/openswarm -> swrm/bin/swrm; both old sandbox/gitdir
