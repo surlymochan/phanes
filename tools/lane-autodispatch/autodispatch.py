@@ -1705,7 +1705,7 @@ def budget_window_open(lane, cfg, info):
     command = os.environ.get("AD_BUDGET_PROBE_CMD", "").strip()
     try:
         if command:
-            proc = subprocess.run(command, shell=True, capture_output=True, text=True, timeout=20)
+            proc = subprocess.run(shlex.split(command), shell=False, capture_output=True, text=True, timeout=20)
             if proc.returncode: return False
             payload = json.loads(proc.stdout)
         else:

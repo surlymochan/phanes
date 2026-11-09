@@ -782,7 +782,7 @@ health loop is not rewritten by the probe:
 The matching alert line (appended to `health.alert`, one line per alerting service):
 
 ```
-2026-11-03 19:15:00 level=hard source=executor-tasks host=<host>.example.invalid service=openswarm-executor-M19.service zombies=844 tasks=869/1552 ratio=0.56 parents=1210977 snapshot=/home/phanes-ctl/autodispatch/executor-task-snapshots/executor-tasks-gores1.example.invalid-20261103-191500-000000.ps
+2026-11-03 19:15:00 level=hard source=executor-tasks host=<host>.example.invalid service=openswarm-executor-M19.service zombies=844 tasks=869/1552 ratio=0.56 parents=<pid> snapshot=<state-dir>/executor-task-snapshots/executor-tasks-<host>.example.invalid-20261103-191500-000000.ps
 ```
 
 Offline proof (a fake fleet host answers the ssh commands of the probe; no network, no
