@@ -4,14 +4,24 @@ import sys
 
 out, title, audit, start, end, scope, checks = sys.argv[1:8]
 lines = open(audit).read().splitlines()
-body, on = [], False
+body, on, started, ended = [], False, False, False
 for line in lines:
-    if line.startswith(start):
-        on = True
-    elif on and line.startswith(end):
-        break
     if on:
+        if line.startswith(end):
+            ended = True
+            break
         body.append(line)
+    elif line.startswith(start):
+        on = True
+        started = True
+        body.append(line)
+if not started or not ended:
+    # A half open range yields a card with missing findings: refuse to write it.
+    missing = [name for name, found in (("start", started), ("end", ended)) if not found]
+    sys.stderr.write(
+        "mkcard: audit marker not found in %s: %s (looked for %r and %r)\n"
+        % (audit, " and ".join(missing), start, end))
+    sys.exit(1)
 findings = "\n".join(body)
 
 card = f"""# {title}

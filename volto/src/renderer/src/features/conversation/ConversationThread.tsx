@@ -26,6 +26,7 @@ export function ConversationThread() {
       {(current) => (
         <AgentThreadView
           task={current().threads.open ?? null}
+          tasks={current().threads.goals}
           limit={current().threads.limit}
           agent={current().agent}
           agents={props.agents}
