@@ -163,6 +163,40 @@ def marker_scope(name):
     if name.startswith("PAUSE-") and len(name) > len("PAUSE-"): return f"lane:{name[len('PAUSE-'):]}"
     return None
 
+# The disk watermark guard of the box control plane (Refs #1666) measures a remote lane host and
+# pauses it when the disk is too full. The health sweep can clear the `auto:` host pause, so the
+# dispatcher reads the state file of the guard as well: that is an independent gate that keeps the
+# lane closed for the whole hysteresis band, even between two guard ticks.
+DISK_WATERMARK_STATE_PREFIX = "disk-watermark-"
+
+def disk_watermark_states(now=None):
+    """The disk watermark states of the guard: one record per measured lane host."""
+    # A blocked host stays blocked until the guard records a measured recovery.
+    # A stopped guard and a missing marker are not evidence of free disk space.
+    states = {}
+    try: names = sorted(os.listdir(D))
+    except OSError: return states
+    for name in names:
+        if not name.startswith(DISK_WATERMARK_STATE_PREFIX) or not name.endswith(".json"): continue
+        try:
+            with open(os.path.join(D, name)) as stream: record = json.load(stream)
+        except (OSError, ValueError): continue
+        if not isinstance(record, dict): continue
+        host = record.get("host")
+        if not isinstance(host, str) or not host.strip(): continue
+        updated = record.get("updated_at")
+        if isinstance(updated, bool) or not isinstance(updated, (int, float)): continue
+        states[host.strip()] = record
+    return states
+
+def disk_watermark_blocked(host, states=None):
+    """Whether the disk watermark guard blocks the host (the independent disk gate)."""
+    if not host: return False
+    states = disk_watermark_states() if states is None else states
+    record = states.get(host)
+    if not record: return False
+    return bool(record.get("blocked"))
+
 # The deadline of a legacy pause marker: the health loop writes `auto:cooldown:until=<epoch|ISO>`
 # (`tools/check-health-pause.py`), the quota loop `mm_remains:until=<ISO>`
 # (`tools/check-health-quota-fresh.py`). The deadline is separated from the rest of the body by a
@@ -219,6 +253,7 @@ def pause_records(now=None, home=None):
     removal). The result is sorted by scope."""
     now = time.time() if now is None else now
     records = []
+    disk_states = disk_watermark_states(now)
     store = pause_store_dir(home)
     try: names = sorted(os.listdir(store))
     except OSError: names = []
@@ -252,12 +287,28 @@ def pause_records(now=None, home=None):
         scope = marker_scope(name)
         if scope is None: continue
         body = marker_body(name)
+        # Version 2 stopped writing shared host markers. Retain old files
+        # untouched, but use its independent state instead of its legacy marker.
+        # Other writers do not share a lock with the guard; deleting the legacy
+        # file after reading its body could delete a concurrent manual pause.
+        if name.startswith("PAUSE-HOST-"):
+            host = name[len("PAUSE-HOST-"):]
+            version = disk_states.get(host, {}).get("guard", 0)
+            if isinstance(version, int) and version >= 2:
+                if body.startswith(f"auto:disk-watermark host={host} "): continue
         deadline = pause_until(body)
         if deadline is not None and deadline <= now:
             log_expired_pause(name, deadline)  # the hold ends here, the marker file stays
             continue
         records.append({"scope": scope, "reason": marker_reason(name, body), "created_at": 0.0,
                         "expires_at": deadline, "source": "marker"})
+    # The disk watermark gate (Refs #1666): a blocked lane host stays blocked even when the
+    # health sweep removed its pause marker, as long as the guard reports the block.
+    for host, record in disk_states.items():
+        if not record.get("blocked"): continue
+        records.append({"scope": f"host:{host}", "reason": f"disk watermark guard: {record.get('state')}",
+                        "created_at": record.get("updated_at"), "expires_at": None,
+                        "source": "disk-watermark"})
     return sorted(records, key=lambda row: row["scope"])
 
 def paused_scopes(now=None, records=None):
