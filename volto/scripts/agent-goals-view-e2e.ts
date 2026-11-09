@@ -240,6 +240,21 @@ const checks: { name: string; run: () => void }[] = [
       assert.ok(row, "The goal that runs now is missing.");
       assert.equal(completionOf(row), "42.5%");
       assert.equal(row.querySelector(".agent-goal-completion")?.getAttribute("aria-label"), "Completion 42.5%");
+      const fraction = goal({
+        id: "goal-fraction",
+        title: "A goal",
+        state: "running",
+        progress: ".5% done",
+      });
+      assert.equal(agentGoalCompletion(fraction), 0.5);
+      assert.equal(agentGoalCompletionText(fraction), "0.5%");
+      const fractionRow = mountGoals([fraction]).rows()[0];
+      assert.ok(fractionRow, "The goal with a fractional percent is missing.");
+      assert.equal(completionOf(fractionRow), "0.5%");
+      assert.equal(
+        fractionRow.querySelector(".agent-goal-completion")?.getAttribute("aria-label"),
+        "Completion 0.5%",
+      );
       // A percent outside the bounds is not shown, and a decimal that is not a percent is no percent.
       assert.equal(
         agentGoalCompletion(goal({ id: "goal-wide-decimal", title: "A goal", state: "running", progress: "420.5%" })),

@@ -49,7 +49,7 @@ export function agentGoalGroups(goals: readonly AgentTask[]): {
  * The percent of a progress text, with the fraction of a percent it may name. The whole number
  * alone would read the tail of a decimal as the percent, so the fraction belongs to the number.
  */
-const PROGRESS_PERCENT = /(\d{1,3}(?:\.\d+)?)\s*%/;
+const PROGRESS_PERCENT = /(?<![\d.])((?:\d+(?:\.\d+)?|\.\d+))\s*%/;
 
 /**
  * How far a goal is, in percent. A goal that is done is at 100. The snapshot has no completion of
