@@ -3,11 +3,14 @@
 import json
 import os
 import re
+import shlex
+import subprocess
 import tempfile
 import unittest
 import warnings
 import importlib.util
 from pathlib import Path
+from unittest.mock import call, patch
 
 SPEC = importlib.util.spec_from_file_location("autodispatch", Path(__file__).with_name("autodispatch.py"))
 AUTODISPATCH = importlib.util.module_from_spec(SPEC)
@@ -172,7 +175,7 @@ class TickHarness:
 
     LANES = {"CX2": {"host": "h2", "backend": "codex"}, "CX10": {"host": "h10", "backend": "codex"}}
 
-    def run_tick(self, issues, lanes=None, state=None):
+    def run_tick(self, issues, lanes=None, state=None, available_memory_mb=None, memory_probe=None):
         """One tick with the GitHub/ssh/dispatch side effects faked; returns (dispatched, logs)."""
         dispatched, logs, edits = [], [], []
 
@@ -194,6 +197,8 @@ class TickHarness:
             dispatched.append((lane, item["n"]))
             return "run-1", None
 
+        self.host_fail_calls = []
+        self.last_status = {}
         patched = ("D", "gh", "sh", "log", "host_ok", "host_fail", "host_good", "remote", "deps_met",
                    "dispatch", "replenish", "save_state", "status_snapshot")
         saved = {name: getattr(AUTODISPATCH, name) for name in patched}
@@ -202,17 +207,25 @@ class TickHarness:
             with tempfile.TemporaryDirectory(dir=SCRATCH) as scratch:
                 AUTODISPATCH.D = scratch
                 AUTODISPATCH.gh = fake_gh
-                AUTODISPATCH.sh = lambda *a, **k: (0, "0" * 40 + "\n", "")
+                def fake_sh(args, *a, **k):
+                    command = " ".join(args)
+                    if "/proc/meminfo" in command:
+                        if memory_probe is not None: return memory_probe(args, *a, **k)
+                        memory = 1024 if available_memory_mb is None else available_memory_mb
+                        return 0, f"{memory * 1024}\n", ""
+                    return 0, "0" * 40 + "\n", ""
+                AUTODISPATCH.sh = fake_sh
                 AUTODISPATCH.log = lambda msg, brain=True: logs.append(msg)
                 AUTODISPATCH.host_ok = lambda h: True
-                AUTODISPATCH.host_fail = lambda h, why: None
+                AUTODISPATCH.host_fail = lambda h, why: self.host_fail_calls.append((h, why))
                 AUTODISPATCH.host_good = lambda h: None
                 AUTODISPATCH.remote = lambda lane, cfg, run="": {"lane": "idle"}
                 AUTODISPATCH.deps_met = lambda item: True
                 AUTODISPATCH.dispatch = fake_dispatch
                 AUTODISPATCH.replenish = lambda k, state: []
                 AUTODISPATCH.save_state = lambda state: None
-                AUTODISPATCH.status_snapshot = lambda *a, **k: {}
+                AUTODISPATCH.status_snapshot = lambda lanes, state, res, ready, blocked, records=None: self.last_status.update(
+                    {"_ready": ready, "_blocked": blocked}) or self.last_status
                 AUTODISPATCH.VERIFY_REJECT_LOGGED.clear()
                 # tick() writes lanes-status.json without closing it: the warning is pre-existing
                 with warnings.catch_warnings():
@@ -342,6 +355,183 @@ class TickWorkClassCapTest(TickHarness, unittest.TestCase):
             lambda: self.run_tick([issue(1, VERIFY_BODY, ("lane-ready", "verify-intent"))],
                                    self.LANES, self.busy_work_state()))
         self.assertEqual(dispatched, [("CX2", 1)])  # the cap limits the work class only
+
+
+class TickMemoryPreflightTest(TickHarness, unittest.TestCase):
+    """A low-memory host must not start a codex session during tick dispatch."""
+
+    def probe_shell(self, system, sample):
+        """Run the real remote shell/awk script against a target OS sample on any test host."""
+        def local_remote_shell(args, timeout=30):
+            # OpenSSH joins the remote argv with spaces before the host shell parses it.
+            command = " ".join(args[args.index("sh"):])
+            remote_args = shlex.split(command)
+            self.assertEqual(remote_args[:2], ["sh", "-lc"])
+            self.assertEqual(len(remote_args), 3, "the script must remain one SSH shell argument")
+            SCRATCH.mkdir(parents=True, exist_ok=True)
+            with tempfile.TemporaryDirectory(dir=SCRATCH) as scratch:
+                sample_path = Path(scratch) / "memory sample"
+                sample_path.write_text(sample)
+                fixture = shlex.quote(str(sample_path))
+                prefix = f"uname() {{ printf '%s\\n' {shlex.quote(system)}; }}; vm_stat() {{ cat {fixture}; }}; "
+                remote_args[2] = prefix + remote_args[2].replace("/proc/meminfo", fixture)
+                result = subprocess.run(["sh", "-c", shlex.join(remote_args)], capture_output=True,
+                                        text=True, timeout=timeout)
+                return result.returncode, result.stdout, result.stderr
+        return local_remote_shell
+
+    def macos_sample(self, page_size=16384, pages=32768):
+        return (f"Mach Virtual Memory Statistics: (page size of {page_size} bytes)\n"
+                f"Pages free: {pages // 2}.\nPages inactive: {pages // 4}.\n"
+                f"Pages speculative: {pages - pages // 2 - pages // 4}.\n"
+                "Pages active: 999999.\nPages wired down: 999999.\nPages purgeable: 999999.\n"
+                "Pages occupied by compressor: 999999.\n")
+
+    def test_memory_probe_executes_after_ssh_joins_remote_arguments(self):
+        sample = "MemTotal: 16777216 kB\nMemFree: 1024 kB\nMemAvailable: 524288 kB\n"
+        with patch.object(AUTODISPATCH, "sh", side_effect=self.probe_shell("Linux", sample)):
+            available = AUTODISPATCH.available_memory_mb("probe-host")
+        self.assertEqual(available, 512)
+
+    def test_macos_probe_uses_target_page_size_and_reclaimable_pages(self):
+        for page_size in (4096, 16384):
+            with self.subTest(page_size=page_size):
+                probe = self.probe_shell("Darwin", self.macos_sample(page_size))
+                with patch.object(AUTODISPATCH, "sh", side_effect=probe):
+                    self.assertEqual(AUTODISPATCH.available_memory_mb("probe-host"), page_size // 32)
+
+    def test_incomplete_or_unsupported_memory_probe_is_unavailable(self):
+        for system, sample in (("Linux", "MemFree: 524288 kB\n"), ("Darwin", ""),
+                               ("Darwin", "Pages free: 999999.\n"),
+                               ("Darwin", self.macos_sample().replace("Pages inactive: 8192.\n", "")),
+                               ("Darwin", self.macos_sample().replace("Pages free: 16384.", "Pages free: bad.")),
+                               ("FreeBSD", "")):
+            with self.subTest(system=system, sample=sample):
+                with patch.object(AUTODISPATCH, "sh", side_effect=self.probe_shell(system, sample)):
+                    self.assertIsNone(AUTODISPATCH.available_memory_mb("probe-host"))
+
+    def test_macos_memory_probe_controls_actual_tick_dispatch(self):
+        card = issue(1712, "Codex session work", ("lane-ready", "backend:codex"))
+        lanes = {"CX2": {"host": "mac-host", "backend": "codex"}}
+        for page_size in (4096, 16384):
+            for available, expected in ((512, [("CX2", 1712)]), (135, [])):
+                with self.subTest(page_size=page_size, available=available):
+                    sample = self.macos_sample(page_size, available * 1024 * 1024 // page_size)
+                    dispatched, logs = self.run_tick([card], lanes=lanes,
+                                                     memory_probe=self.probe_shell("Darwin", sample))
+                    self.assertEqual(dispatched, expected)
+                    self.assertEqual(self.host_fail_calls, [])
+                    if not expected:
+                        self.assertTrue(any("blocked-by-host-memory host=mac-host available=135MB threshold=400MB"
+                                            in line for line in logs), logs)
+                        self.assertEqual(self.last_status["_blocked"], 1)
+                        self.assertEqual(self.last_status["_ready"], 0)
+
+    def test_codex_lane_skips_a_135mb_host_before_dispatch(self):
+        lanes = {"CX2": {"host": "<host>", "backend": "codex", "min_available_memory_mb": 400}}
+        card = issue(1712, "Codex session work", ("lane-ready", "backend:codex"))
+
+        dispatched, logs = self.run_tick([card], lanes=lanes, available_memory_mb=135)
+
+        self.assertEqual(dispatched, [], "a 135MB host must not start a codex session")
+        self.assertTrue(any("<host>" in line and "135" in line and "400" in line for line in logs), logs)
+
+    def test_sufficient_memory_dispatches_and_does_not_fail_host(self):
+        card = issue(1713, "Codex session work", ("lane-ready",))
+        dispatched, _ = self.run_tick([card], lanes={"CX2": {"host": "<host>", "backend": "codex"}},
+                                      available_memory_mb=400)
+        self.assertEqual(dispatched, [("CX2", 1713)])
+        self.assertEqual(self.host_fail_calls, [])
+
+    def test_same_host_is_rechecked_after_a_codex_dispatch(self):
+        cards = [issue(n, "Codex session work", ("lane-ready",)) for n in (1721, 1722)]
+        lanes = {"CX2": {"host": "<host>", "backend": "codex"},
+                 "CX10": {"host": "<host>", "backend": "codex"}}
+        with patch.object(AUTODISPATCH, "available_memory_mb", side_effect=[500, 135]) as probe:
+            dispatched, logs = self.run_tick(cards, lanes=lanes)
+        self.assertEqual(dispatched, [("CX2", 1721)])
+        self.assertEqual(probe.call_args_list, [call("<host>"), call("<host>")])
+        self.assertTrue(any("CX10 #1722 skipped: blocked-by-host-memory host=<host> available=135MB threshold=400MB"
+                            in line for line in logs), logs)
+        self.assertEqual(self.host_fail_calls, [])
+        self.assertEqual(self.last_status["_blocked"], 1)
+        self.assertEqual(self.last_status["_ready"], 0)
+        self.assertEqual(self.last_status["_memory_blocks"], {
+            1722: [{"host": "<host>", "available_mb": 135, "threshold_mb": 400,
+                    "reason": "blocked-by-host-memory"}]})
+
+    def test_same_host_can_recover_before_the_next_lane_attempt(self):
+        card = issue(1723, "Codex session work", ("lane-ready",))
+        lanes = {"CX2": {"host": "<host>", "backend": "codex"},
+                 "CX10": {"host": "<host>", "backend": "codex"}}
+        with patch.object(AUTODISPATCH, "available_memory_mb", side_effect=[135, 500]) as probe:
+            dispatched, _ = self.run_tick([card], lanes=lanes)
+        self.assertEqual(dispatched, [("CX10", 1723)])
+        self.assertEqual(probe.call_count, 2)
+        self.assertEqual(self.host_fail_calls, [])
+        self.assertEqual(self.last_status["_blocked"], 0)
+        self.assertEqual(self.last_status["_ready"], 0)
+        self.assertEqual(self.last_status["_memory_blocks"], {})
+
+    def test_configured_threshold_applies_to_host_and_skip_is_not_failure(self):
+        card = issue(1714, "Codex session work", ("lane-ready",))
+        lane = {"CX2": {"host": "<host>", "backend": "codex", "min_available_memory_mb": 200}}
+        dispatched, logs = self.run_tick([card], lanes=lane, available_memory_mb=135)
+        self.assertEqual(dispatched, [])
+        self.assertTrue(any("135" in line and "200" in line for line in logs), logs)
+        self.assertEqual(self.host_fail_calls, [])
+
+    def test_pi_lane_ignores_codex_memory_threshold_at_135mb(self):
+        card = issue(1715, "Pi task", ("lane-ready", "backend:pi"))
+        dispatched, _ = self.run_tick([card], lanes={"PI1": {"host": "<host>", "backend": "pi"}},
+                                      available_memory_mb=135)
+        self.assertEqual(dispatched, [("PI1", 1715)])
+
+    def test_codex_fallback_is_gated_but_pi_lane_can_take_the_card(self):
+        card = issue(1716, "Pi task", ("lane-ready", "backend:pi"))
+        lanes = {"CX2": {"host": "<host>", "backend": "codex"},
+                 "PI1": {"host": "pi-host", "backend": "pi"}}
+        dispatched, logs = self.run_tick([card], lanes=lanes, available_memory_mb=135)
+        self.assertIn(("PI1", 1716), dispatched)
+        self.assertTrue(any("blocked-by-host-memory" in line and "<host>" in line for line in logs), logs)
+        self.assertEqual(self.last_status["_blocked"], 0)
+        self.assertEqual(self.last_status["_ready"], 0)
+        self.assertEqual(self.last_status["_memory_blocks"], {})
+
+    def test_backend_lane_dispatched_this_tick_does_not_hide_remaining_memory_block(self):
+        cards = [issue(n, "Pi task", ("lane-ready", "backend:pi")) for n in (1719, 1720)]
+        lanes = {"CX2": {"host": "<host>", "backend": "codex"},
+                 "PI1": {"host": "pi-host", "backend": "pi"}}
+        for order in (lanes, dict(reversed(list(lanes.items())))):
+            with self.subTest(order=list(order)):
+                dispatched, _ = self.run_tick(cards, lanes=order, available_memory_mb=135)
+                self.assertEqual(dispatched, [("PI1", 1719)])
+                self.assertEqual(self.last_status["_blocked"], 1)
+                self.assertEqual(self.last_status["_ready"], 0)
+                self.assertEqual(set(self.last_status["_memory_blocks"]), {1720})
+                self.assertEqual(self.last_status["_memory_blocks"][1720], [
+                    {"host": "<host>", "available_mb": 135, "threshold_mb": 400,
+                     "reason": "blocked-by-host-memory"}])
+
+    def test_memory_only_block_is_counted_once_with_host_diagnostics(self):
+        card = issue(1717, "Codex session work", ("lane-ready",))
+        lanes = {"CX2": {"host": "<host>", "backend": "codex"},
+                 "CX10": {"host": "<host>", "backend": "codex"}}
+        dispatched, _ = self.run_tick([card], lanes=lanes, available_memory_mb=135)
+        self.assertEqual(dispatched, [])
+        self.assertEqual(self.last_status["_blocked"], 1)
+        self.assertEqual(self.last_status["_ready"], 0)
+        self.assertEqual(len(self.last_status["_memory_blocks"][1717]), 2)
+
+    def test_busy_backend_lane_does_not_hide_memory_block(self):
+        card = issue(1718, "Codex session work", ("lane-ready",))
+        lanes = {"CX2": {"host": "<host>", "backend": "codex"},
+                 "CX10": {"host": "h10", "backend": "codex"}}
+        state = {"CX10": {"issue": 9, "run": "active", "host": "h10", "at": "2026-11-08 00:00:00"}}
+        dispatched, _ = self.run_tick([card], lanes=lanes, state=state, available_memory_mb=135)
+        self.assertEqual(dispatched, [])
+        self.assertEqual(self.last_status["_blocked"], 1)
+        self.assertEqual([row["host"] for row in self.last_status["_memory_blocks"][1718]], ["<host>"])
 
 
 if __name__ == "__main__":
