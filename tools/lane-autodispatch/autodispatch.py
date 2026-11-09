@@ -2232,6 +2232,45 @@ def filter_harvest(ref, base):
             parent = git("commit-tree", tree, "-p", parent, env=commit_env, inp=message).strip().decode()
     return parent, removed, tree_of(parent) == tree_of(base)
 
+def origin_branch_head(branch):
+    """Return the head commit of a branch on origin ("" when the branch is not there).
+
+    The harvest push and this read use the same remote, so the answer describes the
+    branch the PR would be opened from."""
+    rc, out, _ = sh(["git", "-C", LOCAL, "ls-remote", "origin", f"refs/heads/{branch}"], timeout=60)
+    if rc: return ""
+    parts = out.split()
+    return parts[0] if parts else ""
+
+def local_commit(rev):
+    """Return the commit sha of a local revision ("" when it cannot be resolved)."""
+    rc, out, _ = sh(["git", "-C", LOCAL, "rev-parse", "--verify", "--quiet", f"{rev}^{{commit}}"], timeout=60)
+    return out.strip() if not rc else ""
+
+def harvest_push(lane, n, branch, head):
+    """Push the harvested branch to origin and tell whether the harvest may continue.
+
+    Returns (ok, error).  A push that failed without any error output (empty stderr)
+    but whose branch is already on origin at the pushed head means the update reached
+    origin before the failure was reported: the harvest goes on to the PR instead of
+    pushing again on every tick (Refs #1640; the dispatch engine reads the same
+    evidence).  A push that said why it failed, a branch that is not on origin and a
+    branch that carries another head or an unresolved local head all stay push failures."""
+    rc, _, err = sh(["git", "-C", LOCAL, "push", "-q", "origin", f"{head}:refs/heads/{branch}"], timeout=180)
+    if not rc: return True, None
+    reason = err.strip()[-200:]
+    if not reason:
+        remote, pushed = origin_branch_head(branch), local_commit(head)
+        if remote and pushed and remote == pushed:
+            log(f"{lane} #{n} push rc={rc} without error output; branch {branch} is on origin "
+                f"at {remote[:8]}; continuing to PR", brain=False)
+            return True, None
+        reason = ("no error output and the branch is not on origin" if not remote else
+                  f"no error output; cannot resolve the pushed head {head}" if not pushed else
+                  f"no error output; branch {branch} is on origin at {remote[:8]}, "
+                  f"not at the pushed head {pushed[:8]}")
+    return False, f"push failed: {reason}"
+
 def finish(lane, cfg, st, info, state):
     """Harvest a finished lane run: push the branch, open the PR, relabel the issue.
 
@@ -2261,8 +2300,8 @@ def finish(lane, cfg, st, info, state):
                                f"({len(removed)} excluded path(s)).\n\nLabel `lane-failed`; re-add `lane-ready` to retry.")
             mark_done(state, n)
             return {"done": True, "status": "lane-failed", "error": "empty after artifact filtering", "missing": []}
-        rc, _, err = sh(["git", "-C", LOCAL, "push", "-q", "origin", f"{head}:refs/heads/{b}"], timeout=180)
-        if rc: return {"done": False, "status": "push-failed", "error": f"push failed: {err.strip()[-200:]}", "missing": []}
+        pushed, push_error = harvest_push(lane, n, b, head)
+        if not pushed: return {"done": False, "status": "push-failed", "error": push_error, "missing": []}
         _, lj, _ = gh(["issue", "view", str(n), "--json", "labels"])
         if "lane-pr" in lj:
             record_verify_time(state, n, "evidence_ready")
