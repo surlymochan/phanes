@@ -124,7 +124,7 @@ describe('policy overlay', () => {
     assert.equal(validation.ok, false);
     assert.deepEqual(validation.errors, [
       'coding.min_changed_line_coverage must be a number between 0 and 100',
-      'review.min_reviewers must be a non-negative number',
+      'review.min_reviewers must be a non-negative integer',
     ]);
   });
 });
