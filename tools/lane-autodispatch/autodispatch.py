@@ -1754,7 +1754,7 @@ def minimax_burn_status(now=None, max_age_s=MM_BURN_MAX_AGE_S):
         if rows: fields["_minimax_hourly_buckets"] = rows
     return fields
 
-def status_snapshot(lanes, state, res, ready, blocked, records=None, phase=None, tick_at=None):
+def status_snapshot(lanes, state, res, ready, blocked, records=None):
     """Build the observable lane status row, including this process's stale skips."""
     lanes = lanes or {}
     status = {L: (("stale #%s (review required)" if "stale_since" in state[L] else "busy #%s") % state[L]["issue"]) if state.get(L) else (res[L].get("error") or res[L].get("lane") or "?") for L in lanes}
@@ -1775,8 +1775,9 @@ def status_snapshot(lanes, state, res, ready, blocked, records=None, phase=None,
     status["_at"] = time.strftime("%F %T")
     # The phase and the tick start tell the reader how far the current tick got (Refs #1697):
     # a snapshot whose phase does not change while `_at` advances means a slow step is running.
-    status["_phase"] = phase or "idle"
-    status["_tick_at"] = tick_at or status["_at"]
+    # The publisher names the phase of the running tick; outside a tick the snapshot is idle.
+    status["_phase"] = "idle"
+    status["_tick_at"] = status["_at"]
     # The burn watchdog measures the real MiniMax token burn of the hour; the
     # lane status shows its reading, so an operator compares it with the
     # MiniMax console instead of watching the dispatch count (Refs #1671).
@@ -1815,7 +1816,7 @@ class StatusPublisher:
         self.rows = self.previous_rows()
         self.refresh = STATUS_REFRESH_SECONDS if refresh is None else float(refresh)
         self.phase = "start"
-        self.tick_at = time.strftime("%F %T")
+        self.tick_at = None  # the stamp of the first publish: the start of the running tick
         self._lock = threading.RLock()
         self._stop = threading.Event()
         self._thread = None
@@ -1847,9 +1848,18 @@ class StatusPublisher:
         if ready is not None: self.ready = ready
         if blocked is not None: self.blocked = blocked
         rows = {L: self.res.get(L) or {"lane": self.rows.get(L, "?")} for L in self.lanes}
+        # status_snapshot() keeps the argument shape it always had: a caller that replaces it
+        # (the tick tests do) must keep working. The phase of the tick is added below.
         snapshot = status_snapshot(self.lanes, self.state, rows, self.ready or 0, self.blocked or 0,
-                                   records=self.records, phase=self.phase, tick_at=self.tick_at)
-        snapshot["_memory_blocks"] = self.memory_blocks
+                                   self.records)
+        if isinstance(snapshot, dict):
+            snapshot["_memory_blocks"] = self.memory_blocks
+            # The phase and the tick start tell the reader how far the current tick got
+            # (Refs #1697): a snapshot whose phase does not change while `_at` advances
+            # means a slow step is running.
+            if self.tick_at is None: self.tick_at = snapshot.get("_at")
+            snapshot["_phase"] = self.phase
+            snapshot["_tick_at"] = self.tick_at
         return snapshot
 
     def publish(self, res=None, ready=None, blocked=None, phase=None, heartbeat=True):
@@ -2758,8 +2768,10 @@ def run_tick(lanes, state, last_warn, publisher):
     update_busy_stale(lanes, state, res)
     if not queue_ok:
         with publisher._lock:
-            st = status_snapshot(lanes, state, res, None, None, records,
-                                 phase="queue", tick_at=publisher.tick_at)
+            st = status_snapshot(lanes, state, res, None, None, records)
+            if isinstance(st, dict):
+                st["_phase"] = "queue"
+                st["_tick_at"] = publisher.tick_at or st.get("_at")
             st["_queue_error"] = queue_error or "queue unavailable"
             write_status_snapshot(publisher.path, st, publisher.logger)
         return last_warn

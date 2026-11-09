@@ -232,6 +232,29 @@ class StatusPublisherTests(unittest.TestCase):
             self.assertEqual(snapshot["_phase"], "dispatch")
             self.assertEqual(snapshot["_tick_at"], snapshot["_at"])
 
+    def test_the_publisher_keeps_the_argument_shape_of_status_snapshot(self):
+        """A caller that replaces status_snapshot() (the tick tests do) must keep working.
+
+        The publisher may not pass new keywords to status_snapshot(): the tick tests
+        replace it with a function of the historical shape, and a publish that raised a
+        TypeError would take the whole dispatch tick down (Refs #1697).
+        """
+        with tempfile.TemporaryDirectory() as directory:
+            calls = []
+
+            def legacy_status_snapshot(lanes, state, res, ready, blocked, records=None):
+                calls.append((ready, blocked, records))
+                return {"_at": STALLED_AT, "_ready": ready}
+
+            publisher = self.publish(directory)
+            with mock.patch.object(ad, "status_snapshot", legacy_status_snapshot):
+                snapshot = publisher.publish(phase="dispatch")
+            self.assertEqual(len(calls), 1, "the publisher did not publish the snapshot")
+            # the phase and the tick start are added by the publisher, not by the builder
+            self.assertEqual(snapshot["_phase"], "dispatch")
+            self.assertEqual(snapshot["_tick_at"], STALLED_AT)
+            self.assertEqual(snapshot["_ready"], 0)
+
 
 class DispatcherFixture:
     """Drives the real ``tick()`` with the network replaced by a scripted clock.
