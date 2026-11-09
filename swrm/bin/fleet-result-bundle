@@ -1,5 +1,10 @@
 #!/usr/bin/env python3
-"""Return a completed run's Git branch as a bundle."""
+"""Return a completed run's Git branch and versioned raw evidence as a bundle.
+
+Evidence comes from runner verify/diffstat fields and result.result fields;
+unavailable is not a pass. This transports recorded values, not a fresh CI check or review verdict.
+Unknown fields are not promoted into evidence. Logs are UTF-8, capped at 64 KiB.
+"""
 import base64
 import json
 from pathlib import Path
@@ -7,6 +12,53 @@ import re
 import subprocess
 import sys
 import tempfile
+
+MAX_LOG_BYTES = 64 * 1024
+
+
+def raw_evidence(raw, receipt):
+    """Normalize known receipt shapes without interpreting outcomes or commands."""
+    raw = raw if isinstance(raw, dict) else {}
+    evidence = {"version": 1, **{name: {"status": "unavailable"}
+                for name in ("ci", "tests", "diff", "acceptance")}}
+    ci = raw.get("ci")
+    if isinstance(ci, dict) and isinstance(ci.get("conclusion"), str) and ci["conclusion"]:
+        evidence["ci"] = {"status": "available", "conclusion": ci["conclusion"]}
+        if isinstance(ci.get("url"), str):
+            evidence["ci"]["url"] = ci["url"]
+    tests = raw.get("tests")
+    # Non-null runner verification is authoritative, including missing logs.
+    verify = receipt.get("verify")
+    if verify is not None:
+        tests = ({"command": verify.get("cmd"), "rc": verify.get("rc"),
+                  "log": verify.get("tail")} if isinstance(verify, dict) else None)
+    if (isinstance(tests, dict) and isinstance(tests.get("command"), str)
+            and tests["command"] and type(tests.get("rc")) is int
+            and isinstance(tests.get("log"), str)):
+        encoded = tests["log"].encode("utf-8", errors="replace")
+        evidence["tests"] = {"status": "available", "command": tests["command"],
+                             "rc": tests["rc"],
+                             "log": encoded[:MAX_LOG_BYTES].decode("utf-8", errors="ignore"),
+                             "truncated": len(encoded) > MAX_LOG_BYTES}
+    diff = raw.get("diff")
+    counts = ("files_changed", "insertions", "deletions")
+    if isinstance(diff, dict) and all(type(diff.get(key)) is int and diff[key] >= 0
+                                      for key in counts):
+        evidence["diff"] = {"status": "available", **{key: diff[key] for key in counts}}
+    stat = receipt.get("diffstat")
+    if isinstance(stat, str) and stat.strip():
+        # Preserve Git's recorded --stat output rather than interpreting filenames
+        # or localized summary text as numeric counts.
+        evidence["diff"] = {"status": "available", "stat": stat}
+    acceptance = raw.get("acceptance")
+    fields = ("item", "result", "detail")
+    if isinstance(acceptance, list) and acceptance and all(
+            isinstance(item, dict) and all(isinstance(item.get(key), str) for key in fields)
+            and item["item"] and item["result"] for item in acceptance):
+        evidence["acceptance"] = {"status": "available", "items": [
+            {key: item[key] for key in fields} for item in acceptance]}
+    return evidence
+
 
 try:
     info = json.load(sys.stdin)
@@ -27,7 +79,12 @@ try:
         subprocess.run(['git', '-C', repo, 'bundle', 'create', str(bundle), 'refs/heads/' + branch, '^' + base],
                        check=True, capture_output=True, timeout=120)
         encoded = base64.b64encode(bundle.read_bytes()).decode('ascii')
-    print(json.dumps({'branch': branch, 'commit': commit, 'bundle': encoded}))
+    raw = result.get('result')
+    output = {'branch': branch, 'commit': commit, 'bundle': encoded,
+              'evidence': raw_evidence(raw, result)}
+    if isinstance(raw, dict) and isinstance(raw.get('opinion'), str):
+        output['reference_opinion'] = raw['opinion']
+    print(json.dumps(output))
 except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError) as error:
     print(json.dumps({'error': str(error)[:200]}))
     sys.exit(1)

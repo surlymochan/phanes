@@ -49,6 +49,17 @@ export type AgentTaskOutcome = (typeof AGENT_TASK_OUTCOMES)[number];
 /** The most characters of a queued message that a task row shows. */
 export const AGENT_TASK_QUEUED_PREVIEW = 500;
 
+/** The most percent a task may report for the completion of its goal. */
+export const AGENT_TASK_COMPLETION_MAX = 100;
+
+/**
+ * How far the goal of a task came, in percent: an integer from 0 to 100. A task that does not know
+ * how far it came reports null.
+ */
+export function isAgentTaskCompletion(value: unknown): value is number {
+  return integerInRange(value, 0, AGENT_TASK_COMPLETION_MAX);
+}
+
 /** A message that waits to start in a task. */
 export interface AgentTaskQueuedMessage {
   deliveryId: string;
@@ -77,6 +88,12 @@ export interface AgentTask {
   activeTurnId: string | null;
   /** What the running turn does now, as the agent's own chat shows it. Null when no turn runs. */
   progress: string | null;
+  /**
+   * How far the goal of the task came, in percent: an integer from 0 to 100. Null when the task does
+   * not know how far it came. Absent in a task that a peer sent over the frozen Team API wire, because
+   * that contract does not carry the field.
+   */
+  completion?: number | null;
   /** What the provider reported, redacted, when the last turn failed. Null when it reported nothing. */
   error: string | null;
   /** The messages that wait to start in this task, oldest first. */
@@ -149,6 +166,7 @@ export function isAgentTask(value: unknown): value is AgentTask {
     (value.hold === null || isOneOf(AGENT_TASK_HOLDS, value.hold)) &&
     (value.activeTurnId === null || isIdentifier(value.activeTurnId)) &&
     (value.progress === null || isBoundedString(value.progress, INPUT_LIMITS.agentTaskProgress)) &&
+    (value.completion === undefined || value.completion === null || isAgentTaskCompletion(value.completion)) &&
     (value.error === null || isBoundedString(value.error, INPUT_LIMITS.agentTaskError)) &&
     Array.isArray(value.queuedMessages) &&
     value.queuedMessages.every(isAgentTaskQueuedMessage) &&

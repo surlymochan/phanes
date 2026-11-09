@@ -7,6 +7,9 @@ import argparse, json, statistics, sys
 from collections import defaultdict
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import phases as P  # noqa: E402
+
 ROOT = Path(__file__).resolve().parent
 ARM_ORDER = ["baseline", "superpowers", "openflow", "swrm"]
 
@@ -19,6 +22,56 @@ def quantiles(xs):
         return xs[0], xs[0], xs[0]
     q = statistics.quantiles(xs, n=4, method="inclusive")
     return q[0], statistics.median(xs), q[2]
+
+
+def phase_stats(rows):
+    """Planner and executor cost per run: wall-clock, share of the run, tokens.
+
+    Only the arms that run a planner turn (openswarm) have planner numbers; for the other
+    arms the single agent call is the executor (optimization backlog #4, P1-1).
+    """
+    planner_wall, planner_share, planner_io, planner_total, executor_wall = [], [], [], [], []
+    for row in rows:
+        split = P.phase_split(row.get("calls"))
+        if "planner" in split:
+            planner_wall.append(split["planner"]["wall_s"])
+            planner_io.append(split["planner"]["tokens_in_out"])
+            planner_total.append(split["planner"]["tokens_total"])
+            if row.get("wall_s"):
+                planner_share.append(split["planner"]["wall_s"] / row["wall_s"])
+        if "executor" in split:
+            executor_wall.append(split["executor"]["wall_s"])
+    median = statistics.median
+    return {
+        "planner": {
+            "runs_with_planner": len(planner_wall),
+            "wall_s_median": statistics.median(planner_wall) if planner_wall else None,
+            "wall_s_share_median": statistics.median(planner_share) if planner_share else None,
+            "tokens_in_out_median": statistics.median(planner_io) if planner_io else None,
+            "tokens_total_median": statistics.median(planner_total) if planner_total else None,
+        },
+        "executor": {
+            "wall_s_median": statistics.median(executor_wall) if executor_wall else None,
+        },
+    }
+
+
+def phase_cells(rows):
+    """Per-cell planner/executor split, for the arms that ran a planner."""
+    cells = []
+    for row in rows:
+        split = P.phase_split(row.get("calls"))
+        if "planner" not in split:
+            continue
+        cells.append({
+            "instance_id": row["instance_id"], "arm": row["arm"], "rep": row.get("rep", 1),
+            "planner_wall_s": split["planner"]["wall_s"],
+            "executor_wall_s": split.get("executor", {}).get("wall_s"),
+            "planner_share": (split["planner"]["wall_s"] / row["wall_s"]) if row.get("wall_s") else None,
+            "planner_tokens_in_out": split["planner"]["tokens_in_out"],
+            "planner_tokens_total": split["planner"]["tokens_total"],
+        })
+    return cells
 
 
 def cost(tok, row):
@@ -38,12 +91,12 @@ def rate_limit_stats(raw_dir, arm, instance_id, rep):
 
     retries: assistant `message_end` events whose message.errorMessage mentions 429 / rate_limit.
     ended_in_error: True if the LAST assistant `message_end` of any events file has stopReason "error".
+    The last event is the globally last one: event files in name order, events in file order.
     """
     d = Path(raw_dir) / arm / instance_id / ("r%d" % rep)
     retries = 0
-    ended_in_error = False
+    last = None
     for f in sorted(d.glob("*-events.jsonl")):
-        last = None
         with f.open(errors="replace") as fh:
             for line in fh:
                 if '"message_end"' not in line:
@@ -61,8 +114,7 @@ def rate_limit_stats(raw_dir, arm, instance_id, rep):
                 if "429" in err or "rate_limit" in err.lower():
                     retries += 1
                 last = msg
-        if last is not None and last.get("stopReason") == "error":
-            ended_in_error = True
+    ended_in_error = last is not None and last.get("stopReason") == "error"
     return {"retries": retries, "ended_in_error": ended_in_error}
 
 
@@ -136,6 +188,7 @@ def main():
              "tokens_total_incl_cache_sum": sum(tot),
              "guard_blocked": sum((c.get("guard_blocked") or 0) for r in rs for c in r.get("calls", [])),
              "runs_with_model_errors": sum(1 for r in rs if r.get("errors")), "cost": {}}
+        s.update(phase_stats(rs))
         rl = [rate_limit_stats(raw, a, r["instance_id"], r.get("rep", 1)) for r in rs]
         s["rate_limit_retries_total"] = sum(x["retries"] for x in rl)
         s["runs_with_rate_limit_retries"] = sum(1 for x in rl if x["retries"])
@@ -151,6 +204,9 @@ def main():
         d[0] += int(r["resolved"]); d[1] += 1
     summary["per_instance"] = per_inst
     summary["leak_scan"] = leak_scan(raw)
+    planner_cells = phase_cells(good)
+    if planner_cells:
+        summary["planner_cells"] = planner_cells
     (out / "summary.json").write_text(json.dumps(summary, indent=1))
 
     L = [f"| Arm | Resolved (official tests) | Median wall-clock (IQR) | Median $ per task ({args.price}) | Total $ all runs ({args.price}) | Median tokens in+out | Median tokens incl. cache | n |",
@@ -171,6 +227,28 @@ def main():
     L += ["", "Per instance (resolved / runs):", "", "| Instance | " + " | ".join(arms) + " |", "| --- | " + " | ".join("---" for _ in arms) + " |"]
     for iid in sorted(per_inst):
         L.append(f"| `{iid}` | " + " | ".join("{}/{}".format(*per_inst[iid].get(a, [0, 0])) for a in arms) + " |")
+    if planner_cells:
+        L += ["", "### Planner vs executor", "",
+              "| Arm | runs with planner | median planner s | median planner share of wall-clock | "
+              "median planner tokens in+out | median executor s |",
+              "| --- | --- | --- | --- | --- | --- |"]
+        for a in arms:
+            p = summary["arms"][a]["planner"]
+            if not p["runs_with_planner"]:
+                continue
+            share = "-" if p["wall_s_share_median"] is None else f"{p['wall_s_share_median']:.0%}"
+            executor_median = summary["arms"][a]["executor"]["wall_s_median"]
+            executor_display = "-" if executor_median is None else f"{executor_median:.0f} s"
+            L.append(f"| {a} | {p['runs_with_planner']} | {p['wall_s_median']:.0f} s | {share} | "
+                     f"{p['tokens_in_out_median']:,.0f} | {executor_display} |")
+        L += ["", "Per cell (planner / executor wall-clock):", "",
+              "| Instance | Arm | rep | planner s | executor s | planner share | planner tokens in+out |",
+              "| --- | --- | --- | --- | --- | --- | --- |"]
+        for cell in planner_cells:
+            share = "-" if cell["planner_share"] is None else f"{cell['planner_share']:.0%}"
+            executor = "-" if cell["executor_wall_s"] is None else f"{cell['executor_wall_s']:.0f} s"
+            L.append(f"| `{cell['instance_id']}` | {cell['arm']} | {cell['rep']} | {cell['planner_wall_s']:.0f} s | "
+                     f"{executor} | {share} | {cell['planner_tokens_in_out']:,.0f} |")
     L += ["", f"Timed out (20 min cap): " + ", ".join(f"{a} {summary['arms'][a]['timed_out']}" for a in arms),
           f"Guard blocks: " + ", ".join(f"{a} {summary['arms'][a]['guard_blocked']}" for a in arms),
           "Rate-limit (429) retries inside Pi: " + "; ".join(

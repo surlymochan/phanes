@@ -11,6 +11,7 @@ from collections import defaultdict
 
 MINIMAX_MARKER = "MiniMax-M3.1-Flash-Preview"
 USAGE_CAP_MARKER = "用量上限"
+NO_ASSISTANT_MESSAGE = object()
 
 
 def load_pi_models(path):
@@ -38,7 +39,7 @@ def events_files(raw, arm, instance_id, rep):
 def inspect_events(path):
     """Stream one event file and return (usage_cap_seen, last_assistant_stop_reason)."""
     usage_cap_seen = False
-    last_assistant_stop_reason = None
+    last_assistant_stop_reason = NO_ASSISTANT_MESSAGE
 
     with open(path, "r", encoding="utf-8") as fh:
         for line in fh:
@@ -99,16 +100,16 @@ def evaluate_run(run, models_by_task, raw):
             reasons.append("non-MiniMax model: %s" % non_minimax)
 
     usage_cap_seen = False
-    last_error_seen = False
+    last_assistant_stop_reason = NO_ASSISTANT_MESSAGE
     for path in events_files(raw, arm, instance_id, rep):
         file_usage_cap, last_stop_reason = inspect_events(path)
         usage_cap_seen = usage_cap_seen or file_usage_cap
-        if last_stop_reason == "error":
-            last_error_seen = True
+        if last_stop_reason is not NO_ASSISTANT_MESSAGE:
+            last_assistant_stop_reason = last_stop_reason
 
     if usage_cap_seen:
         reasons.append("usage cap hit during run")
-    if last_error_seen:
+    if last_assistant_stop_reason == "error":
         reasons.append("last model call ended in error")
 
     return {

@@ -8,8 +8,11 @@ State: ~/phanes-ctl/autodispatch/state.json   Log: ~/phanes-ctl/autodispatch/aut
 Pause: the swrm pause store ($OPENSWARM_HOME/pauses, written by `swrm pause <scope>`) and the
 legacy markers ~/phanes-ctl/autodispatch/PAUSE (whole loop), PAUSE-<LANE> (one lane),
 PAUSE-HOST-<HOST>, PAUSE-BACKEND-<BACKEND> and PAUSE-MINT (no new issue minted). Both are read (Refs #1366).
+A legacy marker that carries its own deadline (`until=<epoch|ISO>`) stops holding the lane once that
+deadline passed; the marker file stays on disk as the evidence of the hold (Refs #1592).
 """
 import base64, hashlib, json, math, os, re, shlex, stat, subprocess, sys, time, tempfile, concurrent.futures as cf
+from datetime import datetime, timezone
 HOME = os.path.expanduser("~"); D = f"{HOME}/phanes-ctl/autodispatch"
 REPO = "surlymochan/phanes"; LOCAL = "/workspace/phanes-repo"; BRAIN_LOG = "/workspace/phanes/brain/log.md"
 TICK = int(os.environ.get("AD_TICK", "60")); BUDGET = os.environ.get("AD_BUDGET", "45"); LOW = int(os.environ.get("AD_LOW", "10"))
@@ -69,6 +72,11 @@ BASE_REPO_URL = f"https://github.com/{REPO}.git"  # the upstream the base commit
 DISPATCH_BASE_FETCH_ATTEMPTS = 3  # bounded attempts (check -> fetch -> check) when the base is missing
 DISPATCH_BASE_FETCH_DELAY = 5     # seconds between two attempts
 BASE_MISSING_RE = re.compile(r"Not a valid object name", re.I)
+DISPATCH_FETCH_FAILURE_WINDOW = 3600
+DISPATCH_FETCH_TRANSIENT_RE = re.compile(
+    r"gnutls_handshake|tls|SSL|Could not resolve host|unable to access|Connection reset|"
+    r"Connection timed out|timed out|unexpected disconnect|early eof|remote end hung up", re.I)
+DISPATCH_FETCH_FAILURES = {}  # host -> recent [{at, type}]; used by health and blocking diagnostics
 STALE_STRIPPED_N = 0  # stale search-index entries removed by this process
 STALE_LANE_FAILED_N = 0  # stale hits whose issue still carries both lane-failed and lane-ready (Refs #985)
 LABEL_CACHE = {}  # issue number -> (status, payload): authoritative label reads of the current tick
@@ -113,10 +121,17 @@ def ctl_state_dir():
     os.makedirs(directory, mode=0o700, exist_ok=True)
     return directory
 
-def pause_store_dir():
+def pause_home(home=None):
+    """The home that holds the pause store ($OPENSWARM_HOME by default).
+
+    An empty $OPENSWARM_HOME is no home at all: the fallback keeps the store path
+    absolute instead of turning it into a relative `pauses` directory."""
+    if home: return os.path.expanduser(home)
+    return os.path.expanduser(os.environ.get("OPENSWARM_HOME") or os.environ.get("XSWARM_HOME") or f"{HOME}/.claude/swrm")
+
+def pause_store_dir(home=None):
     """The swrm pause store ($OPENSWARM_HOME/pauses), the new home of the pause switches."""
-    home = os.environ.get("OPENSWARM_HOME") or os.environ.get("XSWARM_HOME") or f"{HOME}/.claude/swrm"
-    return os.path.join(os.path.expanduser(home), "pauses")
+    return os.path.join(pause_home(home), "pauses")
 
 def marker_scope(name):
     """The pause scope of a legacy PAUSE marker file name, or None when it is none."""
@@ -127,14 +142,63 @@ def marker_scope(name):
     if name.startswith("PAUSE-") and len(name) > len("PAUSE-"): return f"lane:{name[len('PAUSE-'):]}"
     return None
 
-def pause_records(now=None):
+# The deadline of a legacy pause marker: the health loop writes `auto:cooldown:until=<epoch|ISO>`
+# (`tools/check-health-pause.py`), the quota loop `mm_remains:until=<ISO>`
+# (`tools/check-health-quota-fresh.py`). The deadline is separated from the rest of the body by a
+# colon or a space, so both shapes are read (Refs #1592).
+PAUSE_UNTIL_RE = re.compile(r"(?:^|[\s:])until=(\S+)", re.MULTILINE)
+# The markers whose expiry was already logged: one log line per marker, not one per tick.
+EXPIRED_PAUSE_LOGGED = set()
+
+def pause_until(body):
+    """The deadline of a legacy pause marker body (`until=<epoch|ISO>`), in epoch seconds.
+
+    A naive ISO timestamp is UTC, exactly like in `tools/check-health-pause.py`: a deadline
+    must not move with the timezone of the machine that reads it. None when the body carries
+    no readable deadline: such a marker never expires."""
+    match = PAUSE_UNTIL_RE.search(body or "")
+    if not match: return None
+    value = match.group(1)
+    try: return float(value)
+    except ValueError: pass
+    try: parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError: return None
+    if parsed.tzinfo is None: parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.timestamp()
+
+def marker_body(name):
+    """The body of a legacy pause marker (empty when the file cannot be read)."""
+    try:
+        with open(os.path.join(D, name)) as stream: return stream.read()
+    except OSError: return ""
+
+def marker_reason(name, body):
+    """The reason of a legacy marker: its name plus the first line of its body.
+
+    The body belongs to the reason: `auto:cooldown:until=...` says more than the file name,
+    and the operator finds the cause of the hold in the lane status (Refs #1592)."""
+    lines = (body or "").strip().splitlines()
+    first = lines[0].strip() if lines else ""
+    return f"legacy marker {name}: {first}" if first else f"legacy marker {name}"
+
+def log_expired_pause(name, deadline):
+    """Log once that the deadline of a legacy marker passed: the hold ends, the file stays."""
+    key = (name, deadline)
+    if key in EXPIRED_PAUSE_LOGGED: return
+    EXPIRED_PAUSE_LOGGED.add(key)
+    try: log(f"pause expired: {name} (until={deadline}) holds no lane any more; the marker stays as evidence", brain=False)
+    except Exception: pass
+
+def pause_records(now=None, home=None):
     """The active pause records: the swrm pause store plus the legacy PAUSE markers.
 
-    A store record carries a TTL (`expires_at`); an expired record is no pause. A legacy marker
-    carries no clock, so it never expires. The result is sorted by scope."""
+    A store record carries a TTL (`expires_at`); an expired record is no pause. A legacy
+    marker carries its own deadline in the body (`until=<epoch|ISO>`); an expired marker is
+    no pause either, but the file stays on disk as evidence (the health loop owns the
+    removal). The result is sorted by scope."""
     now = time.time() if now is None else now
     records = []
-    store = pause_store_dir()
+    store = pause_store_dir(home)
     try: names = sorted(os.listdir(store))
     except OSError: names = []
     for name in names:
@@ -153,15 +217,32 @@ def pause_records(now=None):
     try: names = sorted(os.listdir(D))
     except OSError: names = []
     for name in names:
+        # A recovery claim remains a gate until it is inspected and removed. If
+        # restoring an independent pause collides with a new marker, keep both.
+        if name.startswith(".pause-recovery-"):
+            try: claimed = os.listdir(os.path.join(D, name))
+            except OSError: claimed = []
+            for marker in claimed:
+                scope = marker_scope(marker)
+                if scope is not None:
+                    records.append({"scope": scope, "reason": f"recovery hold: {name}/{marker}",
+                                    "created_at": 0.0, "expires_at": None, "source": "marker"})
+            continue
         scope = marker_scope(name)
         if scope is None: continue
-        records.append({"scope": scope, "reason": f"legacy marker: {name}", "created_at": 0.0,
-                        "expires_at": None, "source": "marker"})
+        body = marker_body(name)
+        deadline = pause_until(body)
+        if deadline is not None and deadline <= now:
+            log_expired_pause(name, deadline)  # the hold ends here, the marker file stays
+            continue
+        records.append({"scope": scope, "reason": marker_reason(name, body), "created_at": 0.0,
+                        "expires_at": deadline, "source": "marker"})
     return sorted(records, key=lambda row: row["scope"])
 
-def paused_scopes(now=None):
+def paused_scopes(now=None, records=None):
     """The scopes that are paused right now (the store and the legacy markers)."""
-    return {row["scope"] for row in pause_records(now)}
+    records = pause_records(now) if records is None else records
+    return {row["scope"] for row in records}
 
 def lane_paused(lane, cfg=None, scopes=None):
     """Whether a lane is paused by an all/lane/host/backend scope."""
@@ -172,6 +253,44 @@ def lane_paused(lane, cfg=None, scopes=None):
     if cfg.get("host") and f"host:{cfg['host']}" in scopes: return True
     if cfg.get("backend") and f"backend:{cfg['backend']}" in scopes: return True
     return False
+
+def pause_priority(row):
+    """The order in which the switches are read: the global PAUSE, then the pause store,
+    then the remaining legacy markers (Refs #1592)."""
+    if row.get("source") == "marker" and row.get("scope") == "all": return 0
+    if row.get("source") == "store": return 1
+    return 2
+
+def pause_reason(lane, cfg=None, records=None, now=None):
+    """Why a lane is paused right now (None when it is not paused).
+
+    The result names the scope that holds the lane, the switch it comes from, the reason of
+    the switch and the remaining seconds (None when the switch has no deadline). It is what
+    `lanes-status.json` shows, so the operator sees which switch stops the lane and for how
+    long (Refs #1592)."""
+    now = time.time() if now is None else now
+    records = pause_records(now) if records is None else records
+    cfg = cfg or {}
+    wanted = [f"lane:{lane}"]
+    if cfg.get("host"): wanted.append(f"host:{cfg['host']}")
+    if cfg.get("backend"): wanted.append(f"backend:{cfg['backend']}")
+    for row in sorted(records, key=pause_priority):
+        scope = row.get("scope")
+        if scope != "all" and scope not in wanted: continue
+        expires = row.get("expires_at")
+        remaining = None if expires is None else max(0, int(round(expires - now)))
+        return {"scope": scope, "source": row.get("source"), "reason": row.get("reason"),
+                "remaining_s": remaining}
+    return None
+
+def pause_reasons(lanes, records=None, now=None):
+    """The pause reason of every paused lane (the lane status view of the switches)."""
+    records = pause_records(now) if records is None else records
+    reasons = {}
+    for lane, cfg in lanes.items():
+        reason = pause_reason(lane, cfg, records, now)
+        if reason: reasons[lane] = reason
+    return reasons
 
 def mint_paused(scopes=None):
     """Whether the minting of new issues is paused (the PAUSE-MINT marker / the mint scope)."""
@@ -479,6 +598,229 @@ def host_fail(h, why):
 def host_good(h):
     if BACKOFF.pop(h, None): log(f"{h} ssh recovered", brain=False)
 
+# --- 主机回归检测（Refs #1673）------------------------------------------------------
+# The box loses its connection from time to time.  While a host is unreachable the
+# control plane holds it with a `PAUSE-HOST-<host>` file, and the runs that were in
+# flight are lost with the outage.  When the host comes back, both are re-checked
+# automatically.  Two rules hold everywhere below:
+#
+#   * only a pause whose cause is the unreachability of the host is released.  The
+#     host being reachable again does not prove that another cause (the hard disk
+#     limit, the memory limit, a machine cooldown, an operator hold) is gone;
+#   * a run is only re-queued when the runner of that run is *positively* dead.  An
+#     unknown liveness keeps the lane and its card: the runner may still be running
+#     and a second dispatch would run the same work twice.
+HOST_UNREACHABLE_MARKER = "auto: host_unreachable"
+# The closed list of the reasons that unambiguously mean "the host was unreachable".
+# The reason is compared as a whole phrase: a body that merely contains "ssh" or
+# "streak" ("auto: api failure streak 3") is an unknown cause and is kept.
+HOST_UNREACHABLE_REASONS = ("host_unreachable", "ssh_unreachable", "unreachable",
+                             "host unreachable", "ssh unreachable", "ssh down",
+                             "ssh failed", "ssh streak", "ssh failure streak")
+# The run states that prove that the runner of a run is not running any more.
+TERMINAL_RUN_STATES = ("finished", "failed", "unroutable", "budget_rejected",
+                       "dry-run", "cancelled", "stopped")
+
+def host_pause_path(host):
+    """The path of the automatic pause file of a host."""
+    return os.path.join(D, f"PAUSE-HOST-{host}")
+
+def lane_pause_path(lane):
+    """The path of the automatic pause file of a lane."""
+    return os.path.join(D, f"PAUSE-{lane}")
+
+def read_pause(path):
+    """The body of a pause file ("" when it does not exist or cannot be read)."""
+    try:
+        with open(path, encoding="utf-8", errors="replace") as stream: return stream.read()
+    except OSError: return ""
+
+def pause_body_reason(body):
+    """The reason of an `auto:` pause body (None for a manual hold)."""
+    text = (body or "").strip()
+    if not text.startswith("auto:"): return None
+    return text[len("auto:"):].strip()
+
+def normalized_pause_reason(body):
+    """The reason of an automatic pause, normalized for the comparison.
+
+    The counters are dropped ("ssh streak 3" becomes "ssh streak"), the case and the
+    whitespace do not matter."""
+    reason = pause_body_reason(body)
+    if reason is None: return None
+    return re.sub(r"\s+", " ", re.sub(r"\s+\d+\b", "", reason)).strip().lower()
+
+def pause_cause_is_unreachable(body):
+    """Whether an automatic pause was caused by the unreachability of the host.
+
+    Only a body that names the unreachability proves it: the marker this dispatcher
+    writes itself, or one of the explicit reasons of the closed list.  Every other
+    cause (the disk limit, the memory limit, a machine cooldown, a quota) and every
+    unknown reason is kept: a reachable host does not prove that cause is gone
+    (Refs #1673)."""
+    reason = normalized_pause_reason(body)
+    if reason is None: return False
+    return reason.startswith("host_unreachable") or reason in HOST_UNREACHABLE_REASONS
+
+def lanes_of_host(lanes, host):
+    """The lanes that run on a host."""
+    return [lane for lane, cfg in lanes.items() if (cfg or {}).get("host") == host]
+
+def host_pause_paths(host, lane_names=()):
+    """The pause files of a host: its own pause and the pauses of its lanes."""
+    return [host_pause_path(host), *(lane_pause_path(lane) for lane in lane_names)]
+
+def write_unreachable_pause(host, since):
+    """Hold the host with the marker of its unreachability (Refs #1673).
+
+    An existing pause is never overwritten: it carries another cause (the disk
+    limit, a manual hold) that this dispatcher does not own."""
+    path = host_pause_path(host)
+    try:
+        with open(path, "x", encoding="utf-8") as stream:
+            stream.write(f"{HOST_UNREACHABLE_MARKER} host={host} since={int(since)}\n")
+    except FileExistsError: return False
+    except OSError as e:
+        log(f"{host}: the automatic pause of the outage was not written ({e!r})", brain=False)
+        return False
+    return True
+
+def release_unreachable_pauses(host, paths, explain=True):
+    """Release the automatic pauses of a host whose cause is its unreachability.
+
+    Atomically move the candidate to a private claim before checking its cause.
+    Only the claimed path is ever deleted; a health writer can create a new pause
+    at the original path without recovery unlinking it. Claims remain pause gates
+    until removed, including after an error or a dispatcher restart (Refs #1673)."""
+    released = []
+    for path in paths:
+        body = read_pause(path)
+        if not body: continue
+        name = os.path.basename(path)
+        if not pause_cause_is_unreachable(body):
+            if explain:
+                log(f"{name}: kept after the recovery of {host} (the cause is not the unreachability: "
+                    f"{normalized_pause_reason(body) or 'manual hold'})", brain=False)
+            continue
+        claim_dir = None
+        claimed = None
+        try:
+            claim_dir = tempfile.mkdtemp(prefix=".pause-recovery-", dir=os.path.dirname(path))
+            claimed = os.path.join(claim_dir, name)
+            os.rename(path, claimed)
+            # The original path may have changed after the first read. Check the
+            # file we actually claimed, never unlink the shared pathname.
+            if not pause_cause_is_unreachable(read_pause(claimed)):
+                try: os.link(claimed, path)
+                except FileExistsError:
+                    # Preserve the independent cause as an additional pause gate;
+                    # replacing the new marker would lose that writer's cause.
+                    log(f"{name}: independent recovery hold retained at {claimed}", brain=False)
+                    continue
+                os.unlink(claimed)
+                continue
+            os.unlink(claimed)
+        except FileNotFoundError: continue
+        except OSError as e:
+            log(f"{name}: the automatic pause of the outage was not released ({e!r})", brain=False)
+            continue
+        finally:
+            if claim_dir:
+                try: os.rmdir(claim_dir)
+                except OSError: pass  # A retained claim must stay visible to pause_records().
+        if os.path.lexists(path): continue
+        released.append(name)
+        log(f"{name}: released after the recovery of {host} (the pause was caused by its unreachability)")
+    return released
+
+def host_records(state):
+    """The reachability records of the hosts (the host -> record table of the state)."""
+    records = state.get("_hosts")
+    if not isinstance(records, dict): records = {}
+    state["_hosts"] = records
+    return records
+
+def note_host_unreachable(state, host):
+    """Record that the host is unreachable and hold it with the own marker.
+
+    The record lives in the state of the dispatcher, so the recovery of the host is
+    detected even when the outage spans a restart of the dispatcher."""
+    records = host_records(state)
+    record = records.get(host)
+    if not isinstance(record, dict): record = {}
+    if not record.get("unreachable_since"):
+        record["unreachable_since"] = time.time()
+        write_unreachable_pause(host, record["unreachable_since"])
+        log(f"{host} is unreachable: it is held until it comes back", brain=False)
+    record["last_error_at"] = time.time()
+    records[host] = record
+
+def host_came_back(state, host):
+    """Whether the host just came back (the recovery edge); the edge is consumed.
+
+    The edge is the transition from unreachable to reachable.  It is reported once
+    per outage: the re-check of the pauses and the verification of the runs in
+    flight happen on that edge, and the verification itself is retried in the
+    following ticks until it succeeds."""
+    records = host_records(state)
+    record = records.get(host)
+    if not isinstance(record, dict): record = {}
+    if record.get("unreachable_since"):
+        record["unreachable_since"] = None
+        record["recovered_at"] = time.time()
+        records[host] = record
+        return True
+    # The dispatcher may have been restarted during the outage: its own pause marker
+    # still holds the host, and the host is reachable again.
+    if read_pause(host_pause_path(host)).startswith(HOST_UNREACHABLE_MARKER):
+        record["unreachable_since"] = None
+        record["recovered_at"] = time.time()
+        records[host] = record
+        return True
+    return False
+
+def recovery_runs(state):
+    """The runs whose liveness still has to be verified (the lane -> run table).
+
+    The table is bounded like the other bookkeeping of the state: a lane that
+    disappears from the configuration cannot keep its entry forever."""
+    pending = state.get("_recovery")
+    if not isinstance(pending, dict): pending = {}
+    while len(pending) > 200:
+        pending.pop(next(iter(pending)), None)
+    state["_recovery"] = pending
+    return pending
+
+def mark_recovery_runs(state, host, lanes):
+    """Mark the runs of a host that came back for the liveness verification.
+
+    A host that was unreachable may have lost the runs that were in flight: the run
+    directory of the host is gone, or its runner died with the outage.  The runs are
+    marked here and verified in the ticks that follow: the verification needs a
+    positive proof that the runner is dead, so it can take more than one tick
+    (Refs #1673)."""
+    pending = recovery_runs(state)
+    for lane in lanes_of_host(lanes, host):
+        st = state.get(lane)
+        if not st: continue
+        record = pending.get(lane)
+        if isinstance(record, dict) and record.get("run") == st.get("run"): continue
+        pending[lane] = {"host": host, "run": st.get("run"), "issue": st.get("issue"),
+                         "since": time.time()}
+        log(f"{lane}: the run {st.get('run')} of {host} is verified (a live runner continues the run, "
+            f"a dead runner re-queues the card)", brain=False)
+
+def runner_liveness(status):
+    """The liveness of the runner of a run: "alive", "dead" or "unknown".
+
+    "unknown" is the answer when the host cannot tell: the run has no status file,
+    or the file names no runner.  A run whose runner may still be alive is never
+    re-queued: its card would be dispatched a second time (Refs #1673)."""
+    if status.get("runner_alive") is True: return "alive"
+    if status.get("runner_alive") is False: return "dead"
+    if str(status.get("run_state") or "").strip().lower() in TERMINAL_RUN_STATES: return "dead"
+    return "unknown"
+
 def now(): return time.strftime("%H:%M")
 
 # --- lane PR 提交前校验（Refs #1704）---------------------------------------------
@@ -536,6 +878,59 @@ def acceptance_evidence(verify_rc, report, summary, tests):
     if reported and reported.lower() not in ("none", "null"): return f"lane reported tests: `{reported[:200]}`"
     return ""
 
+def review_evidence_errors(evidence):
+    """Validate the versioned raw package, never deriving facts from lane opinions."""
+    if not isinstance(evidence, dict): return ["review evidence package missing or not an object"]
+    if type(evidence.get("version")) is not int or evidence["version"] != 1:
+        return ["unsupported review evidence version"]
+    errors = []
+    for section, fields in (("ci", ("conclusion", "workflow", "url")), ("tests", ("summary",))):
+        value = evidence.get(section)
+        if not isinstance(value, dict):
+            errors.append(f"review evidence missing {section}")
+            continue
+        for field in fields:
+            if not isinstance(value.get(field), str) or not value[field].strip():
+                errors.append(f"review evidence missing {section}.{field}")
+    diff = evidence.get("diff")
+    if not isinstance(diff, dict): errors.append("review evidence missing diff")
+    else:
+        for field in ("files", "insertions", "deletions"):
+            if type(diff.get(field)) is not int or diff[field] < 0:
+                errors.append(f"review evidence invalid diff.{field}")
+    acceptance = evidence.get("acceptance")
+    if not isinstance(acceptance, list) or not acceptance:
+        errors.append("review evidence missing acceptance checklist")
+    else:
+        for item in acceptance:
+            if (not isinstance(item, dict) or not isinstance(item.get("text"), str)
+                    or not item["text"].strip() or type(item.get("ok")) is not bool):
+                errors.append("review evidence invalid acceptance item")
+    return errors
+
+
+def review_evidence_body(evidence, summary):
+    """Keep raw fields in fixed sections and the opinion in a separate quoted block.
+
+    JSON escaping preserves multiline raw values without letting them create new
+    Markdown headings. Words in logs and check results remain raw evidence; only
+    the executor summary belongs to the lane opinion block.
+    """
+    def raw(value):
+        return json.dumps(value, ensure_ascii=False).replace("<", "\\u003c").replace("`", "\\u0060")
+
+    parts = ["## CI\n" + raw(evidence["ci"]),
+             "## 测试日志摘要\n" + raw(evidence["tests"]),
+             "## diff 统计\n" + raw(evidence["diff"]),
+             "验收：原始核查清单\n" + "\n".join(
+                 f"- [{'x' if item['ok'] else ' '}] {raw(item['text'])}"
+                 for item in evidence["acceptance"])]
+    if summary:
+        parts.append("## Lane 意见（参考、不算判定）\n" + "\n".join(
+            "> " + line for line in str(summary).splitlines()))
+    return parts
+
+
 def lane_pr_content(issue, lane, cfg, st, info, subject, message, summary, tests, verify_rc):
     """Build the lane PR title and body from the lane's own artifacts.
 
@@ -548,8 +943,13 @@ def lane_pr_content(issue, lane, cfg, st, info, subject, message, summary, tests
     parts = []
     # the closing reference comes from the lane's own text only: the title carries the issue
     # number by rule, and a number in the title is not a closing instruction (Refs #1704)
-    closing = closing_reference(issue, f"{report}\n{summary or ''}")
+    closing = closing_reference(issue, report if st.get("class") == "verify" else f"{report}\n{summary or ''}")
     if closing: parts.append(closing)
+    if st.get("class") == "verify":
+        package = info.get("evidence")
+        if not review_evidence_errors(package):
+            parts.extend(review_evidence_body(package, summary))
+        return title, "\n\n".join(parts)
     evidence = acceptance_evidence(verify_rc, report, summary, tests)
     if evidence: parts.append(f"验收：{evidence}")
     verify_note = f", host verify rc `{verify_rc}`" if verify_rc is not None else ""
@@ -678,6 +1078,7 @@ if R:
       "backend":r.get("backend"),"model":r.get("model"),"error_class":r.get("error_class"),"summary":(str(res.get("summary") or "") if isinstance(res,dict) else str(res or ""))[:1200],
       "tests":(str(res.get("tests") or "") if isinstance(res,dict) else "")[:400],
       "verify_rc":(r.get("verify") or {}).get("rc") if isinstance(r.get("verify"),dict) else None,
+      "evidence":r.get("evidence"),
       "ended_at":ended}
   else:
     out["run"]="running"
@@ -698,7 +1099,7 @@ def remote(lane, cfg, run=""):
     except Exception: return {"error": out[-200:]}
 
 def queue():
-    rc, out, err = gh(["issue", "list", "--state", "open", "--label", "lane-ready", "--limit", "100", "--json", "number,title,labels,body"])
+    rc, out, err = gh(["issue", "list", "--state", "open", "--label", "lane-ready", "--limit", "100", "--json", "number,title,labels,body,createdAt"])
     if rc: raise RuntimeError(err)
     items = []
     for i in json.loads(out):
@@ -717,7 +1118,7 @@ def queue():
             valid, missing = verify_requirements(body)
             if not valid:
                 log_verify_rejected(i["number"], missing); continue
-        items.append({"n": i["number"], "title": i["title"], "body": body, "labels": sorted(labels), "prio": pr, "backend": be, "strict": "strict-backend" in labels, "verify": verify})
+        items.append({"n": i["number"], "title": i["title"], "body": body, "labels": sorted(labels), "prio": pr, "backend": be, "strict": "strict-backend" in labels, "verify": verify, "queued": to_epoch(i.get("createdAt"))})
     return sorted(items, key=lambda x: (x["prio"], x["n"]))
 
 VERIFY_HEADING_RE = re.compile(r"(?mi)^##[^\S\r\n]*Verify[^\S\r\n]*Intent[^\S\r\n]*$")
@@ -769,23 +1170,113 @@ def queue_class_limits(lanes, state, idle):
     work_busy = sum(1 for L in active if state.get(L) and (state[L].get("class") != "verify"))
     return max(0, reserve - verify_busy), max(0, total - reserve - work_busy)
 
+VERIFY_METRICS_KEY = "_verify_metrics"
+VERIFY_HISTOGRAM_BUCKETS = (60, 300, 900, 1800, 3600)
+
+def verify_metrics(state):
+    """Persistent measurements for verify cards and their dispatch-share window."""
+    metrics = state.setdefault(VERIFY_METRICS_KEY, {"cards": {}, "dispatches": {"verify": 0, "all": 0},
+                                                     "work_cap_hits": 0})
+    metrics.setdefault("cards", {})
+    metrics.setdefault("dispatches", {}).setdefault("verify", 0)
+    metrics.setdefault("dispatches", {}).setdefault("all", 0)
+    metrics.setdefault("work_cap_hits", 0)
+    return metrics
+
+def verify_record(state, issue):
+    return verify_metrics(state)["cards"].get(str(issue))
+
+def record_verify_time(state, issue, point, at=None):
+    record = verify_record(state, issue)
+    if record is not None:
+        record.setdefault(point, time.time() if at is None else at)
+
+def verify_histogram(state, point):
+    """Histogram durations from queued to dispatched or verdict."""
+    counts = {}
+    edges = (0,) + VERIFY_HISTOGRAM_BUCKETS
+    for low, high in zip(edges, edges[1:]): counts[f"{low}-{high}"] = 0
+    counts[f"{VERIFY_HISTOGRAM_BUCKETS[-1]}+"] = 0
+    for record in verify_metrics(state)["cards"].values():
+        end = record.get(point)
+        start = record.get("queued")
+        if end is None or start is None: continue
+        duration = max(0.0, float(end) - float(start))
+        bucket = next((f"{low}-{high}" for low, high in zip(edges, edges[1:])
+                       if low <= duration < high), f"{VERIFY_HISTOGRAM_BUCKETS[-1]}+")
+        counts[bucket] += 1
+    return {key: value for key, value in counts.items() if value}
+
+def observe_verify_verdicts(state):
+    """Poll tracked cards, including harvested cards no longer represented by a lane."""
+    metrics = verify_metrics(state)
+    for issue, record in metrics["cards"].items():
+        if record.get("verdict") is not None: continue
+        try:
+            rc, output, _ = gh(["issue", "view", str(issue), "--json", "state,labels"])
+            if rc: continue
+            card = json.loads(output)
+            labels = label_names(card)
+            if card.get("state") == "CLOSED" or any(label == "verdict" or label.startswith("verdict:") for label in labels):
+                record["verdict"] = time.time()
+        except (OSError, ValueError, TypeError):
+            continue
+
 def age_s(st):
     try: return time.time() - time.mktime(time.strptime(st["at"], "%Y-%m-%d %H:%M:%S"))
     except Exception: return 1e9
+
+def requeue_lost_run(L, st, r, state, why="orphaned"):
+    """Re-queue the card of a run that was lost (the safe orphan path).
+
+    The labels of the issue and the lane state are updated together: when the label
+    update fails, the lane state is kept, so the next tick retries instead of losing
+    the card (Refs #1673)."""
+    n = st["issue"]
+    rc, out, _ = gh(["issue", "view", str(n), "--json", "state,labels"])
+    if rc: return False
+    try: j = json.loads(out); labels = {l["name"] for l in j["labels"]}
+    except Exception: return False
+    if j["state"] == "OPEN" and "lane-pr" not in labels:
+        rc, _, _ = gh(["issue", "edit", str(n), "--remove-label", "in-progress", "--add-label", "lane-ready"])
+        if rc: return False
+        what = "requeued (lane-ready)"
+    else: what = f"already {j['state'].lower()}/{'lane-pr' if 'lane-pr' in labels else '-'}; dropped"
+    log(f"{L} #{n} run {st['run']} {why} (remote lane {r.get('lane')}, current_run={r.get('current_run')}, run_state={r.get('run_state')}, runner dead) → {what}")
+    return True
 
 def reconcile(L, cfg, st, r, state):
     """Local state says busy but the remote lane is idle on another/no run, the run has no result.json and its runner is dead:
     the run was orphaned (lane restart / reassignment). Drop it; requeue the issue unless it already got a PR or closed."""
     if r.get("run") != "running" or r.get("lane") != "idle" or r.get("current_run") == st["run"]: return False
-    if r.get("runner_alive") or (r.get("runner_alive") is None and age_s(st) < 600) or age_s(st) < 180: return False
-    n = st["issue"]; _, out, _ = gh(["issue", "view", str(n), "--json", "state,labels"])
-    try: j = json.loads(out); labels = {l["name"] for l in j["labels"]}
-    except Exception: return False
-    if j["state"] == "OPEN" and "lane-pr" not in labels:
-        gh(["issue", "edit", str(n), "--remove-label", "in-progress", "--add-label", "lane-ready"])
-        what = "requeued (lane-ready)"
-    else: what = f"already {j['state'].lower()}/{'lane-pr' if 'lane-pr' in labels else '-'}; dropped"
-    log(f"{L} #{n} run {st['run']} orphaned (remote lane idle, current_run={r.get('current_run')}, run_state={r.get('run_state')}, runner dead) → {what}")
+    # Missing status is not evidence that the runner exited. Keep the lane claimed
+    # until the remote probe positively reports a dead runner (Refs #1673).
+    if r.get("runner_alive") is not False or age_s(st) < 180: return False
+    return requeue_lost_run(L, st, r, state, "orphaned")
+
+def verify_recovered_run(L, cfg, st, r, state):
+    """Verify the run of a lane whose host came back; clean it up when it is lost.
+
+    The runner of the run decides: a live runner means the run continues (the
+    ordinary harvest picks it up when it ends), a dead runner means the run was lost
+    with the outage and its card is re-queued through the orphan path.  An unknown
+    liveness keeps the lane and its card: the runner may still be running, and a
+    second dispatch would run the same work twice (Refs #1673).
+
+    Returns True when the run was cleaned up (the lane slot is free again)."""
+    pending = recovery_runs(state)
+    if L not in pending: return False
+    liveness = runner_liveness(r)
+    if liveness == "alive":
+        pending.pop(L, None)
+        log(f"{L} run {st['run']} survived the outage of {cfg['host']}: the runner is alive, the run continues", brain=False)
+        return False
+    if liveness == "unknown":
+        log(f"{L} run {st['run']}: the liveness of the runner is unknown, the lane keeps its card until the host can tell", brain=False)
+        return False
+    if age_s(st) < 180: return False  # a young run: the host may still be starting it
+    if not requeue_lost_run(L, st, r, state, "lost with the outage of the host"): return False
+    pending.pop(L, None)
     return True
 
 def verify_of(body):
@@ -949,25 +1440,106 @@ def update_busy_stale(lanes, state, res):
             log(f"{lane} #{st['issue']} run {st['run']} stale: no trusted activity; review required", brain=False)
     save_state(state)
 
-def status_snapshot(lanes, state, res, ready, blocked):
+def status_snapshot(lanes, state, res, ready, blocked, records=None):
     """Build the observable lane status row, including this process's stale skips."""
     status = {L: (("stale #%s (review required)" if "stale_since" in state[L] else "busy #%s") % state[L]["issue"]) if state.get(L) else (res[L].get("error") or res[L].get("lane") or "?") for L in lanes}
     status["_busy"] = sum(1 for L in lanes if state.get(L) and "stale_since" not in state[L])
     status["_stale"] = sum(1 for L in lanes if state.get(L) and "stale_since" in state[L])
     status["_ready"] = ready
     status["_blocked"] = blocked
+<<<<<<< HEAD
     status["_queue_failures"] = int(state.get("_queue_failures", 0) or 0)
     status["_minted"] = int(state.get("_minted", 0) or 0)
+=======
+    status["_pauses"] = pause_reasons(lanes, records)  # which switch holds every paused lane (Refs #1592)
+>>>>>>> e10376015100591e0fc16b53c94009676407945a
     status["_stale_stripped_n"] = STALE_STRIPPED_N
     status["_stale_search_skips"] = STALE_STRIPPED_N
     status["_stale_lane_failed_skips"] = STALE_LANE_FAILED_N
+    status["_fetch_failures"] = dispatch_fetch_health(lanes)
     idle_s, idle_reason, idle_open_s = idle_metrics(state)
     status["_idle_s"] = idle_s              # the last idle gap of every lane (run end -> dispatch)
     status["_idle_reason"] = idle_reason    # why that gap was long
     status["_idle_open_s"] = idle_open_s    # the gap the idle lanes are in right now
     status["_idle_worst_s"] = max(idle_open_s.values(), default=0.0)
     status["_at"] = time.strftime("%F %T")
+    metrics = verify_metrics(state)
+    status["_verify_wait_histogram"] = verify_histogram(state, "dispatched")
+    status["_verify_cycle_histogram"] = verify_histogram(state, "verdict")
+    status["_verify_deficit"] = metrics.get("deficit", 0)
+    dispatches = metrics["dispatches"]
+    status["_verify_share"] = (dispatches["verify"] / dispatches["all"] if dispatches["all"] else 0.0)
+    status["_work_cap_hits"] = metrics["work_cap_hits"]
     return status
+
+def classify_dispatch_fetch_error(error):
+    """Return a useful network failure category for dispatch fetch diagnostics."""
+    if DISPATCH_FETCH_TRANSIENT_RE.search(error or ""): return "network_transient"
+    if re.search(r"Authentication failed|Permission denied \(publickey\)|403|repository not found", error or "", re.I):
+        return "authentication_or_access"
+    return "git_fetch_error"
+
+def record_dispatch_fetch_failure(host, error, at=None):
+    """Keep a bounded one-hour failure history for the target host."""
+    at = time.time() if at is None else at
+    records = DISPATCH_FETCH_FAILURES.setdefault(host, [])
+    records.append({"at": at, "type": classify_dispatch_fetch_error(error)})
+    cutoff = at - DISPATCH_FETCH_FAILURE_WINDOW
+    DISPATCH_FETCH_FAILURES[host] = [record for record in records if record["at"] >= cutoff]
+
+def dispatch_fetch_health(lanes, now=None):
+    """Health view of recent target-host fetch failures (one-hour rolling window)."""
+    now = time.time() if now is None else now
+    hosts = {cfg.get("host") for cfg in lanes.values() if cfg.get("host")}
+    hosts.update(cfg.get("controller_host", "controller") for cfg in lanes.values())
+    result = {}
+    for host in sorted(hosts):
+        records = [r for r in DISPATCH_FETCH_FAILURES.get(host, [])
+                   if r["at"] >= now - DISPATCH_FETCH_FAILURE_WINDOW]
+        if records:
+            counts = {}
+            for record in records: counts[record["type"]] = counts.get(record["type"], 0) + 1
+            result[host] = {"recent_failures": len(records),
+                            "primary_error": max(counts, key=counts.get),
+                            "window_seconds": DISPATCH_FETCH_FAILURE_WINDOW}
+    return result
+
+def git_network_policy(cfg, harvest=False):
+    """Per-host lane config: fetch_policy={attempts, delay, fallback_after}.
+
+    Main fetch, controller fetch, mirror fetch and seed push use the same bounds.
+    fallback_after caps direct HTTPS attempts independently of the retry budget.
+    """
+    configured = cfg.get("fetch_policy", {})
+    attempts = max(1, int(configured.get("attempts", HARVEST_FETCH_MAX_ATTEMPTS if harvest
+                                         else DISPATCH_BASE_FETCH_ATTEMPTS)))
+    return {"attempts": attempts,
+            "delay": max(0, float(configured.get("delay", HARVEST_FETCH_RETRY_DELAY if harvest
+                                                  else DISPATCH_BASE_FETCH_DELAY))),
+            "fallback_after": max(1, min(attempts, int(configured.get("fallback_after", attempts))))}
+
+def git_network_operation(command, host, operation, policy, direct=False, transient_only=False,
+                          track_fetch=True):
+    """Retry a Git transfer; seed pushes opt out of fetch failure health counts."""
+    attempts = policy["fallback_after"] if direct else policy["attempts"]
+    for attempt in range(1, attempts + 1):
+        try:
+            rc, out, err = sh(command, timeout=180)
+        except subprocess.TimeoutExpired as error:
+            # subprocess can return partial bytes even with text=True. Keep the
+            # timeout in the normal failure path for retries, fallback and health.
+            out, err = error.stdout or "", error.stderr or ""
+            if isinstance(out, bytes): out = out.decode(errors="replace")
+            if isinstance(err, bytes): err = err.decode(errors="replace")
+            rc, err = 124, f"git transfer timed out after {error.timeout}s: {err}"
+        if not rc: return rc, out, err
+        if track_fetch: record_dispatch_fetch_failure(host, err)
+        retry = attempt < attempts and (not transient_only or classify_harvest_fetch_error(err) == "transient")
+        log(f"{host} {operation} failed {attempt}/{attempts} "
+            f"({classify_dispatch_fetch_error(err)}); " + ("retrying" if retry else "exhausted"), brain=False)
+        if not retry: break
+        time.sleep(policy["delay"] * attempt)
+    return rc, out, err
 
 def deps_met(item):
     """Body line `依赖：#12 #34` (or `Depends on: #12`) gates dispatch until those issues are CLOSED."""
@@ -989,6 +1561,12 @@ def base_fetch_command(repo_path, url, branch):
     """Remote snippet: fetch the base branch into the target repo."""
     return f"git -C {repo_path} fetch -q {url} {branch}"
 
+def base_seed_push_command(local_repo, host, repo_path, base):
+    """Push the already-fetched base object from the controller into a lane repo over SSH."""
+    return ["git", "-c", f"core.sshCommand={git_ssh_command(ssh_opts(host))}",
+            "-C", local_repo, "push", "-q", f"{host}:{repo_path}",
+            f"{base}:refs/fleet/seed/{base}"]
+
 def dispatch_failed(lane, cfg, item, error, busy=False):
     """Drop the claim; capacity denials wait quietly, host failures back off.
 
@@ -1001,6 +1579,21 @@ def dispatch_failed(lane, cfg, item, error, busy=False):
     if CAPACITY_EXHAUSTED_RE.search(str(error)): return
     if busy:
         log(f"{lane} #{item['n']}: the host still calls the lane busy; no card assigned, the host is not backed off", brain=False)
+        return
+    if str(error).startswith("dispatch fetch failed:"):
+        health = dispatch_fetch_health({lane: cfg}).get(cfg["host"], {})
+        category = health.get("primary_error", "git_fetch_error")
+        b = BACKOFF.setdefault(cfg["host"], {"n": 0, "until": 0}); b["n"] += 1
+        wait = min(HOST_BACKOFF_MAX, HOST_BACKOFF_BASE * 2 ** (b["n"] - 1)); b["until"] = time.time() + wait
+        log(f"{cfg['host']} dispatch fetch failed ({category}; recent={health.get('recent_failures', 1)}; "
+            f"#{item['n']}: {str(error)[-100:]}); backing off {wait}s", brain=False)
+        return
+    if str(error).startswith("controller source fetch failed:"):
+        source = cfg.get("controller_host", "controller")
+        health = dispatch_fetch_health({"source": {"host": source}}).get(source, {})
+        log(f"dispatch #{item['n']} controller source fetch failed; {cfg['host']} remains healthy "
+            f"(source={source}; recent={health.get('recent_failures', 0)}; "
+            f"primary_error={health.get('primary_error', 'git_fetch_error')}; {str(error)[-120:]})", brain=False)
         return
     host_fail(cfg["host"], f"dispatch #{item['n']}: {error}")
 
@@ -1043,14 +1636,37 @@ def dispatch(lane, cfg, item, base):
         # fetch-on-miss: pull the base branch into the target repo, then check again. No AD-side
         # mutex guards the fetch, so concurrent ticks never block each other (git serializes its
         # own short-lived ref locks).
-        frc, _, ferr = sh(ssh_argv(ssh_opts(h), h, base_fetch_command(R, BASE_REPO_URL, BASE_BRANCH)), timeout=180)
+        policy = git_network_policy(cfg)
+        frc, _, ferr = git_network_operation(
+            ssh_argv(ssh_opts(h), h, base_fetch_command(R, BASE_REPO_URL, BASE_BRANCH)),
+            h, f"dispatch fetch #{n}", policy, direct=True)
         if frc:
-            # A failing fetch aborts the dispatch right away: the base could not be validated, and
-            # a later successful check (e.g. a concurrent tick that fetched the object in the
-            # meantime) must never mask the fetch failure. The caller backs the host off as usual.
-            # The fetch failure ends the message: the host backoff log keeps the last 80 chars.
-            raise RuntimeError(f"base check: {(err or out).strip()[-120:]} | "
-                               f"base fetch failed rc={frc}: {ferr.strip()[-40:]}")
+            log(f"{h} dispatch fetch #{n}: direct fetch threshold reached; falling back to controller seed push", brain=False)
+            controller_repo = cfg.get("controller_repo", LOCAL)
+            controller_host = cfg.get("controller_host", "controller")
+            src_rc, _, src_err = git_network_operation(
+                ["git", "-C", controller_repo, "fetch", "-q", BASE_REPO_URL, base],
+                controller_host, f"controller source fetch #{n}", policy)
+            if src_rc:
+                # The controller's GitHub route must never back off the target host.
+                frc, ferr = src_rc, f"controller source fetch failed: {src_err.strip()[-120:]}"
+            else:
+                frc, _, ferr = git_network_operation(
+                    base_seed_push_command(controller_repo, h, R, base), h, f"seed push #{n}", policy,
+                    track_fetch=False)
+            if frc and cfg.get("seed_url"):
+                frc, _, ferr = git_network_operation(
+                    ssh_argv(ssh_opts(h), h, base_fetch_command(R, cfg["seed_url"], BASE_BRANCH)),
+                    h, f"seed mirror fetch #{n}", policy)
+            if frc:
+                if src_rc and not cfg.get("seed_url"):
+                    raise RuntimeError(ferr)
+                health = dispatch_fetch_health({lane: cfg}).get(h, {})
+                raise RuntimeError(f"dispatch fetch failed: base check: {(err or out).strip()[-100:]} | "
+                                   f"rc={frc}: {ferr.strip()[-120:]}; recent fetch failures="
+                                   f"{health.get('recent_failures', 0)}; primary error="
+                                   f"{health.get('primary_error', 'git_fetch_error')}")
+            log(f"{h} dispatch fetch #{n}: seed fallback succeeded; verifying base commit", brain=False)
         time.sleep(DISPATCH_BASE_FETCH_DELAY)
     raise RuntimeError(f"assign rc={rc}: {(err or out).strip()[-300:]}")
 
@@ -1062,7 +1678,8 @@ def git_fetch_command(ssh_options, local_repo, remote, branch, lane):
 
 def classify_harvest_fetch_error(error):
     """Classify a harvest fetch failure: `transient` (retry after a backoff) or `fatal` (a retry cannot help)."""
-    return "transient" if HARVEST_FETCH_TRANSIENT_RE.search(error or "") else "fatal"
+    return "transient" if (HARVEST_FETCH_TRANSIENT_RE.search(error or "") or
+                           DISPATCH_FETCH_TRANSIENT_RE.search(error or "")) else "fatal"
 
 def should_retry_harvest_fetch(error, attempt, max_attempts=HARVEST_FETCH_MAX_ATTEMPTS):
     """Return whether a failed harvest fetch is transient and still within its retry bound."""
@@ -1091,23 +1708,18 @@ def label_lane_failed(n, body):
     gh(["issue", "edit", str(n), "--remove-label", "in-progress", "--remove-label", "lane-ready", "--add-label", "lane-failed"])
     gh(["issue", "comment", str(n), "--body", body])
 
-def harvest_fetch(lane, n, fetch, st):
+def harvest_fetch(lane, n, fetch, st, cfg=None):
     """Fetch a finished lane branch with bounded attempts.
 
     Returns (ok, error, failures); `failures` counts the consecutive failed harvest
     cycles of this lane and is reset by the first successful fetch.
     """
-    err = ""
-    for attempt in range(1, HARVEST_FETCH_MAX_ATTEMPTS + 1):
-        rc, _, err = sh(fetch, timeout=180)
-        if not rc:
-            st.pop("fetch_failures", None); st.pop("fetch_backoff_until", None)
-            return True, "", 0
-        if not should_retry_harvest_fetch(err, attempt):
-            log(f"{lane} #{n} fetch failed after {attempt}/{HARVEST_FETCH_MAX_ATTEMPTS} attempts ({classify_harvest_fetch_error(err)}: {err.strip()[-120:]})", brain=False)
-            break
-        log(f"{lane} #{n} fetch failed attempt {attempt}/{HARVEST_FETCH_MAX_ATTEMPTS} (transient: {err.strip()[-90:]}); retrying in {HARVEST_FETCH_RETRY_DELAY}s", brain=False)
-        time.sleep(HARVEST_FETCH_RETRY_DELAY)
+    cfg = cfg or {}
+    rc, _, err = git_network_operation(fetch, cfg.get("host", lane), f"PR head fetch {lane} #{n}",
+                                        git_network_policy(cfg, harvest=True), transient_only=True)
+    if not rc:
+        st.pop("fetch_failures", None); st.pop("fetch_backoff_until", None)
+        return True, "", 0
     failures = int(st.get("fetch_failures", 0) or 0) + 1
     st["fetch_failures"] = failures
     return False, err, failures
@@ -1183,11 +1795,11 @@ def block_pr_validation(lane, cfg, st, info, state, title, body, missing):
             "error": f"PR 提交前校验未通过（{PR_VALIDATION_STRICT}）：{'；'.join(missing)}",
             "missing": list(missing)}
 
-# The artifacts that never enter a harvested branch (Refs #1835): the hidden build
-# leftovers (swrm/tests/.dde4*-00000000.so) and the review products
+# The artifacts that never enter a harvested branch (Refs #1835, #1863): shared
+# object files and the review products
 # (.lane-review/PR-N.md).  The rules are a list constant: one more artifact kind is
 # one more pattern. This legacy AD owns its filtering rules.
-HARVEST_EXCLUDE_PATTERNS = [re.compile(r"(^|/)\.[^/]*\.so$"), re.compile(r"(^|/)\.lane-review/")]
+HARVEST_EXCLUDE_PATTERNS = [re.compile(r"(^|/)[^/]*\.so$"), re.compile(r"(^|/)\.lane-review/")]
 
 def filter_harvest(ref, base):
     """Rebuild the harvested branch without the artifacts that never enter a PR.
@@ -1249,10 +1861,14 @@ def finish(lane, cfg, st, info, state):
     "missing": [...]}. `done` means the lane slot is free again; `error` carries the
     explicit reason back to the caller (Refs #1704)."""
     n, run = st["issue"], st["run"]
+    if st.get("class") == "verify":
+        missing = review_evidence_errors(info.get("evidence"))
+        if missing:
+            return block_pr_validation(lane, cfg, st, info, state, "", "", missing)
     if info.get("branch") and info["branch"] != "None" and info.get("commit"):
         b = f"fleet/{lane}-issue{n}-{run}"
         fetch = git_fetch_command(ssh_opts(cfg["host"]), LOCAL, f"{cfg['host']}:{info['repo']}", info["branch"], lane)
-        ok, err, failures = harvest_fetch(lane, n, fetch, st)
+        ok, err, failures = harvest_fetch(lane, n, fetch, st, cfg)
         if not ok: return handle_harvest_fetch_failure(lane, cfg, st, info, state, err, failures)
         try:
             head, removed, empty = filter_harvest(f"refs/fleet/{lane}", st.get("base"))
@@ -1271,6 +1887,7 @@ def finish(lane, cfg, st, info, state):
         if rc: return {"done": False, "status": "push-failed", "error": f"push failed: {err.strip()[-200:]}", "missing": []}
         _, lj, _ = gh(["issue", "view", str(n), "--json", "labels"])
         if "lane-pr" in lj:
+            record_verify_time(state, n, "evidence_ready")
             gh(["issue", "comment", str(n), "--body", f"Lane {lane} also finished this issue (run `{run}`, duplicate dispatch); branch `{b}` pushed for comparison, no second PR opened."])
             log(f"{lane} finished #{n} (run {run}) duplicate → branch {b}, no PR"); mark_done(state, n)
             return {"done": True, "status": "duplicate", "error": None, "missing": []}
@@ -1278,6 +1895,11 @@ def finish(lane, cfg, st, info, state):
         _, msg, _ = sh(["git", "-C", LOCAL, "log", "-1", "--format=%B", head])
         title, body = lane_pr_content(n, lane, cfg, st, info, subj, msg, info.get("summary"), info.get("tests"), info.get("verify_rc"))
         missing = validate_lane_pr(n, title, body)
+        # A quoted opinion (or a raw log) may contain closing keywords, but it
+        # cannot supply the commit's missing issue linkage.
+        if st.get("class") == "verify" and not closing_reference(n, msg):
+            problem = f"PR 正文缺少 Closes/Fixes/Resolves #{n}"
+            if problem not in missing: missing.append(problem)
         mode = pr_validation_mode()
         if missing and mode == PR_VALIDATION_STRICT:
             return block_pr_validation(lane, cfg, st, info, state, title, body, missing)
@@ -1286,6 +1908,7 @@ def finish(lane, cfg, st, info, state):
         rc, out, err = gh(["pr", "create", "--base", "main", "--head", b, "--title", title, "--body", body])
         url = (out.strip().splitlines() or [""])[-1] if not rc else f"(pr create failed: {err.strip()[-160:]})"
         gh(["issue", "edit", str(n), "--remove-label", "in-progress", "--remove-label", "lane-ready", "--add-label", "lane-pr"])
+        record_verify_time(state, n, "evidence_ready")
         log(f"{lane} finished #{n} (run {run}, {info.get('status')}) → {url}"); mark_done(state, n)
         return {"done": True, "status": "pr-created", "error": None, "missing": []}
     else:
@@ -1454,8 +2077,20 @@ def idle_metrics(state, now=None):
 
 def tick(lanes, state, last_warn):
     audit_switches()  # the switch audit runs every tick, also when the loop itself is paused (Refs #1827)
-    scopes = paused_scopes()  # the swrm pause store and the legacy PAUSE markers (Refs #1366)
-    if "all" in scopes: return last_warn
+    records = pause_records()  # the swrm pause store and the legacy PAUSE markers (Refs #1366, #1592)
+    scopes = paused_scopes(records=records)
+    if "all" in scopes:
+        # Keep the pause visible even though this tick does no remote or queue work.
+        # Queue counts remain the last observed values while dispatch is stopped.
+        path = f"{D}/lanes-status.json"
+        try:
+            with open(path) as stream: previous = json.load(stream)
+        except (OSError, ValueError): previous = {}
+        if not isinstance(previous, dict): previous = {}
+        res = {L: {"lane": "paused"} for L in lanes}
+        st = status_snapshot(lanes, state, res, previous.get("_ready", 0), previous.get("_blocked", 0), records)
+        with open(path, "w") as stream: json.dump(st, stream, ensure_ascii=False, indent=1)
+        return last_warn
     label_cache_reset()  # authoritative label reads are cached for one tick only
     state.setdefault("_done", [])
     idle_books(state)  # the idle bookkeeping of the state exists from the first tick on
@@ -1470,12 +2105,24 @@ def tick(lanes, state, last_warn):
     for L in lanes:
         if L not in res: res[L] = {"error": "host in backoff", "skip": True}
     seen = set()
+    recovered_hosts = []
     for L in live:
         h = lanes[L]["host"]
         if h in seen: continue
         errs = [res[x] for x in live if lanes[x]["host"] == h and "error" in res[x]]
-        if errs: host_fail(h, errs[0]["error"]); seen.add(h)
-        else: host_good(h); seen.add(h)
+        if errs:
+            host_fail(h, errs[0]["error"]); seen.add(h)
+            note_host_unreachable(state, h)  # the outage is recorded (Refs #1673)
+        else:
+            host_good(h); seen.add(h)
+            if host_came_back(state, h): recovered_hosts.append(h)
+    # the hosts that came back: re-check their pauses and verify the runs in flight
+    # (Refs #1673).  The edge is consumed here; the verification of a run is retried
+    # in the following ticks until it succeeds.
+    for h in recovered_hosts:
+        release_unreachable_pauses(h, host_pause_paths(h, lanes_of_host(lanes, h)))
+        mark_recovery_runs(state, h, lanes)
+        scopes = paused_scopes()  # the released pause opens the host again
     q = None
     queue_failed = False
     queue_error = ""
@@ -1497,6 +2144,12 @@ def tick(lanes, state, last_warn):
             log(f"queue error: {e}", brain=False)
             return False
         for i in q: i["deps_ok"] = deps_met(i)
+        metrics = verify_metrics(state)
+        for item in q:
+            if item.get("verify"):
+                # Use the order time, including time spent waiting while AD was stopped.
+                queued = item.get("queued")
+                metrics["cards"].setdefault(str(item["n"]), {"issue": item["n"], "queued": now if queued is None else queued})
         # one authoritative read per issue per tick, shared by all dispatches and the count
         prefetch_labels([i["n"] for i in q])
         return True
@@ -1530,12 +2183,15 @@ def tick(lanes, state, last_warn):
                     and (name in freed_lanes or res[name].get("lane") == "idle")
                     and host_ok(c["host"]) and not lane_paused(name, c, scopes)]
             verify_slots, work_slots = queue_class_limits(lanes, state, idle)
+            metrics = verify_metrics(state)
+            metrics["deficit"] = verify_slots
             # The work class may hold at most `total - reserve` lanes: with no work slot left it takes
             # no further lane, the work cards in flight keep the lanes they hold (Refs #1864). The cap
             # is a limit, not a preference: a waiting work card is not dispatched on any lane.
             if not work_slots:
                 waiting = [i for i in candidates if not i.get("verify")]
                 if waiting:
+                    metrics["work_cap_hits"] += 1
                     log(f"queue share: {L} work class at its cap (work slots=0, verify deficit={verify_slots}); "
                         f"{len(waiting)} work card(s) wait", brain=False)
                 candidates = [i for i in candidates if i.get("verify")]
@@ -1562,6 +2218,13 @@ def tick(lanes, state, last_warn):
             dispatch_failed(L, cfg, pick, e, busy=bool(LANE_BUSY_RE.search(str(e))))
             return "no-capacity"
         q.remove(pick); state[L] = {"issue": pick["n"], "run": run, "host": cfg["host"], "base": commit, "at": time.strftime("%F %T"), "verify": ver, "class": "verify" if pick.get("verify") else "work"}
+        metrics = verify_metrics(state)
+        # The snapshot and saved state must reflect the slot just occupied.
+        if AD_VERIFY_SHARE_ENABLED: metrics["deficit"] = queue_class_limits(lanes, state, idle)[0]
+        metrics["dispatches"]["all"] += 1
+        if pick.get("verify"):
+            metrics["dispatches"]["verify"] += 1
+            record_verify_time(state, pick["n"], "dispatched", time.time())
         # Stop this lane's gap at its own successful dispatch. Later lanes may take
         # minutes to assign; their work cannot extend an already occupied lane's gap.
         closed = idle_close(state, L, time.time(), last_alive, tick_started_at=now)
@@ -1579,15 +2242,21 @@ def tick(lanes, state, last_warn):
         st = state.get(L)
         if "error" in r: continue
         freed = False
-        if st and isinstance(r.get("run"), dict):
+        if not st:
+            recovery_runs(state).pop(L, None)  # the lane is free: nothing left to verify
+        elif isinstance(r.get("run"), dict):
             if lane_in_fetch_backoff(st): continue  # harvest fetch is backing off after a transient failure (Refs #947)
             # the run ended: the lane is idle from its own end time on (Refs #1688)
             idle_open(state, L, r["run"].get("ended_at"), now, last_alive)
             result = finish(L, lanes[L], st, r["run"], state)
             if result.get("done"):
+                recovery_runs(state).pop(L, None)
                 state.pop(L); save_state(state); freed = True
             if result.get("error"): log(f"{L} #{st['issue']} run {st['run']}: {result['error']}", brain=False)
-        elif st and reconcile(L, lanes[L], st, r, state):
+        elif reconcile(L, lanes[L], st, r, state):
+            recovery_runs(state).pop(L, None)
+            state.pop(L); save_state(state); freed = True
+        elif verify_recovered_run(L, lanes[L], st, r, state):
             state.pop(L); save_state(state); freed = True
         if freed:
             freed_lanes.add(L)
@@ -1640,8 +2309,9 @@ def tick(lanes, state, last_warn):
     # queue was unreadable, and the cards minted since then are counted on top of it (Refs #1662)
     state["_ready"] = ready; state["_minted"] = len(filed); state["_queue_failures"] = 0
     state["_tick_at"] = now
+    observe_verify_verdicts(state)
     save_state(state)
-    st = status_snapshot(lanes, state, res, ready, blocked)
+    st = status_snapshot(lanes, state, res, ready, blocked, records)
     with open(f"{D}/lanes-status.json", "w") as stream:
         json.dump(st, stream, ensure_ascii=False, indent=1)
     return last_warn
