@@ -68,7 +68,7 @@ def _is_result_receipt(obj: object) -> bool:
         return False
     if not isinstance(obj.get("id"), str) or not obj["id"].strip():
         return False
-    terminal_statuses = ("done", "partial", "failed", "stopped", "budget_exceeded")
+    terminal_statuses = ("done", "partial", "failed", "stopped", "budget_exceeded", "unroutable")
     if "status" in obj and obj["status"] not in terminal_statuses:
         return False
     run_dir = obj.get("run_dir")
@@ -78,6 +78,12 @@ def _is_result_receipt(obj: object) -> bool:
         or (isinstance(workspace, dict) and workspace.get("mode") in ("worktree", "in-place", "github-issue"))
     )
     if obj.get("status") in terminal_statuses and has_run_context:
+        return True
+    decision = obj.get("decision")
+    if (obj.get("status") == "unroutable" and isinstance(decision, dict)
+            and decision.get("ok") is False and isinstance(decision.get("reasons"), list)
+            and "skipped" in decision and "planner" in decision and "profile" in decision
+            and "scope" in obj):
         return True
     # Statusless receipts must include executor attempts and a top-level usage
     # summary; run context alone is also common on unrelated telemetry events.

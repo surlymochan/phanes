@@ -141,6 +141,17 @@ def test_receipt_returns_last_run_result(status):
     assert extract_result_object(stdout) == receipt
 
 
+def test_unroutable_receipt_without_run_context_wins_over_previous_receipt():
+    previous = {"id": "previous", "status": "done", "run_dir": "runs/previous"}
+    receipt = {"id": "current", "status": "unroutable", "scope": "task",
+               "decision": {"ok": False, "reasons": [], "skipped": {},
+                            "planner": {}, "profile": {}}}
+    telemetry = {"id": "metrics", "event": "usage", "run_dir": "runs/current"}
+    assert extract_result_object(json.dumps(receipt)) == receipt
+    assert extract_result_object("\n".join(map(json.dumps, [previous, receipt, telemetry]))) == receipt
+    assert extract_result_object(json.dumps({"id": "metrics", "status": "unroutable"})) is None
+
+
 class SwrmFinishEdgeTests(unittest.TestCase):
     def test_creates_missing_nested_events_directory_before_failure_receipt(self):
         with tempfile.TemporaryDirectory() as temp:
