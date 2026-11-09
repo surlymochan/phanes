@@ -145,6 +145,12 @@ async function host(): Promise<void> {
       clearAgentSession: () => Effect.void,
     },
   });
+  const publishedTasks = new Map<string, AgentTask>();
+  service.on("event", (event) => {
+    if (event.type === "agent-tasks-changed") {
+      for (const task of event.snapshot.tasks) publishedTasks.set(task.id, task);
+    }
+  });
   try {
     await run(service.initialize());
     if (process.env.RECOVERY_PHASE === "before") {
@@ -199,6 +205,11 @@ async function host(): Promise<void> {
           activeTurnId: service.readTask(before.agentId, before.taskId).activeTurnId,
         };
       });
+      assert.deepEqual(
+        publishedTasks.get(before.taskId),
+        evidence.task,
+        "The pushed UI task snapshot must match recovery.",
+      );
       process.send?.(evidence);
     }
   } finally {
@@ -262,7 +273,7 @@ async function scenario(outcome: Outcome) {
     await stopHost(first.child);
     const second = startHost(root, "after", outcome);
     children.push(second.child);
-    const ended = once(second.child, "exit");
+    const ended = once(second.child, "exit", { signal: AbortSignal.timeout(40_000) });
     const after = await second.result;
     const [code] = await ended;
     assert.equal(code, 0);
@@ -270,6 +281,10 @@ async function scenario(outcome: Outcome) {
     const terminal = outcome === "unknown" ? "interrupted" : outcome;
     assert.equal(after.status, terminal);
     assert.equal(after.task.outcome, terminal);
+    assert.equal(after.task.state, "idle");
+    if (terminal === "completed") assert.equal(after.task.completion, 100);
+    if (terminal === "failed") assert.ok(after.task.error, "The failed task must explain its recovered failure.");
+    else assert.equal(after.task.error, null);
     assert.equal(after.task.activeTurnId, null);
     assert.equal(after.activeTurnId, null);
     assert.equal(after.task.queuedMessages.length, 0);
