@@ -7,7 +7,7 @@ import unittest
 from unittest.mock import patch
 
 from tools.upstream_drift import (blob_id, classify, local_files, snapshot,
-                                 unmarked_paths)
+                                 pr_changed_paths, unmarked_paths)
 
 
 SCRIPT = Path(__file__).resolve().parents[1] / "upstream_drift.py"
@@ -56,6 +56,31 @@ class UpstreamDriftTests(unittest.TestCase):
         self.assertEqual(
             unmarked_paths(report, changed, "swrm(codex): #1372 upstream(openbot): sync"), [])
         self.assertEqual(unmarked_paths(report, set(), "fix: unrelated"), [])
+
+    def test_pr_changed_paths_preserve_unusual_filenames(self):
+        with tempfile.TemporaryDirectory(dir=Path.cwd()) as scratch:
+            root = Path(scratch)
+            subprocess.run(["git", "init", str(root)], check=True, capture_output=True)
+            (root / "base.txt").write_text("base\n")
+            commit(root, "base")
+            subprocess.run(["git", "-C", str(root), "branch", "drift-base"],
+                           check=True, capture_output=True)
+            subprocess.run(["git", "-C", str(root), "remote", "add", "origin", str(root)],
+                           check=True, capture_output=True)
+            names = ["space name.txt", "非ASCII.txt", "line\nbreak.txt",
+                     "crlf\r\nbreak.txt", "cr\rbreak.txt"]
+            (root / "demo").mkdir()
+            for name in names:
+                (root / "demo" / name).write_text("changed\n")
+            commit(root, "change")
+
+            with patch("tools.upstream_drift.ROOT", root), patch.dict(
+                    os.environ, {"GITHUB_BASE_REF": "drift-base"}):
+                changed = pr_changed_paths()
+            expected = {f"demo/{name}" for name in names}
+            self.assertEqual(changed, expected)
+            report = {"demo": {"generic": names, "missing": [], "phanes_only": []}}
+            self.assertEqual(set(unmarked_paths(report, changed, "fix: change")), expected)
 
     def test_snapshot_rejects_missing_base_sha(self):
         with tempfile.TemporaryDirectory(dir=os.environ.get("TMPDIR")) as scratch:
