@@ -17,10 +17,29 @@ xs = _load.load()
 STUB = Path(_load.HERE) / "fixtures" / "fake_fleet_swrm.py"
 
 
+def wait_for_batch_summary(path, timeout=120):
+    """Wait for a terminal summary, retaining evidence if a busy runner times out."""
+    deadline = time.monotonic() + timeout
+    summary = None
+    read_error = None
+    while time.monotonic() < deadline:
+        try:
+            summary = json.loads(path.read_text())
+        except (OSError, ValueError) as exc:
+            # A daemon's atomic replacement may be temporarily unreadable.
+            read_error = f"{type(exc).__name__}: {exc}"
+        else:
+            if summary.get("state") in ("finished", "failed"):
+                return summary
+        time.sleep(0.05)
+    raise AssertionError(f"detached batch did not finish within {timeout}s; "
+                         f"last summary={summary!r}; last read error={read_error!r}")
+
+
 class BatchSummaryWaitTests(unittest.TestCase):
     def test_waits_past_old_deadline_and_retries_transient_reads(self):
         path = mock.Mock()
-        path.read_text.side_effect = [FileNotFoundError("pending"), "{", 
+        path.read_text.side_effect = [FileNotFoundError("pending"), "{",
                                       '{"state": "running"}', '{"state": "finished"}']
         with mock.patch.object(time, "monotonic", side_effect=[0, 0, 10, 20, 30]), \
                 mock.patch.object(time, "sleep"):
@@ -427,26 +446,12 @@ class BatchTests(FakeFleetFixture, unittest.TestCase):
         (self.data / "fleet.json").write_text(json.dumps({"hosts": list(self.hosts.values())}))
         proc = subprocess.run([sys.executable, str(Path(_load.ROOT) / "bin" / "swrm"), "batch",
                                "--repo", "project", "--cards", str(self.cards), "--hosts", "b1,b2", "--detach",
-                               "--poll-seconds", "0.01"], capture_output=True, text=True, timeout=10,
+                               "--poll-seconds", "0.01"], capture_output=True, text=True, timeout=120,
                               env={**os.environ, "OPENSWARM_HOME": str(self.data)})
         self.assertEqual(proc.returncode, 0, proc.stderr)
         reply = json.loads(proc.stdout)
         path = self.data / "batches" / reply["id"] / "summary.json"
-        deadline = time.monotonic() + 15
-        while time.monotonic() < deadline:
-            try:
-                summary = json.loads(path.read_text())
-            except (OSError, ValueError):
-                # The daemon publishes summary.json by atomic replacement; on
-                # Windows a poll can observe the file mid-replacement
-                # (PermissionError) or partially written. Keep polling.
-                time.sleep(0.05)
-                continue
-            if summary["state"] in ("finished", "failed"):
-                break
-            time.sleep(0.05)
-        else:
-            self.fail("detached batch did not finish")
+        summary = wait_for_batch_summary(path)
         self.assertEqual(summary["state"], "finished", summary)
         self.assertEqual(summary["cards"][0]["status"], "done", summary)
         self.assertEqual(self.git(self.repo, "rev-parse", summary["cards"][0]["branch"]), summary["cards"][0]["commit"])
