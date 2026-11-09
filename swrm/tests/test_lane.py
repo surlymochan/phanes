@@ -669,7 +669,15 @@ class LaneTests(unittest.TestCase):
 
     def test_cursor_agent_commit_is_reported_with_branch_and_diffstat(self):
         self.set_config("cursor")
+        git_config = self.root / "gitconfig"
+        git_config.write_text("[user]\n\tuseConfigOnly = true\n")
+        self.env.update(GIT_CONFIG_GLOBAL=str(git_config), GIT_CONFIG_NOSYSTEM="1")
         self.start_lane()
+        # Independent lane clones do not inherit the source repo's local identity.
+        # Give the committing fixture its own identity, without relying on the host.
+        wt = self.data / "lanes" / self.lane_name / "wt"
+        self.git("-C", str(wt), "config", "user.name", "Lane Test")
+        self.git("-C", str(wt), "config", "user.email", "lane-test@example.invalid")
         run_id = self.assign("LANE_TEST_AGENT_COMMIT commit the result in the worktree")
         state = self.wait_run(run_id)
         result = json.loads((self.data / "runs" / run_id / "result.json").read_text())
