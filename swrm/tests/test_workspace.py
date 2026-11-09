@@ -1,5 +1,6 @@
 """Regression tests for worktrees, dependency links, host-side verification, risk rules and credential opt-ins."""
-import base64, json, os, shlex, shutil, subprocess, sys, tempfile, threading, unittest
+import base64, json, os, shlex, shutil, subprocess, sys, tempfile, threading, unittest, uuid
+from unittest import mock
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
@@ -215,6 +216,89 @@ class WorkspaceTest(unittest.TestCase):
         self.assertEqual(current_head(), head)
         xs.cleanup_worktree(ws, None)
 
+    @unittest.skipIf(os.name == "nt", "Git metadata write permissions are platform-specific")
+    def test_current_worktree_git_metadata_is_writable(self):
+        # Lane executors need to update the worktree index and refs to produce a commit.
+        # Exercise the checkout running this test: its .git file may point to metadata
+        # outside the sandbox's writable roots.
+        root = subprocess.check_output(["git", "rev-parse", "--show-toplevel"], text=True).strip()
+        def git_path(path):
+            return subprocess.check_output(
+                ["git", "rev-parse", "--path-format=absolute", "--git-path", path],
+                cwd=root, text=True).strip()
+        index_path = git_path("index")
+        probe = tempfile.NamedTemporaryFile(prefix=".l2-1872-", dir=root, delete=False)
+        probe_path = probe.name
+        probe.close()
+        try:
+            staged = subprocess.run(["git", "add", "--", probe_path], cwd=root,
+                                    capture_output=True, text=True)
+            print(f"git add rc={staged.returncode} worktree={root} index={index_path} "
+                  f"stderr={staged.stderr.strip()}", flush=True)
+            with self.subTest(operation="git add"):
+                try:
+                    self.assertEqual(staged.returncode, 0,
+                                     f"git add failed for the current worktree metadata: {staged.stderr.strip()}")
+                finally:
+                    if staged.returncode == 0:
+                        subprocess.run(["git", "reset", "--quiet", "--", probe_path], cwd=root,
+                                       capture_output=True, text=True)
+
+            with self.subTest(operation="git update-ref"):
+                self._check_git_ref_writable(root, f"refs/l2-1872-probe/{uuid.uuid4().hex}")
+        finally:
+            os.unlink(probe_path)
+
+    def _check_git_ref_writable(self, root, ref):
+        head = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=root, text=True).strip()
+        ref_path = subprocess.check_output(
+            ["git", "rev-parse", "--path-format=absolute", "--git-path", ref], cwd=root, text=True).strip()
+        # An empty old value requires an absent ref, even if a random name collides.
+        updated = subprocess.run(["git", "update-ref", ref, head, ""], cwd=root,
+                                 capture_output=True, text=True)
+        print(f"git update-ref rc={updated.returncode} worktree={root} ref={ref_path} "
+              f"stderr={updated.stderr.strip()}", flush=True)
+        try:
+            self.assertEqual(updated.returncode, 0,
+                             f"git update-ref failed for the current worktree metadata: {updated.stderr.strip()}")
+        finally:
+            if updated.returncode == 0:
+                # Never remove a ref another writer changed after our creation.
+                removed = subprocess.run(["git", "update-ref", "-d", ref, head], cwd=root,
+                                         capture_output=True, text=True)
+                self.assertEqual(removed.returncode, 0, f"probe ref cleanup failed: {removed.stderr.strip()}")
+
+    def test_git_ref_probe_preserves_existing_ref(self):
+        ref = "refs/l2-1872-probe/collision"
+        sh("git", "update-ref", ref, "HEAD", cwd=self.repo)
+        before = subprocess.check_output(["git", "rev-parse", ref], cwd=self.repo, text=True)
+        with self.assertRaisesRegex(self.failureException, "git update-ref failed"):
+            self._check_git_ref_writable(self.repo, ref)
+        self.assertEqual(subprocess.check_output(["git", "rev-parse", ref], cwd=self.repo, text=True), before)
+
+    def test_git_ref_probe_preserves_concurrent_ref_update(self):
+        ref = "refs/l2-1872-probe/concurrent"
+        previous = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=self.repo, text=True).strip()
+        sh("git", "-c", "user.name=t", "-c", "user.email=t@t", "commit", "--allow-empty", "-qm", "next",
+           cwd=self.repo)
+        run = subprocess.run
+
+        def concurrent_update(args, **kwargs):
+            if args[:4] == ["git", "update-ref", "-d", ref]:
+                run(["git", "update-ref", ref, previous], cwd=self.repo, check=True, capture_output=True)
+            return run(args, **kwargs)
+
+        with mock.patch.object(subprocess, "run", side_effect=concurrent_update):
+            with self.assertRaisesRegex(self.failureException, "probe ref cleanup failed"):
+                self._check_git_ref_writable(self.repo, ref)
+        self.assertEqual(subprocess.check_output(["git", "rev-parse", ref], cwd=self.repo, text=True).strip(), previous)
+
+    def test_git_ref_probe_removes_its_own_ref(self):
+        ref = "refs/l2-1872-probe/owned"
+        self._check_git_ref_writable(self.repo, ref)
+        self.assertEqual(subprocess.run(["git", "show-ref", "--verify", "--quiet", ref],
+                                        cwd=self.repo).returncode, 1)
+
     def test_watch_accepts_several_runs(self):
         home = os.path.join(self.tmp, "home")
         runs = os.path.join(home, "runs")
@@ -278,6 +362,26 @@ class WorkspaceTest(unittest.TestCase):
             new = sorted(set(v["failing"]) - xs.failing_tests(base["output"]))
             self.assertEqual(new, expect_new)
             xs.cleanup_worktree(ws, fin["commit"])
+
+    def test_empty_baseline_verify_result_has_no_new_failures(self):
+        write(os.path.join(self.repo, "check.py"), "pass\n")
+        sh("git", "add", "check.py", cwd=self.repo)
+        sh("git", "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "check", cwd=self.repo)
+
+        ws = xs.prepare_workspace(self.repo, "empty-baseline", True)
+        fin = xs.finalize_workspace(ws, "t", "codex", self.rdir, keep=True)
+        self.addCleanup(xs.cleanup_worktree, ws, fin["commit"])
+        verify = xs.run_verify("python3 check.py", ws["root"], 30)
+        baseline = xs.verify_against_baseline("python3 check.py", ws, 30)
+
+        self.assertIsNone(fin["commit"])
+        self.assertEqual(verify["rc"], 0)
+        self.assertEqual(verify["failing"], [])
+        self.assertEqual(xs.adjust_status_for_verify("done", verify), ("done", None))
+        self.assertEqual(baseline["rc"], 0)
+        self.assertEqual(baseline["output"], "")
+        self.assertEqual(baseline["failing"], [])
+        self.assertEqual(sorted(set(verify["failing"]) - set(baseline["failing"])), [])
 
     def test_secret_print_rule_targets_credentials_only(self):
         import re

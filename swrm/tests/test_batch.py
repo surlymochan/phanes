@@ -17,6 +17,60 @@ xs = _load.load()
 STUB = Path(_load.HERE) / "fixtures" / "fake_fleet_swrm.py"
 
 
+def wait_for_batch_summary(path, timeout=120):
+    """Wait for a terminal summary, retaining evidence if a busy runner times out."""
+    deadline = time.monotonic() + timeout
+    summary = None
+    read_error = None
+    while time.monotonic() < deadline:
+        try:
+            summary = json.loads(path.read_text())
+        except (OSError, ValueError) as exc:
+            # A daemon's atomic replacement may be temporarily unreadable.
+            read_error = f"{type(exc).__name__}: {exc}"
+        else:
+            if summary.get("state") in ("finished", "failed"):
+                return summary
+        time.sleep(0.05)
+    raise AssertionError(f"detached batch did not finish within {timeout}s; "
+                         f"last summary={summary!r}; last read error={read_error!r}")
+
+
+class BatchSummaryWaitTests(unittest.TestCase):
+    def test_waits_past_old_deadline_and_retries_transient_reads(self):
+        path = mock.Mock()
+        path.read_text.side_effect = [FileNotFoundError("pending"), "{",
+                                      '{"state": "running"}', '{"state": "finished"}']
+        with mock.patch.object(time, "monotonic", side_effect=[0, 0, 10, 20, 30]), \
+                mock.patch.object(time, "sleep"):
+            self.assertEqual(wait_for_batch_summary(path), {"state": "finished"})
+        self.assertEqual(path.read_text.call_count, 4)
+
+    def test_failed_is_terminal_and_is_not_reported_as_success(self):
+        path = mock.Mock()
+        path.read_text.return_value = '{"state": "failed", "error": "runner failed"}'
+        with mock.patch.object(time, "sleep") as sleep:
+            self.assertEqual(wait_for_batch_summary(path)["state"], "failed")
+        sleep.assert_not_called()
+
+    def test_timeout_reports_last_summary_and_read_error(self):
+        path = mock.Mock()
+        path.read_text.side_effect = ['{"state": "running", "cards": []}',
+                                      PermissionError("replacement pending")]
+        with mock.patch.object(time, "monotonic", side_effect=[0, 0, 1, 2]), \
+                mock.patch.object(time, "sleep"):
+            with self.assertRaisesRegex(AssertionError, "running.*PermissionError.*replacement pending"):
+                wait_for_batch_summary(path, timeout=2)
+
+    def test_timeout_before_first_summary_is_diagnostic(self):
+        path = mock.Mock()
+        path.read_text.side_effect = FileNotFoundError("not published")
+        with mock.patch.object(time, "monotonic", side_effect=[0, 0, 2]), \
+                mock.patch.object(time, "sleep"):
+            with self.assertRaisesRegex(AssertionError, "None.*FileNotFoundError.*not published"):
+                wait_for_batch_summary(path, timeout=2)
+
+
 class FakeFleetFixture:
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory(prefix="swrm-batch-")
@@ -99,6 +153,97 @@ class FakeFleetFixture:
 
 
 class BatchTests(FakeFleetFixture, unittest.TestCase):
+    def test_empty_cards_create_stable_summary_without_fleet_or_runner(self):
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output), \
+                mock.patch.object(xs, "fleet_config", wraps=xs.fleet_config) as fleet_config, \
+                mock.patch.object(xs, "execute_batch", wraps=xs.execute_batch) as execute:
+            error = None
+            try:
+                xs.cmd_batch(self.args(base=self.initial), xs.load_policy())
+            except Exception as exc:
+                error = exc
+
+        self.assertIsNone(error, f"empty batch should produce a summary: {error}")
+        fleet_config.assert_not_called()
+        execute.assert_not_called()
+        paths = list((self.data / "batches").glob("*/summary.json"))
+        self.assertEqual(len(paths), 1)
+        summary = json.loads(paths[0].read_text())
+        self.assertEqual(summary["state"], "finished")
+        self.assertEqual(summary["base"], self.initial)
+        self.assertEqual(summary["cards"], [])
+        markdown = paths[0].with_name("summary.md").read_text()
+        self.assertIn("State: finished", markdown)
+        self.assertIn("| Card | Host | Status | Verify rc | Branch | Commit | Seconds | Summary |", markdown)
+        self.assertEqual(markdown.count("| --- | --- | --- | --- | --- | --- | --- | --- |"), 1)
+
+    def test_empty_cards_with_default_base_and_detach_do_not_spawn_runner(self):
+        policy = xs.load_policy()
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output), \
+                mock.patch.object(xs, "fleet_config") as fleet_config, \
+                mock.patch.object(xs, "execute_batch") as execute, \
+                mock.patch.object(xs.subprocess, "Popen") as popen:
+            xs.cmd_batch(self.args(detach=True), policy)
+        fleet_config.assert_not_called()
+        execute.assert_not_called()
+        popen.assert_not_called()
+        paths = list((self.data / "batches").glob("*/summary.json"))
+        self.assertEqual(len(paths), 1)
+        summary = json.loads(paths[0].read_text())
+        self.assertEqual(json.loads(output.getvalue()), {"id": summary["id"]})
+        self.assertEqual(summary["state"], "finished")
+        self.assertIsNone(summary["base"])
+        self.assertEqual(summary["cards"], [])
+        self.assertNotIn("runner_pid", summary)
+        self.assertFalse(paths[0].with_name("spec.json").exists())
+        self.assertEqual(paths[0].with_name("summary.md").read_text(),
+                         f"# Batch {summary['id']}\n\nState: finished\n\n"
+                         "| Card | Host | Status | Verify rc | Branch | Commit | Seconds | Summary |\n"
+                         "| --- | --- | --- | --- | --- | --- | --- | --- |\n")
+
+    def test_empty_detached_cli_returns_id_for_status(self):
+        data = self.root / "empty-data"
+        env = {**os.environ, "OPENSWARM_HOME": str(data)}
+        command = [sys.executable, str(Path(_load.ROOT) / "bin" / "swrm"), "batch"]
+        proc = subprocess.run(command + ["--repo", "project", "--cards", str(self.cards),
+                                        "--hosts", "worker", "--base", "main", "--detach"],
+                              capture_output=True, text=True, timeout=10, env=env)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        reply = json.loads(proc.stdout)
+        summary_path = data / "batches" / reply["id"] / "summary.json"
+        summary = json.loads(summary_path.read_text())
+        self.assertEqual(reply, {"id": summary["id"]})
+        self.assertEqual(summary["state"], "finished")
+        self.assertEqual(summary["base"], "main")
+        self.assertEqual(summary["cards"], [])
+        self.assertNotIn("runner_pid", summary)
+        self.assertFalse(summary_path.with_name("spec.json").exists())
+        status = subprocess.run(command + ["status", reply["id"]],
+                                capture_output=True, text=True, timeout=10, env=env)
+        self.assertEqual(status.returncode, 0, status.stderr)
+        self.assertEqual(json.loads(status.stdout), summary)
+
+    def test_invalid_cards_paths_fail_before_saving_or_starting_batch(self):
+        regular_file = self.root / "card.md"
+        regular_file.write_text("card")
+        policy = xs.load_policy()
+        for path in (self.root / "missing", regular_file):
+            for detach in (False, True):
+                with self.subTest(path=path, detach=detach), \
+                        mock.patch.object(xs, "fleet_config") as fleet_config, \
+                        mock.patch.object(xs, "batch_save") as save, \
+                        mock.patch.object(xs, "execute_batch") as execute, \
+                        mock.patch.object(xs.subprocess, "Popen") as popen:
+                    with self.assertRaisesRegex(ValueError, "cards path must be a directory"):
+                        xs.cmd_batch(self.args(cards=str(path), detach=detach), policy)
+                    fleet_config.assert_not_called()
+                    save.assert_not_called()
+                    execute.assert_not_called()
+                    popen.assert_not_called()
+        self.assertFalse((self.data / "batches").exists())
+
     def test_batch_launch_passes_path_hints_to_remote_run(self):
         card = self.cards / "one.md"
         card.write_text("Update src/widget.py")
@@ -266,6 +411,34 @@ class BatchTests(FakeFleetFixture, unittest.TestCase):
         self.assertEqual(exited.exception.code, 0)
         self.assertEqual(json.loads((self.data / "batches" / bid / "summary.json").read_text())["state"], "finished")
 
+    def test_detached_batch_treats_cards_directory_glob_characters_literally(self):
+        policy = xs.load_policy()
+        real_popen = subprocess.Popen
+
+        def spawn_batch(argv, **kwargs):
+            if "--batch-id" in argv:
+                return mock.Mock(pid=os.getpid())
+            return real_popen(argv, **kwargs)
+
+        for name in ("[cards]", "cards?", "cards*"):
+            with self.subTest(directory=name):
+                cards = self.root / name
+                cards.mkdir()
+                for filename in ("two.md", "one.md", ".hidden.md"):
+                    (cards / filename).write_text("card")
+                (cards / "nested").mkdir()
+                output = io.StringIO()
+                with mock.patch.object(xs.subprocess, "Popen", side_effect=spawn_batch) as popen, \
+                        contextlib.redirect_stdout(output):
+                    xs.cmd_batch(self.args(cards=str(cards), detach=True), policy)
+                reply = json.loads(output.getvalue())
+                summary = json.loads((self.data / "batches" / reply["id"] / "summary.json").read_text())
+                self.assertEqual(summary["state"], "queued")
+                self.assertEqual([row["path"] for row in summary["cards"]],
+                                 [str(cards / "one.md"), str(cards / "two.md")])
+                self.assertEqual(reply["runner_pid"], os.getpid())
+                self.assertEqual(sum("--batch-id" in call.args[0] for call in popen.call_args_list), 1)
+
     def test_detached_cli_runs_entire_batch_in_background(self):
         (self.cards / "card.md").write_text("background card")
         for name in ("b1", "b2"):
@@ -273,26 +446,12 @@ class BatchTests(FakeFleetFixture, unittest.TestCase):
         (self.data / "fleet.json").write_text(json.dumps({"hosts": list(self.hosts.values())}))
         proc = subprocess.run([sys.executable, str(Path(_load.ROOT) / "bin" / "swrm"), "batch",
                                "--repo", "project", "--cards", str(self.cards), "--hosts", "b1,b2", "--detach",
-                               "--poll-seconds", "0.01"], capture_output=True, text=True, timeout=10,
+                               "--poll-seconds", "0.01"], capture_output=True, text=True, timeout=120,
                               env={**os.environ, "OPENSWARM_HOME": str(self.data)})
         self.assertEqual(proc.returncode, 0, proc.stderr)
         reply = json.loads(proc.stdout)
         path = self.data / "batches" / reply["id"] / "summary.json"
-        deadline = time.monotonic() + 15
-        while time.monotonic() < deadline:
-            try:
-                summary = json.loads(path.read_text())
-            except (OSError, ValueError):
-                # The daemon publishes summary.json by atomic replacement; on
-                # Windows a poll can observe the file mid-replacement
-                # (PermissionError) or partially written. Keep polling.
-                time.sleep(0.05)
-                continue
-            if summary["state"] in ("finished", "failed"):
-                break
-            time.sleep(0.05)
-        else:
-            self.fail("detached batch did not finish")
+        summary = wait_for_batch_summary(path)
         self.assertEqual(summary["state"], "finished", summary)
         self.assertEqual(summary["cards"][0]["status"], "done", summary)
         self.assertEqual(self.git(self.repo, "rev-parse", summary["cards"][0]["branch"]), summary["cards"][0]["commit"])

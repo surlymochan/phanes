@@ -2,8 +2,15 @@
 // local `vite dev` reads, so a local run inherits four fifths of a mail configuration and
 // `readSmtpConfig` rejects it as incomplete. They are listed here so a development env file can
 // blank all five and turn email delivery off locally instead of dialling the real mail host.
+//
+// The operator token for `/v2/admin/server-claims` is a secret in production and a plain variable
+// in a local run. Wrangler keeps a development variable only when its name is a `vars` entry or a
+// required secret, and the token is neither, so a local workerd run dropped it and every claim
+// request answered 401. Listing it here forwards it from the development environment into the
+// local Worker.
 const LOCAL_RUNTIME_KEYS = [
   "AUTH_EXPOSE_DEVELOPMENT_CODE",
+  "SERVER_CLAIMS_ADMIN_TOKEN",
   "EMAIL_SMTP_HOST",
   "EMAIL_SMTP_PORT",
   "EMAIL_SMTP_USERNAME",

@@ -10,7 +10,13 @@ import { ComposerEditor } from "@volto/ui/features/conversation/ComposerEditor";
 import { ComposerNotice } from "@volto/ui/features/conversation/ComposerNotice";
 import { ApprovalCard } from "@volto/ui/features/conversation/ConversationPrompts";
 import { type TextValue, useText } from "@volto/ui/text";
-import { createEffect, createSignal, For, onSettled, Show } from "solid-js";
+import { createEffect, createSignal, For, onCleanup, onSettled, Show } from "solid-js";
+import {
+  type AgentGoalsView,
+  type AgentGoalsViewLabels,
+  agentGoalsForView,
+  mountAgentGoalsView,
+} from "./agent-goals-view";
 
 const HOLD_TEXT = {
   "agent-restarting": "conversation.threads.hold.agentRestarting",
@@ -52,6 +58,8 @@ export function agentThreadHoldText(task: AgentTask, limit: number, t: TextValue
 export interface AgentThreadViewProps {
   /** Null for a new thread: its first message starts it. */
   task: AgentTask | null;
+  /** The task snapshot, including closed tasks, when the host has it. */
+  tasks?: readonly AgentTask[] | undefined;
   /** How many threads of the agent can run at the same time. */
   limit: number;
   agent: AgentProfile;
@@ -141,8 +149,36 @@ export function AgentThreadView(props: AgentThreadViewProps) {
   const running = () => (props.task?.state === "running" && !props.approval ? props.task : undefined);
   const queued = () => (props.task && props.task.queuedMessages.length > 0 ? props.task : undefined);
   const hold = () => (props.task ? agentThreadHoldText(props.task, props.limit, t) : null);
+  // The goals of the agent: the whole snapshot when the host has one, so the goals that are done
+  // stay in the list, and the open task alone when it does not.
+  const goals = () => agentGoalsForView(props.tasks, props.task);
+  const goalsLabels = (): AgentGoalsViewLabels => ({
+    active: t("conversation.threads.goals.active"),
+    completed: t("conversation.threads.goals.completed"),
+    list: t("conversation.threads.goals.groups"),
+    completion: (value) => t("conversation.threads.goals.completion", { value }),
+  });
+  let goalsView: AgentGoalsView | undefined;
+  createEffect(
+    () => ({ goals: goals(), labels: goalsLabels() }),
+    (view) => {
+      goalsView?.update(view);
+    },
+  );
+  onCleanup(() => {
+    goalsView?.destroy();
+    goalsView = undefined;
+  });
   return (
     <>
+      <section class="agent-goals-view" aria-label={t("conversation.threads.goals.list")}>
+        <div
+          class="agent-goals-host"
+          ref={(element: HTMLElement) => {
+            goalsView = mountAgentGoalsView(element, { goals: goals(), labels: goalsLabels() });
+          }}
+        />
+      </section>
       <section
         ref={(element: HTMLElement) => {
           scroller = element;

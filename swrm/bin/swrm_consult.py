@@ -499,7 +499,7 @@ def _ask_one(core, profile, prompt, run_dir, deadline, policy, reservation_id):
         row["error"] = f"consult executor failed: {type(error).__name__}: {error}"
         return row
     finally:
-        if acquired:
+        if acquired or os.path.exists(os.path.join(slot_dir, "fleet-reservation.json")):
             try:
                 # An unexpectedly live child keeps its fleet reservation. Never
                 # free capacity merely because the consult wrapper failed.
@@ -526,7 +526,9 @@ def _ask_one(core, profile, prompt, run_dir, deadline, policy, reservation_id):
                 shutil.rmtree(worktree_parent, ignore_errors=True)
         elif worktree_parent and stopped and not os.path.exists(worktree or ""):
             shutil.rmtree(worktree_parent, ignore_errors=True)
-        if not acquired or (process is None or process.poll() is not None) and os.path.realpath(slot_dir) not in core._FLEET_RESERVATIONS:
+        if stopped and os.path.realpath(slot_dir) not in core._FLEET_RESERVATIONS and not any(
+                os.path.exists(os.path.join(slot_dir, name))
+                for name in ("fleet-reservation.json", "fleet-release-pending.json")):
             shutil.rmtree(slot_dir, ignore_errors=True)
 
 

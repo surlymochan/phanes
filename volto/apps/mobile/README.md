@@ -346,6 +346,7 @@ EAS CLI prompts for signing credentials when needed.
 The build loads `Plain text` and `Sensitive` variables from the EAS `production` environment.
 Variables with `Secret` visibility must be supplied in the local environment.
 See [OpenPanel configuration](#openpanel-product-analytics) for the required analytics variables.
+To use a self-hosted account service, see [Self-hosted account service](#self-hosted-account-service).
 
 To upload, open Apple's Transporter app, sign in, add the `.ipa`, and select **Deliver**.
 After Apple processes the build, select it in App Store Connect under **TestFlight** and assign
@@ -519,6 +520,85 @@ A failed post does not change the release: re-run the `Post on Discord` job. A r
 successful post posts the message again. To post a version again, or one that a push did not post,
 run `gh workflow run mobile-release-announcement.yml --ref main -f version=x.y.z`. Both stores must
 have the version in `apps/mobile/CHANGELOG.md`, and the file must be for that version.
+
+## Self-hosted account service
+
+The phone signs in to an account service. That service holds the account, sends the one-time code of
+the email sign-in, and hands out the session. The hosted account service is `https://api.openbot.run`.
+A build can name another account service, so a self-compiled build or a TestFlight build can use a
+self-hosted account service.
+
+### Name the account service in the build
+
+| Variable | Value |
+| --- | --- |
+| `EXPO_PUBLIC_VOLTO_API_URL` | The account service address, for example `https://api.example.com` |
+| `EXPO_PUBLIC_OPENBOT_API_URL` | The old name of the same variable. It is used when the new name is not set, or does not hold a valid address |
+
+The address must be an origin: a scheme, a host, and an optional port, with no path. Only `https` is
+allowed. `http` is allowed for `localhost`, `127.0.0.1`, and private network addresses
+(`10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`). An address that is not allowed is ignored, and
+the build keeps the hosted account service.
+
+The value is part of the app bundle. Do not put a secret in it.
+
+### Build with a self-hosted account service
+
+1. Use your own Expo project for the build. Set `owner` and `extra.eas.projectId` in `app.json` to
+   your project, and set `updates.url` to your project, so the build does not receive updates from
+   the hosted project.
+2. Use an active Apple Developer membership and identifiers owned by your Apple Developer team.
+   The checked-in `run.openbot.mobile` identifiers belong to the hosted app. Before the first
+   build, change these fields under `expo` in your local `app.json`. The examples use
+   `com.example.volto`; replace that prefix with your own unique bundle ID.
+
+   | Field | Example value |
+   | --- | --- |
+   | `ios.bundleIdentifier` | `com.example.volto` |
+   | `plugins` → `./plugins/with-share-target` → `ios.extensionBundleIdentifier` | `com.example.volto.ShareExtension` |
+   | `plugins` → `expo-widgets` → `bundleIdentifier` | `com.example.volto.ExpoWidgetsTarget` |
+   | `plugins` → `./plugins/with-notification-service` → `bundleIdentifier` | `com.example.volto.NotificationService` |
+   | `plugins` → `./plugins/with-share-target` → `ios.appGroupId` | `group.com.example.volto` |
+   | `plugins` → `expo-widgets` → `groupIdentifier` | `group.com.example.volto` |
+   | `plugins` → `./plugins/with-notification-service` → `groupIdentifier` | `group.com.example.volto` |
+
+   Register the app bundle ID, all three extension bundle IDs, and the App Group in your Apple
+   Developer team. Enable App Groups for the app and each extension, and assign the same group
+   to all four App IDs. Keep the group value the same in all three plugin settings above.
+   Use signing credentials from that team. Let EAS create or select a provisioning profile for
+   each of the four targets with these identifiers and entitlements. See
+   [Apple App Groups setup](https://developer.apple.com/help/account/identifiers/register-an-app-group)
+   and [EAS app extension signing](https://docs.expo.dev/build-reference/app-extensions/).
+   For TestFlight, create an app in your own App Store Connect account with the new app bundle ID.
+3. In the Expo dashboard, open your project, then **Environment variables**. Select the built-in
+   `production` environment and add `EXPO_PUBLIC_VOLTO_API_URL` with your account service origin.
+   Use `Plain text` or `Sensitive` visibility. A `Secret` variable is not available to a local build.
+   This configuration needs no custom environment or paid Expo plan. See
+   [Expo environment variables](https://docs.expo.dev/eas/environment-variables/manage/).
+4. Build with the `self-hosted` profile. It reads the account service address from your project's
+   `production` EAS environment, uses the `self-hosted` update channel, and keeps
+   `EXPO_PUBLIC_APP_ENV=production`.
+
+   ```bash
+   cd apps/mobile
+   bunx eas-cli@latest build --profile self-hosted --platform ios
+   ```
+
+   For a build on your own Mac, add `--local`. The command writes the `.ipa` file. See
+   [Local TestFlight build](#local-testflight-build) for the signing and upload steps. Keep the
+   `self-hosted` build command above when adding `--local`; the shortcut in that section selects
+   `production`. Upload the IPA to the App Store Connect app you created for your bundle ID.
+5. Install the build on the phone, and sign in with an email address. The code comes from your SMTP
+   account. The phone then uses your account service for the session, the server directory, and the
+   profile.
+
+A build that names no account service keeps the hosted account service. Both profiles read your
+project's `production` EAS environment. Use your own project and the `self-hosted` profile for this
+procedure. For a local build, also export `EXPO_PUBLIC_VOLTO_API_URL` in the shell before the build
+command. For OTA updates, use the same project, the `self-hosted` channel, and
+`--environment production` to keep the same account service address. The desktop app names its
+account service with `VOLTO_AUTH_API_URL`. See
+[self-hosting](../../docs/self-hosting.md).
 
 ## OpenPanel product analytics
 

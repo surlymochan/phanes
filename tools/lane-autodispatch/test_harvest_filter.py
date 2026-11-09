@@ -14,6 +14,7 @@ ad = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(ad)
 
 ARTIFACTS = {"swrm/tests/.dde4xxx-00000000.so": "binary\n",
+             "swrm/lib/native-extension.so": "binary\n",
              ".lane-review/PR-1.md": "VERDICT: APPROVE\n"}
 
 
@@ -58,7 +59,7 @@ class HarvestFilterTest(unittest.TestCase):
     def test_mixed(self):
         self.commit(list(ARTIFACTS) + ["good"])
         head, removed, empty = ad.filter_harvest("HEAD", self.base)
-        self.assertEqual(len(removed), 2)
+        self.assertEqual(len(removed), 3)
         self.assertFalse(empty)
         self.assertEqual(self.files(head), ["base", "good"])
 
@@ -69,7 +70,7 @@ class HarvestFilterTest(unittest.TestCase):
     def test_only_artifacts(self):
         self.commit(list(ARTIFACTS))
         head, removed, empty = ad.filter_harvest("HEAD", self.base)
-        self.assertEqual(len(removed), 2)
+        self.assertEqual(len(removed), 3)
         self.assertTrue(empty)
         self.assertEqual(self.files(head), self.files(self.base))
 
