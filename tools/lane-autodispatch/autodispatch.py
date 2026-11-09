@@ -40,8 +40,8 @@ FIX_ROUND_TASK_BOOK = ("## Fix round checklist (rubric F1-F6)\n"
                        "F5 不删既有集成测试：不得删除或跳过既有的集成测试；要改断言就改断言并写明理由。\n"
                        "F6 复跑 A4/A2：修完复跑 A4/A2 两项验收（同一条命令、同一个环境），把结果贴进交付说明。\n")
 # The markers of a fix round card: a fix label (`fix`, `card:fix`, `type:fix`, `review-fix`…) or a
-# `## Fix Round` heading in the body. An ordinary work card that merely fixes a bug is not a fix
-# round, so the marker is explicit and never guessed from the title alone.
+# `## Fix Round` heading, review request or rebase branch in the body, or a fix round title.
+# An ordinary work card that merely fixes a bug is not a fix round.
 FIX_ROUND_CARD_LABELS = {"fix", "fix-round", "review-fix", "rework",
                          "card:fix", "card:fix-round", "card:review-fix", "card:rework",
                          "type:fix", "type:fix-round", "type:review-fix", "type:rework"}
@@ -1805,10 +1805,11 @@ def is_fix_round_card(labels, title, body):
     """True when the card asks a lane to redo a rejected PR (rubric F1..F6, Refs #1851).
 
     The marker is explicit: a fix label (`fix`, `card:fix`, `type:fix`, `review-fix`…), a
-    `## Fix Round` heading in the body or a fix round title prefix. An ordinary work card that
-    merely fixes a bug carries none of them and stays an ordinary work card."""
+    `## Fix Round` heading, review request or rebase branch in the body, or a fix round title prefix.
+    An ordinary work card that merely fixes a bug stays an ordinary work card."""
     if set(labels) & FIX_ROUND_CARD_LABELS: return True
     if FIX_ROUND_HEADING_RE.search(body or ""): return True
+    if "审查要求修改" in (body or "") or FIX_ROUND_PR_BRANCH_RE.search(body or ""): return True
     return bool(FIX_ROUND_TITLE_RE.match(title or ""))
 
 def fix_round_pr(body, title=""):
