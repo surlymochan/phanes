@@ -162,6 +162,15 @@ class AuditTests(unittest.TestCase):
         self.assertEqual(alert["detail"]["reason"], "concurrent")
         self.assertEqual(result["metrics"]["dual_executions"], 1)
 
+    def test_duplicate_records_of_one_run_count_once(self):
+        result = audit_module.audit(
+            [lease(1795, "run-a", NOW - 100)],
+            [run("run-a", 1795, lane="M1"), run("run-a", 1795, lane="M1")],
+            NOW)
+
+        self.assertEqual(result["metrics"]["active_runs"], 1)
+        self.assertNotIn("dual_execution", kinds(result["alerts"]))
+
     def test_two_runs_that_wrote_the_same_card_back_are_a_double_execution(self):
         result = audit_module.audit(
             [],

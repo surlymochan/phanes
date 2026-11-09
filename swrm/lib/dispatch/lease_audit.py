@@ -519,7 +519,14 @@ def _metrics(lease_rows: List[Dict[str, Any]], run_rows: List[Dict[str, Any]],
     The second value is the list of the grants: every lease with the wait it
     had, so the caller can keep them as the samples of the wait durations.
     """
-    active_runs = [row for row in run_rows if row["active"]]
+    # One run may be reported by several records (a run file and the lane
+    # state); count and compare it once, by run id.
+    active_runs: List[Dict[str, Any]] = []
+    seen_active: set = set()
+    for row in run_rows:
+        if row["active"] and row["run_id"] not in seen_active:
+            seen_active.add(row["run_id"])
+            active_runs.append(row)
     active_by_issue: Dict[str, List[Dict[str, Any]]] = {}
     for row in active_runs:
         if row["issue"]:
