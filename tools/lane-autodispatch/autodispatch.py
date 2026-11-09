@@ -1760,6 +1760,7 @@ class StatusPublisher:
         self.records = None
         self.ready = self.previous("_ready")
         self.blocked = self.previous("_blocked")
+        self.memory_blocks = {}
         self.rows = self.previous_rows()
         self.refresh = STATUS_REFRESH_SECONDS if refresh is None else float(refresh)
         self.phase = "start"
@@ -1795,8 +1796,10 @@ class StatusPublisher:
         if ready is not None: self.ready = ready
         if blocked is not None: self.blocked = blocked
         rows = {L: self.res.get(L) or {"lane": self.rows.get(L, "?")} for L in self.lanes}
-        return status_snapshot(self.lanes, self.state, rows, self.ready or 0, self.blocked or 0,
-                               records=self.records, phase=self.phase, tick_at=self.tick_at)
+        snapshot = status_snapshot(self.lanes, self.state, rows, self.ready or 0, self.blocked or 0,
+                                   records=self.records, phase=self.phase, tick_at=self.tick_at)
+        snapshot["_memory_blocks"] = self.memory_blocks
+        return snapshot
 
     def publish(self, res=None, ready=None, blocked=None, phase=None, heartbeat=True):
         """Write the snapshot now; a failed write is logged, never swallowed.
@@ -2719,14 +2722,9 @@ def run_tick(lanes, state, last_warn, publisher):
     observe_verify_verdicts(state)
     save_state(state)
     refresh_minimax_burn()  # the burn watchdog refreshes the reading the status shows (Refs #1671)
-<<<<<<< HEAD
-    publisher.publish(res=res, ready=ready, blocked=blocked, phase="idle")
-=======
-    st = status_snapshot(lanes, state, res, ready, blocked, records)
-    st["_memory_blocks"] = memory_blocks
-    with open(f"{D}/lanes-status.json", "w") as stream:
-        json.dump(st, stream, ensure_ascii=False, indent=1)
->>>>>>> be8dfba6b5c4e2ba4cc351aa25f45d07cd65c0d6
+    with publisher._lock:
+        publisher.memory_blocks = memory_blocks
+        publisher.publish(res=res, ready=ready, blocked=blocked, phase="idle")
     return last_warn
 
 def file_issue(text, extra=()):
