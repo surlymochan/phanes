@@ -181,14 +181,9 @@ def issue_number(key: Any) -> Optional[int]:
 # ------------------------------------------------------------------- readers
 
 def read_json(path: Any) -> Any:
-    """The JSON of a file, or None when it can not be read."""
-    if not path:
-        return None
-    try:
-        with open(path, encoding="utf-8") as stream:
-            return json.load(stream)
-    except (OSError, ValueError):
-        return None
+    """Read JSON, propagating missing, unreadable, and invalid input errors."""
+    with open(path, encoding="utf-8") as stream:
+        return json.load(stream)
 
 
 def lease_store_files(path: Any) -> List[str]:
@@ -211,7 +206,7 @@ def lease_store_files(path: Any) -> List[str]:
             if os.path.isfile(store):
                 names.append(store)
         return sorted(names)
-    return []
+    raise FileNotFoundError("Lease store does not exist or is not a file or directory: {}".format(path))
 
 
 def read_leases(path: Any) -> List[Dict[str, Any]]:
@@ -521,12 +516,15 @@ def _metrics(lease_rows: List[Dict[str, Any]], run_rows: List[Dict[str, Any]],
     """
     # One run may be reported by several records (a run file and the lane
     # state); count and compare it once, by run id.
-    active_runs: List[Dict[str, Any]] = []
-    seen_active: set = set()
+    active_by_id: Dict[str, Dict[str, Any]] = {}
     for row in run_rows:
-        if row["active"] and row["run_id"] not in seen_active:
-            seen_active.add(row["run_id"])
-            active_runs.append(row)
+        if not row["active"]:
+            continue
+        merged = active_by_id.setdefault(row["run_id"], dict(row))
+        for key, value in row.items():
+            if merged.get(key) is None or merged.get(key) == "":
+                merged[key] = value
+    active_runs = list(active_by_id.values())
     active_by_issue: Dict[str, List[Dict[str, Any]]] = {}
     for row in active_runs:
         if row["issue"]:

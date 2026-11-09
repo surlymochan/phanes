@@ -150,6 +150,14 @@ class AuditTests(unittest.TestCase):
         self.assertEqual(kinds(result["alerts"]), ["expired_lease"])
         self.assertEqual(result["alerts"][0]["detail"]["confidence"], "confirmed")
 
+    def test_duplicate_run_records_merge_missing_issue(self):
+        result = audit_module.audit([], [
+            {"run_id": "a", "state": "running"},
+            {"run": "a", "issue": 123},
+            {"run_id": "b", "issue": 123, "state": "running"},
+        ], NOW)
+        self.assertEqual(result["metrics"]["dual_executions"], 1)
+
     def test_two_active_runs_of_one_card_are_a_double_execution(self):
         result = audit_module.audit(
             [lease(1795, "run-a", NOW - 100)],

@@ -104,6 +104,8 @@ def append_alerts(path: Path, alerts: List[Dict[str, Any]]) -> None:
 
 def load_state(audit: Any, path: Path) -> Dict[str, Any]:
     """The audit state of the last rounds (an unreadable file is an empty state)."""
+    if not path.exists():
+        return {}
     payload = audit.read_json(path)
     return payload if isinstance(payload, dict) else {}
 
@@ -186,8 +188,8 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     audit = load_audit_module()
     leases = audit.read_leases(leases_path)
-    runs = audit.read_runs(runs_path) if runs_path.exists() else []
-    runs.extend(audit.read_lane_state(state_path) if state_path.exists() else [])
+    runs = audit.read_runs(runs_path)
+    runs.extend(audit.read_lane_state(state_path))
 
     now = args.now if args.now is not None else time.time()
     window_s = max(1.0, float(args.window_hours) * 3600.0)

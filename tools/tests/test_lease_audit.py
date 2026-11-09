@@ -47,6 +47,8 @@ class LeaseAuditCliTests(unittest.TestCase):
         self.addCleanup(self.tmp.cleanup)
         self.root = Path(self.tmp.name)
         self.out = self.root / "out"
+        (self.root / "missing-state.json").write_text("{}")
+        (self.root / "missing-runs").mkdir()
 
     def write_leases(self, leases):
         path = self.root / "leases.json"
@@ -169,6 +171,8 @@ class LeaseAuditCliTests(unittest.TestCase):
             "1795": lease(1795, "run-b", NOW - 50, lane="M2"),
         }}), encoding="utf-8")
 
+        (self.root / "state.json").write_text("{}")
+        (self.root / "runs").mkdir(exist_ok=True)
         command = [sys.executable, str(SCRIPT), "--now", str(NOW), "--json"]
         done = subprocess.run(command, capture_output=True, text=True)
         report = json.loads(done.stdout)
@@ -188,6 +192,8 @@ class LeaseAuditCliTests(unittest.TestCase):
                 source = store / "leases.json"
                 source.write_text(json.dumps({"leases": {
                     "1800": lease(1800, "run-c", NOW - 5000)}}))
+                (store / "state.json").write_text("{}")
+                (store / "runs").mkdir(exist_ok=True)
                 before = source.read_bytes()
                 env = dict(os.environ, HOME=str(home))
                 env.pop("OPENSWARM_HOME", None)
@@ -205,6 +211,22 @@ class LeaseAuditCliTests(unittest.TestCase):
                 self.assertEqual(report["leases"]["leases"], 1)
                 self.assertEqual(source.read_bytes(), before)
                 self.assertTrue((store / "lease-health.json").exists())
+
+    def test_missing_or_invalid_inputs_fail(self):
+        leases = self.write_leases({})
+        state = self.write_state({})
+        runs = self.root / "missing-runs"
+        for option, path in (("--leases", self.root / "absent"),
+                             ("--state", self.root / "absent"),
+                             ("--runs", self.root / "absent"),
+                             ("--state", leases)):
+            if option == "--state" and path == leases:
+                leases.write_text("not json")
+            command = [sys.executable, str(SCRIPT), "--leases", str(leases),
+                       "--state", str(state), "--runs", str(runs), "--out", str(self.out),
+                       option, str(path)]
+            done = subprocess.run(command, capture_output=True, text=True)
+            self.assertNotEqual(done.returncode, 0)
 
     def restore_home(self, previous):
         if previous is None:
