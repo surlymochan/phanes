@@ -1141,7 +1141,6 @@ def remote(lane, cfg, run=""):
     try: return json.loads(out.strip().splitlines()[-1])
     except Exception: return {"error": out[-200:]}
 
-<<<<<<< HEAD
 def queue(state=None):
     """Track admission clocks in tick's persisted state, keyed by JSON issue numbers.
 
@@ -1160,11 +1159,6 @@ def queue(state=None):
     state = {} if state is None else state
     entered_at = state.get("_pool_entered_at", {})
     now = time.time()
-=======
-def queue():
-    rc, out, err = gh(["issue", "list", "--state", "open", "--label", "lane-ready", "--limit", "100", "--json", "number,title,labels,body,createdAt"])
-    if rc: raise RuntimeError(err)
->>>>>>> e10376015100591e0fc16b53c94009676407945a
     items = []
     for i in issues:
         labels = label_names(i)
@@ -1182,17 +1176,13 @@ def queue():
             valid, missing = verify_requirements(body)
             if not valid:
                 log_verify_rejected(i["number"], missing); continue
-<<<<<<< HEAD
         entered = timestamp(entered_at.get(str(i["number"])))
         if entered is None: entered = now
         match = re.search(r"(?im)(?:budget(?:[_ -]minutes)?|预算)\s*[:：]\s*(\d+(?:\.\d+)?)", body)
         budget = float(match.group(1)) if match else float(BUDGET)
         items.append({"n": i["number"], "title": i["title"], "body": body, "labels": sorted(labels), "prio": pr, "backend": be, "strict": "strict-backend" in labels, "verify": verify,
-                      "created_at": i.get("createdAt"), "pool_entered_at": entered, "budget_minutes": budget})
+                      "queued": to_epoch(i.get("createdAt")), "created_at": i.get("createdAt"), "pool_entered_at": entered, "budget_minutes": budget})
     state["_pool_entered_at"] = {str(item["n"]): item["pool_entered_at"] for item in items}
-=======
-        items.append({"n": i["number"], "title": i["title"], "body": body, "labels": sorted(labels), "prio": pr, "backend": be, "strict": "strict-backend" in labels, "verify": verify, "queued": to_epoch(i.get("createdAt"))})
->>>>>>> e10376015100591e0fc16b53c94009676407945a
     return sorted(items, key=lambda x: (x["prio"], x["n"]))
 
 VERIFY_HEADING_RE = re.compile(r"(?mi)^##[^\S\r\n]*Verify[^\S\r\n]*Intent[^\S\r\n]*$")
@@ -2216,19 +2206,14 @@ def tick(lanes, state, last_warn):
             return False
         save_state(state)  # admission clocks survive --once and failures later in the tick
         for i in q: i["deps_ok"] = deps_met(i)
-<<<<<<< HEAD
-        # Dispatch reads labels in score order before freshen_queue uses the remaining
-        # read budget. Prefetching by issue number can starve a high-scoring old card.
-=======
         metrics = verify_metrics(state)
         for item in q:
             if item.get("verify"):
                 # Use the order time, including time spent waiting while AD was stopped.
                 queued = item.get("queued")
                 metrics["cards"].setdefault(str(item["n"]), {"issue": item["n"], "queued": now if queued is None else queued})
-        # one authoritative read per issue per tick, shared by all dispatches and the count
-        prefetch_labels([i["n"] for i in q])
->>>>>>> e10376015100591e0fc16b53c94009676407945a
+        # Dispatch reads labels in score order before freshen_queue uses the remaining
+        # read budget. Prefetching by issue number can starve a high-scoring old card.
         return True
 
     def base_commit():
@@ -2295,9 +2280,7 @@ def tick(lanes, state, last_warn):
             dispatch_failed(L, cfg, pick, e, busy=bool(LANE_BUSY_RE.search(str(e))))
             return "no-capacity"
         q.remove(pick); state[L] = {"issue": pick["n"], "run": run, "host": cfg["host"], "base": commit, "at": time.strftime("%F %T"), "verify": ver, "class": "verify" if pick.get("verify") else "work"}
-<<<<<<< HEAD
         state["_pool_entered_at"].pop(str(pick["n"]), None)
-=======
         metrics = verify_metrics(state)
         # The snapshot and saved state must reflect the slot just occupied.
         if AD_VERIFY_SHARE_ENABLED: metrics["deficit"] = queue_class_limits(lanes, state, idle)[0]
@@ -2305,7 +2288,6 @@ def tick(lanes, state, last_warn):
         if pick.get("verify"):
             metrics["dispatches"]["verify"] += 1
             record_verify_time(state, pick["n"], "dispatched", time.time())
->>>>>>> e10376015100591e0fc16b53c94009676407945a
         # Stop this lane's gap at its own successful dispatch. Later lanes may take
         # minutes to assign; their work cannot extend an already occupied lane's gap.
         closed = idle_close(state, L, time.time(), last_alive, tick_started_at=now)
