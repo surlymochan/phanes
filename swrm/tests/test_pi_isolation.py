@@ -12,6 +12,20 @@ import unittest
 WRAPPER = pathlib.Path(__file__).resolve().parents[1] / 'bin' / 'pi-isolated'
 
 
+def assert_git_ref_error(test, error):
+    test.assertRegex(error, r'(?i)read-only file system|unable to create directory|permission denied')
+
+
+class GitRefErrorTests(unittest.TestCase):
+    def test_read_only_and_directory_creation_errors(self):
+        for error in ('Read-only file system', 'unable to create directory', 'PERMISSION DENIED'):
+            with self.subTest(error=error):
+                assert_git_ref_error(self, error)
+
+        with self.assertRaises(AssertionError):
+            assert_git_ref_error(self, 'unrelated git error')
+
+
 @unittest.skipUnless(sys.platform.startswith('linux') and shutil.which('bwrap') and shutil.which('socat'),
                      'requires Linux, bubblewrap and socat')
 class PiIsolationTests(unittest.TestCase):
@@ -116,7 +130,7 @@ class PiIsolationTests(unittest.TestCase):
                 self.assertIn('Read-only file system', payload['add_error'])
                 self.assertEqual(payload['update_ref'], 128, payload)
                 self.assertIn('refs/swrm-test', payload['ref_error'])
-                self.assertIn('Read-only file system', payload['ref_error'])
+                assert_git_ref_error(self, payload['ref_error'])
             finally:
                 sock.close()
 
