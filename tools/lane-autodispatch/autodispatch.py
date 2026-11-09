@@ -1869,18 +1869,15 @@ def finish(lane, cfg, st, info, state):
     "missing": [...]}. `done` means the lane slot is free again; `error` carries the
     explicit reason back to the caller (Refs #1704)."""
     n, run = st["issue"], st["run"]
-<<<<<<< HEAD
     if info.get("error_class") == "executor_start_failed":
         pause_executor_start_lane(lane)
         # Even a commit made during the startup grace period is not a completed
         # task. Leave the run's work intact and return the card for another attempt.
         return requeue_executor_start_failure(lane, n, run)
-=======
     if st.get("class") == "verify":
         missing = review_evidence_errors(info.get("evidence"))
         if missing:
             return block_pr_validation(lane, cfg, st, info, state, "", "", missing)
->>>>>>> 2d6690586c7922c633ca702fab3f67728e9b68fb
     if info.get("branch") and info["branch"] != "None" and info.get("commit"):
         b = f"fleet/{lane}-issue{n}-{run}"
         fetch = git_fetch_command(ssh_opts(cfg["host"]), LOCAL, f"{cfg['host']}:{info['repo']}", info["branch"], lane)
@@ -2126,32 +2123,6 @@ def tick(lanes, state, last_warn):
         h = lanes[L]["host"]
         if h in seen: continue
         errs = [res[x] for x in live if lanes[x]["host"] == h and "error" in res[x]]
-<<<<<<< HEAD
-        if errs: host_fail(h, errs[0]["error"]); seen.add(h)
-        else: host_good(h); seen.add(h)
-    for L, r in res.items():
-        st = state.get(L)
-        if "error" in r: continue
-        if st and isinstance(r.get("run"), dict):
-            if lane_in_fetch_backoff(st): continue  # harvest fetch is backing off after a transient failure (Refs #947)
-            result = finish(L, lanes[L], st, r["run"], state)
-            if result.get("done"): state.pop(L); save_state(state)
-            if result.get("error"): log(f"{L} #{st['issue']} run {st['run']}: {result['error']}", brain=False)
-        elif st and reconcile(L, lanes[L], st, r, state): state.pop(L); save_state(state)
-    update_busy_stale(lanes, state, res)
-    try: q = queue()
-    except Exception as e:
-        log(f"queue error: {e}", brain=False)
-        st = status_snapshot(lanes, state, res, None, None)
-        st["_queue_error"] = str(e)
-        with open(f"{D}/lanes-status.json", "w") as stream:
-            json.dump(st, stream, ensure_ascii=False, indent=1)
-        return last_warn
-    for i in q: i["deps_ok"] = deps_met(i)
-    scopes = paused_scopes()  # harvest may have cooled down a lane during this tick
-    # one authoritative read per issue per tick, shared by the dispatch candidates and the count
-    prefetch_labels([i["n"] for i in q])
-=======
         if errs:
             host_fail(h, errs[0]["error"]); seen.add(h)
             note_host_unreachable(state, h)  # the outage is recorded (Refs #1673)
@@ -2168,7 +2139,6 @@ def tick(lanes, state, last_warn):
     q = None
     queue_failed = False
     queue_error = ""
->>>>>>> 2d6690586c7922c633ca702fab3f67728e9b68fb
     base = None
     outcomes = {}
     freed_lanes = set()
@@ -2292,6 +2262,9 @@ def tick(lanes, state, last_warn):
             # the run ended: the lane is idle from its own end time on (Refs #1688)
             idle_open(state, L, r["run"].get("ended_at"), now, last_alive)
             result = finish(L, lanes[L], st, r["run"], state)
+            # the harvest may have cooled down a lane (a startup failure pauses its
+            # lane): the pause must be visible to the rest of this tick
+            scopes = paused_scopes()
             if result.get("done"):
                 recovery_runs(state).pop(L, None)
                 state.pop(L); save_state(state); freed = True
