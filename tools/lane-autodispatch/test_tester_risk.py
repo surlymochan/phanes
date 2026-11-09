@@ -142,6 +142,8 @@ class TesterRiskDispatchTests(unittest.TestCase):
                 return 0, "a" * 40 + "\n", ""
             if cmd[0] == "ssh":
                 return 0, '{"id": "risk-run"}', ""
+            if any(str(part).endswith("mm-burn-rate.py") for part in cmd):
+                return 0, "", ""  # the MiniMax burn watchdog (Refs #1671) runs every tick
             self.fail(f"unexpected command: {cmd}")
 
         SCRATCH.mkdir(exist_ok=True)
