@@ -89,6 +89,25 @@ class LaneStreakTickTest(unittest.TestCase):
                              {"n": 1, "runs": ["run-7"]})
         self.with_state_dir(run)
 
+    def test_representative_m19_sequence_triggers_on_third_consecutive_failure(self):
+        """Replay the relevant failure/reset ordering, not unavailable original log entries.
+
+        Its equivalence is limited to per-lane terminal ordering: two failures,
+        a resetting terminal, then three consecutive failures on M19, with an
+        unrelated lane interleaved. The original log is absent from this checkout.
+        """
+        def run(directory):
+            sequence = [("M19", "exec_error"), ("M19", "failed"),
+                        ("M19", "budget_exceeded"), ("M19", "exec_error"),
+                        ("M20", "exec_error"), ("M19", "failed"),
+                        ("M19", "exec_error")]
+            for index, (lane, status) in enumerate(sequence):
+                AUTODISPATCH.record_lane_terminal(lane, f"run-{index}", {"status": status})
+                self.assertEqual((directory / "PAUSE-M19").exists(), index == 6)
+            self.assertIn("run-3,run-5,run-6", (directory / "PAUSE-M19").read_text())
+            self.assertFalse((directory / "PAUSE-M20").exists())
+        self.with_state_dir(run)
+
     def test_third_failure_blocks_same_tick_dispatch_only_on_paused_lane(self):
         def run(directory):
             lanes = {name: {"host": "executor", "backend": "pi"} for name in ("M19", "M20")}

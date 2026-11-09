@@ -438,6 +438,12 @@ class LaneStuckTickTest(unittest.TestCase):
                             self.close_attempted = True  # reproduce failed child shutdown
 
                     def local_ssh(argv, timeout=60, inp=None):
+                        if not isinstance(argv, list) or not argv or argv[0] != "ssh":
+                            return 0, "", ""
+                        if any("/proc/meminfo" in arg for arg in argv):
+                            return 0, "1048576\n", ""
+                        if inp not in (AUTODISPATCH.REMOTE_STUCK_CLEANUP, AUTODISPATCH.REMOTE_STATUS):
+                            return 1, "", "unexpected SSH probe"
                         # Like SSH, this probe is a sibling of the resident RPC,
                         # not its ancestor: ptrace_scope=1 applies in deployment.
                         result = subprocess.run([sys.executable, "-", *argv[argv.index("-")+1:]],
