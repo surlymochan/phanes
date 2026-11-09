@@ -1152,9 +1152,11 @@ try:
     for line in f:
       try:
         row=json.loads(line)
-        if isinstance(row,dict) and row.get("lane")==L: ledger.append(row)
-      except ValueError: pass
-except OSError: print(json.dumps({"cleaned":False,"reason":"ledger-unreadable"})); sys.exit(0)
+        if not isinstance(row,dict): raise ValueError("invalid ledger row")
+        if row.get("lane")==L: ledger.append(row)
+      except ValueError:
+        print(json.dumps({"cleaned":False,"reason":"ledger-corrupt"})); sys.exit(0)
+except (OSError,UnicodeError): print(json.dumps({"cleaned":False,"reason":"ledger-unreadable"})); sys.exit(0)
 tail=ledger[-N:]
 if len(tail)!=N or any(r.get("status")!="budget_exceeded" or not r.get("id") for r in tail):
   print(json.dumps({"cleaned":False,"reason":"not-three-budget-runs"})); sys.exit(0)
@@ -1225,10 +1227,11 @@ while time.time()<deadline:
   time.sleep(0.1)
 else: print(json.dumps({"cleaned":False,"reason":"tree-term-not-confirmed","sent":sent})); sys.exit(0)
 audit={"at":time.strftime("%F %T"),"lane":L,"runs":ids,"pids":sent,"action":"SIGTERM","confirmed":True}
+warning=None
 try:
   with open(os.path.join(O,"lane-stuck-audit.jsonl"),"a") as f: f.write(json.dumps(audit)+"\n")
-except OSError: pass
-print(json.dumps({"cleaned":True,"runs":ids,"pids":sent}))
+except OSError: warning="lane-stuck-audit-write-failed"
+print(json.dumps({"cleaned":True,"runs":ids,"pids":sent,"warning":warning}))
 '''
 
 def cleanup_lane_stuck(lane, cfg):
@@ -1239,6 +1242,8 @@ def cleanup_lane_stuck(lane, cfg):
         if rc:
             return {"cleaned": False, "reason": f"ssh-failed: {(err or out).strip()[-120:]}"}
         result = json.loads(out.strip().splitlines()[-1])
+        if isinstance(result, dict) and result.get("warning"):
+            log(f"{lane}: stuck cleanup warning: {result['warning']}")
         return result if isinstance(result, dict) else {"cleaned": False, "reason": "invalid-response"}
     except Exception as error:
         return {"cleaned": False, "reason": f"probe-failed: {error!r}"}

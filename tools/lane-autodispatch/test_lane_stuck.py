@@ -68,6 +68,24 @@ class LaneStuckTickTest(unittest.TestCase):
             self.assertEqual(result["reason"], "queued-or-status-unknown")
             self.assertFalse((home / "lane-stuck-audit.jsonl").exists())
 
+    def test_corrupt_ledger_refuses_cleanup(self):
+        for damaged in ("{broken", "[]", "null"):
+            with self.subTest(damaged=damaged), tempfile.TemporaryDirectory() as directory:
+                home = Path(directory)
+                self.make_run_data(home)
+                ledger = home / "ledger.jsonl"
+                lines = ledger.read_text().splitlines()
+                ledger.write_text("\n".join(lines[:2] + [damaged] + lines[2:]) + "\n")
+                self.assertEqual(self.run_probe(home), {"cleaned": False, "reason": "ledger-corrupt"})
+                self.assertFalse((home / "lane-stuck-audit.jsonl").exists())
+
+    def test_cleanup_audit_warning_is_logged(self):
+        response = {"cleaned": True, "warning": "lane-stuck-audit-write-failed"}
+        with mock.patch.object(AUTODISPATCH, "sh", return_value=(0, json.dumps(response), "")), \
+             mock.patch.object(AUTODISPATCH, "log") as log:
+            self.assertEqual(AUTODISPATCH.cleanup_lane_stuck("M19", {"host": "executor"}), response)
+        log.assert_called_once_with("M19: stuck cleanup warning: lane-stuck-audit-write-failed")
+
     def test_unknown_process_evidence_never_marks_cleanup_success(self):
         with tempfile.TemporaryDirectory(dir=Path(__file__).resolve().parents[2]) as directory:
             home = Path(directory)
