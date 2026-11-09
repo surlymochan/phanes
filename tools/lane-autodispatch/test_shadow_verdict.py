@@ -72,3 +72,23 @@ def test_io_and_corrupt_log_fail_without_merge(tmp_path, monkeypatch):
         record(path)
     assert path.read_text() == '{broken'
     assert ad.shadow_verdict_stats(tmp_path / 'absent') ['samples'] == 0
+
+
+def test_failed_flush_never_calls_external_actions(tmp_path, monkeypatch):
+    monkeypatch.setattr(ad, 'sh', lambda *a, **k: pytest.fail('external action'))
+    def fail_sync(_):
+        raise OSError('simulated storage failure')
+    monkeypatch.setattr(ad.os, 'fsync', fail_sync)
+    with pytest.raises(OSError, match='storage failure'):
+        record(tmp_path / 'shadow.jsonl')
+
+
+def test_multiple_samples_and_initial_final_outcome(tmp_path):
+    path = tmp_path / 'shadow.jsonl'
+    record(path, final_outcome='pass')
+    record(path, pr=2, lane_verdict='fail', tester_verdict='fail', final_outcome='fail')
+    record(path, pr=3, tester_verdict='pass')
+    stats = ad.shadow_verdict_stats(path)
+    assert stats == dict(samples=3, disagreements=1, resolved=2, lane_hits=2,
+                        tester_hits=1, lane_accuracy=1.0, tester_accuracy=0.5)
+    assert all(isinstance(json.loads(line), dict) for line in path.read_text().splitlines())
