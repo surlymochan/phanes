@@ -98,7 +98,10 @@ def reconcile_mem_health(
         host_pause = state_dir / f"PAUSE-HOST-{host}"
         lane_pauses = [state_dir / f"PAUSE-{lane}" for lane in lanes]
         if available < HEALTH_MEM_HARD_MB:
-            host_pause.write_text(f"auto:host_hard mem_avail_mb={available}\n")
+            # A host pause may already represent an independent hard limit such as
+            # disk pressure. Memory health must not replace or later clear it.
+            if not host_pause.exists() or host_pause.read_text().startswith("auto:host_hard"):
+                host_pause.write_text(f"auto:host_hard mem_avail_mb={available}\n")
             for pause in lane_pauses:
                 pause.write_text(f"auto:mem_hard host={host} mem_avail_mb={available}\n")
             changed.extend([host_pause.name, *(pause.name for pause in lane_pauses)])
