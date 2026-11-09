@@ -12,7 +12,17 @@ A legacy marker that carries its own deadline (`until=<epoch|ISO>`) stops holdin
 deadline passed; the marker file stays on disk as the evidence of the hold (Refs #1592).
 """
 import base64, hashlib, json, math, os, re, shlex, stat, subprocess, sys, time, tempfile, concurrent.futures as cf
+import importlib.util
 from datetime import datetime, timezone
+# Resolve the sibling even when the dispatcher is loaded by path from another directory.
+# A deployment that copies only this file must still dispatch: without the
+# classifier every card is read in full (Refs #1988).
+try:
+    _risk_spec = importlib.util.spec_from_file_location("tester_risk", os.path.join(os.path.dirname(__file__), "tester_risk.py"))
+    tester_risk = importlib.util.module_from_spec(_risk_spec)
+    _risk_spec.loader.exec_module(tester_risk)
+except Exception:
+    tester_risk = None
 HOME = os.path.expanduser("~"); D = f"{HOME}/phanes-ctl/autodispatch"
 REPO = "surlymochan/phanes"; LOCAL = "/workspace/phanes-repo"; BRAIN_LOG = "/workspace/phanes/brain/log.md"
 TICK = int(os.environ.get("AD_TICK", "60")); BUDGET = os.environ.get("AD_BUDGET", "45"); LOW = int(os.environ.get("AD_LOW", "10"))
@@ -1585,9 +1595,40 @@ def dispatch_failed(lane, cfg, item, error, busy=False):
 LANE_BUSY_RE = re.compile(r"lane \S+ is busy", re.I)  # the host still runs the finished run
 CAPACITY_EXHAUSTED_RE = re.compile(r"\b(?:capacity exhausted|no (?:available )?capacity)\b", re.I)
 
+TESTER_RISK_CARD_LIMIT = 200
+
+def tester_risk_decision(body):
+    """Classify how deep the evidence review of a verify card must go (Refs #1988).
+
+    A failure never buys a cheaper review: the card is read in full.
+    """
+    if tester_risk is None:
+        return {"decision": "full_read", "reason": "risk classifier unavailable"}
+    try:
+        return tester_risk.classify_card(
+            body, repo=REPO, read=sh,
+            sample_rate=os.environ.get("AD_TESTER_RISK_SAMPLE_RATE", "0.2"),
+            seed=os.environ.get("AD_TESTER_RISK_SEED", "risk-v1"))
+    except (OSError, ValueError, TypeError, subprocess.SubprocessError):
+        return {"decision": "full_read", "reason": "risk classification unavailable"}
+
+def record_tester_risk(state, issue, decision):
+    """Keep the review depth with the card, not only with the lane slot.
+
+    The lane entry is dropped when the run ends, but the card keeps its decision so
+    the tester still reads how deep the evidence review must go.
+    """
+    cards = state.setdefault("_tester_risk_cards", {})
+    cards[str(issue)] = decision
+    if len(cards) > TESTER_RISK_CARD_LIMIT:
+        for key in list(cards)[:len(cards) - TESTER_RISK_CARD_LIMIT]: cards.pop(key)
+
 def dispatch(lane, cfg, item, base):
     n = item["n"]
     body = item["body"]
+    if item.get("verify") and item.get("tester_risk"):
+        risk = item["tester_risk"]
+        body = f"{body.rstrip()}\n\nTester evidence review: {risk['decision']}\nReason: {risk['reason']}\n"
     labels = set(item.get("labels", ()))
     # PLANNER's ordinary work cards have Chinese titles and only priority/backend
     # labels, so impl is the default. Explicit non-impl markers take precedence,
@@ -2234,6 +2275,8 @@ def tick(lanes, state, last_warn):
             # never count it as a stale skip and never dispatch on unverified labels
             log_unverified(c["n"], status, detail, "kept in queue (not dispatched this tick)")
         if not pick: return "no-card"
+        if pick.get("verify"):
+            pick["tester_risk"] = tester_risk_decision(pick["body"])
         commit = base_commit()
         gh(["issue", "edit", str(pick["n"]), "--add-label", "in-progress"])
         try: run, ver = dispatch(L, cfg, pick, commit)
@@ -2241,6 +2284,9 @@ def tick(lanes, state, last_warn):
             dispatch_failed(L, cfg, pick, e, busy=bool(LANE_BUSY_RE.search(str(e))))
             return "no-capacity"
         q.remove(pick); state[L] = {"issue": pick["n"], "run": run, "host": cfg["host"], "base": commit, "at": time.strftime("%F %T"), "verify": ver, "class": "verify" if pick.get("verify") else "work"}
+        if pick.get("verify"):
+            state[L]["tester_risk"] = pick["tester_risk"]
+            record_tester_risk(state, pick["n"], pick["tester_risk"])
         metrics = verify_metrics(state)
         # The snapshot and saved state must reflect the slot just occupied.
         if AD_VERIFY_SHARE_ENABLED: metrics["deficit"] = queue_class_limits(lanes, state, idle)[0]
