@@ -334,6 +334,7 @@ class LaneRecoveryTests(unittest.TestCase):
             self.assertEqual(state["state"], "busy")
             self.assertEqual(state["current_run"], self.run_id)
             spec["down_requested"] = True
+            return {}
 
         def check_pending_run(server, lane, current, executor, turn, pending):
             self.assertEqual(current.get("run_id"), self.run_id)

@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { agentProviderDescriptor } from "@volto/contracts/agent-providers";
 import { INPUT_LIMITS } from "@volto/contracts/input-limits";
 import {
+  AGENT_TASK_COMPLETION_MAX,
   AGENT_TASK_QUEUED_PREVIEW,
   type AgentEvent,
   type AgentSummary,
@@ -27,6 +28,16 @@ const logger = createVoltoLogger("agent-tasks");
 
 /** The most open tasks that an agent can have when it starts one more itself. The user can have up to `INPUT_LIMITS.agentTasks`. */
 const AGENT_STARTED_OPEN_TASKS = 8;
+
+/**
+ * The percent a task gains with each progress step of its turn. The provider does not report how far
+ * a goal came, so the steps of the turn stand for it: the value grows with the work and stays below
+ * 100, because 100 belongs to a task that finished.
+ */
+const COMPLETION_STEP_PERCENT = 10;
+
+/** The most percent a task that still runs may report. */
+const COMPLETION_RUNNING_MAX = AGENT_TASK_COMPLETION_MAX - 1;
 
 export const START_TASK_TOOL = "start_task";
 
@@ -73,6 +84,10 @@ export class AgentTasks implements TaskLanes {
   readonly #hooks: AgentTasksHooks;
   /** The last progress line of each running task turn, by task id. */
   readonly #progress = new Map<string, string>();
+  /** How far the goal of each task came, in percent, by task id. */
+  readonly #completion = new Map<string, number>();
+  /** The turn that runs for each task, by task id. */
+  readonly #runningTurn = new Map<string, string>();
   /** The last turn of each task that the user stopped, by task id. */
   readonly #stoppedTurns = new Map<string, string>();
   /** Who waits for the running turn of a task to end, by task id. */
@@ -182,6 +197,8 @@ export class AgentTasks implements TaskLanes {
    */
   delete(task: AgentThreadRecord): void {
     this.#progress.delete(task.taskId);
+    this.#completion.delete(task.taskId);
+    this.#runningTurn.delete(task.taskId);
     this.#stoppedTurns.delete(task.taskId);
     this.#turnEndWaiters.delete(task.taskId);
     this.#store.delete(task.taskId);
@@ -196,6 +213,8 @@ export class AgentTasks implements TaskLanes {
   close(task: AgentThreadRecord): void {
     this.#store.close(task.taskId);
     this.#progress.delete(task.taskId);
+    this.#runningTurn.delete(task.taskId);
+    // A closed task keeps the percent its goal reached: the goal view shows finished goals with it.
     this.#stoppedTurns.delete(task.taskId);
     this.changed(task.agentId);
   }
@@ -285,6 +304,8 @@ export class AgentTasks implements TaskLanes {
   deleteForAgent(agentId: string): void {
     for (const taskId of this.#store.taskIdsForAgent(agentId)) {
       this.#progress.delete(taskId);
+      this.#completion.delete(taskId);
+      this.#runningTurn.delete(taskId);
       this.#stoppedTurns.delete(taskId);
     }
     this.#store.deleteForAgent(agentId);
@@ -369,6 +390,7 @@ export class AgentTasks implements TaskLanes {
         const task = this.#taskOf(event.threadId);
         if (!task) return false;
         this.#progress.set(task.taskId, event.detail.slice(0, INPUT_LIMITS.agentTaskProgress));
+        this.#completion.set(task.taskId, this.#nextCompletion(task.taskId));
         this.changed(task.agentId);
         return true;
       }
@@ -376,6 +398,9 @@ export class AgentTasks implements TaskLanes {
         const task = this.#taskOf(event.threadId);
         if (!task) return false;
         this.#progress.delete(task.taskId);
+        // A new turn restarts the goal, so the completion starts over with it.
+        this.#completion.delete(task.taskId);
+        this.#runningTurn.set(task.taskId, event.turnId);
         if (task.error !== null) this.#store.setError(task.taskId, null);
         this.#store.touch(task.taskId);
         this.changed(task.agentId);
@@ -385,6 +410,8 @@ export class AgentTasks implements TaskLanes {
         const task = this.#taskOf(event.threadId);
         if (!task) return false;
         this.#progress.delete(task.taskId);
+        this.#runningTurn.delete(task.taskId);
+        // A turn that failed or was interrupted keeps the percent its goal reached: it did not finish.
         this.#store.setOutcome(
           task.taskId,
           event.status === "completed" ? "completed" : event.status === "failed" ? "failed" : "interrupted",
@@ -408,6 +435,23 @@ export class AgentTasks implements TaskLanes {
   #taskOf(threadId: string | null): AgentThreadRecord | null {
     if (!threadId || !this.#conversation.isTaskThread(threadId)) return null;
     return this.#store.taskForThread(threadId);
+  }
+
+  /** The completion of a task that runs: each progress step of the turn adds a step to it. */
+  #nextCompletion(taskId: string): number {
+    const current = this.#completion.get(taskId) ?? 0;
+    return Math.min(COMPLETION_RUNNING_MAX, current + COMPLETION_STEP_PERCENT);
+  }
+
+  /**
+   * How far the goal of a task came. A turn that runs shows what its progress steps reached. A task
+   * whose last turn finished has all of its goal, also after a restart, because the outcome is
+   * stored. A turn that failed or was interrupted keeps the percent it reached: it did not finish.
+   */
+  #completionOf(task: AgentThreadRecord): number | null {
+    if (this.#runningTurn.has(task.taskId)) return this.#completion.get(task.taskId) ?? null;
+    if (task.outcome === "completed") return AGENT_TASK_COMPLETION_MAX;
+    return this.#completion.get(task.taskId) ?? null;
   }
 
   #publicTask(task: AgentThreadRecord): AgentTask {
@@ -436,6 +480,7 @@ export class AgentTasks implements TaskLanes {
       hold,
       activeTurnId,
       progress: activeTurnId ? (this.#progress.get(task.taskId) ?? null) : null,
+      completion: this.#completionOf(task),
       error: task.outcome === "failed" ? task.error : null,
       queuedMessages,
       createdAt: task.createdAt,
