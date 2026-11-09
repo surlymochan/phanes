@@ -92,6 +92,21 @@ class UpstreamDriftTests(unittest.TestCase):
             self.assertEqual(init_locations[0].parent, work_dir)
             self.assertFalse(init_locations[0].exists())
 
+    def test_snapshot_creates_a_missing_work_dir_and_removes_it(self):
+        with tempfile.TemporaryDirectory(dir=os.environ.get("TMPDIR")) as scratch:
+            root = Path(scratch)
+            remote = root / "upstream"
+            work_dir = root / "missing-work"
+            remote.mkdir()
+            subprocess.run(["git", "init", str(remote)], check=True, capture_output=True)
+            (remote / "tracked.txt").write_text("snapshot\n")
+            base_sha = commit(remote, "base")
+
+            result = snapshot({"upstream_repo": str(remote)}, base_sha, work_dir)
+
+            self.assertEqual(result, {"tracked.txt": blob_id(b"snapshot\n")})
+            self.assertFalse(work_dir.exists())
+
     def test_snapshot_rejects_missing_base_sha_with_localized_git_error(self):
         with tempfile.TemporaryDirectory(dir=os.environ.get("TMPDIR")) as scratch:
             remote = Path(scratch) / "remote.git"
