@@ -7,9 +7,12 @@ import argparse, json, os, shutil, sys, threading, time, traceback
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent / "harness"))
 import swe_env as E  # noqa: E402
 import arms as A  # noqa: E402
+import phases as P  # noqa: E402
+import solution_diff as SD  # noqa: E402
 
 ROOT = Path(__file__).resolve().parent
 LOCK = threading.Lock()
@@ -41,13 +44,14 @@ def cell(inst, arm, rep, out, stamp, raw_root, label):
         E.sh(E.GIT + ["add", "-A"], cwd=repo, check=False)
         diff = E.sh(E.GIT + ["diff", "--no-ext-diff", "--cached", frm, "--", ".", ":(exclude).xflow", ":(exclude).as-xflow"], cwd=repo, check=False, errors="replace").stdout
         E.sh(E.GIT + ["diff", "--cached", frm, "--stat"], cwd=repo, check=False)
-        (events / "solution.diff").write_text(diff)
+        rec["diff_file"] = SD.store_solution_diff(events, diff)
         E.sh(E.GIT + ["reset", "-q"], cwd=repo, check=False)
         rec["diff_lines"] = sum(1 for l in diff.splitlines() if l[:1] in "+-" and l[:3] not in ("+++", "---"))
         rec["calls"] = [{k: c.get(k) for k in ("label", "rc", "wall_s", "usage", "note", "merge")} |
                         {"task_id": (c.get("record") or {}).get("task_id"),
                          "guard_blocked": (c.get("record") or {}).get("guard_blocked"),
                          "timed_out": (c.get("record") or {}).get("timed_out")} for c in calls]
+        rec["phases"] = P.phase_split(rec["calls"])
         models = set()
         need_executor_records = False
         for c in calls:
