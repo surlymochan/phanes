@@ -1425,7 +1425,10 @@ class AgyStartupRegressionTests(unittest.TestCase):
         rdir = os.path.join(self.tmp.name, "startup")
         os.mkdir(rdir)
         child = mock.Mock()
-        child.alive.return_value = False
+        # The executor is alive while the turn is admitted and dead once the
+        # turn reports its startup failure.
+        turn_ran = []
+        child.alive.side_effect = lambda: not turn_ran
         ws = {"repo": self.tmp.name, "root": self.tmp.name, "path": self.tmp.name}
         with mock.patch.object(xs, "RUNS", self.tmp.name), \
              mock.patch.object(xs, "lane_write_state"), \
@@ -1437,13 +1440,16 @@ class AgyStartupRegressionTests(unittest.TestCase):
              mock.patch.object(xs, "NOW", return_value=100), \
              mock.patch.object(xs, "set_status"), \
              mock.patch.object(xs, "reserve_provider_slot", return_value=True), \
-             mock.patch.object(xs, "lane_run_turn", return_value=(None, {}, "executor_start_failed", 1, "events", "two crashes")), \
+             mock.patch.object(xs, "lane_run_turn", side_effect=lambda *a, **k: turn_ran.append(1) or (
+                 None, {}, "executor_start_failed", 1, "events", "two crashes")) as run_turn, \
              mock.patch.object(xs, "executor_boundary_empty", return_value=True), \
              mock.patch.object(xs, "release_fleet_slot") as release, \
              mock.patch.object(xs, "lane_finalize_run") as finalize:
             xs.lane_do_run(lane, spec, child, None, None)
+        run_turn.assert_called_once()
         finalize.assert_called_once()
         self.assertEqual(finalize.call_args.args[5], "executor_start_failed")
+        # Released after the failed turn, not by the pre-admission shortcut.
         release.assert_called_once_with(rdir)
 
 
