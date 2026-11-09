@@ -889,6 +889,14 @@ class SpecRevisionTests(TestEvalidRolesControl):
         self.assertEqual(state["receipts"]["spec-check"]["verdict"], "FAIL")
         self.assertEqual(state["next"], "spec")
 
+    def test_recorded_spec_check_fail_is_a_public_rejection(self):
+        self._spec()
+        self._check(verdict="FAIL")
+        history = self.controller._attempt_history("offline-demo")
+        self.assertEqual(history[0]["terminal"], "REJECTED")
+        self.assertEqual(history[0]["rejection_reason"], "SPEC_CHECK_REJECTED")
+        self.controller._validate_attempt_history("offline-demo", history)
+
     def _spec(self, controller=None, version=1, spec_digest=None, parent="auto", declare=True):
         """Submit a Spec receipt, binding the rejection it answers by default."""
         controller = controller or self.controller

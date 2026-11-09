@@ -788,12 +788,17 @@ class RoleController:
                 item["terminal"] = "PASS"
             if stage != "delivery" and isinstance(data, dict):
                 # Preserve a prior public rejection enum after a successful retry.
-                if item["rejection_reason"] == stage.upper().replace("-", "_") + "_REJECTED":
+                if item["rejection_reason"] == stage.upper().replace("-", "_") + "_REJECTED" or (
+                        stage == "spec" and item["rejection_reason"] == "SPEC_CHECK_REJECTED"):
                     item["terminal"] = "IN_PROGRESS"
                 run_id = data.get("run_id")
                 if isinstance(run_id, str):
                     item["run_ids"].append(run_id)
-                if stage == "review":
+                if stage == "spec-check" and data.get("verdict") == "FAIL":
+                    # A recorded failing spec check is a public rejection of that stage.
+                    item["terminal"] = "REJECTED"
+                    item["rejection_reason"] = "SPEC_CHECK_REJECTED"
+                elif stage == "review":
                     verdict = data.get("verdict")
                     if verdict in ("PASS", "FAIL", "NEEDS-BOSS") and item["rejection_reason"] != "HOLDOUT_REJECTED":
                         item["terminal"] = verdict
