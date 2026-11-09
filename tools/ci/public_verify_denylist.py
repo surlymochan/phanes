@@ -67,6 +67,7 @@ RIGHT_PLAIN = r"(?!\w)"
 # expression only.  The group is turned into a scoped group, so that the
 # boundary guards of the rule keep their own meaning.
 GLOBAL_FLAG_GROUP = re.compile(r"^\(\?([aiLmsux]+)\)")
+SCOPED_FLAG_GROUP = re.compile(r"\(\?([aiLmsux]*)(?:-([imsx]+))?:")
 
 __all__ = [
     "CATEGORIES",
@@ -236,7 +237,7 @@ def _compile(term, is_regex):
     if is_regex:
         # The general guard reads the character at the start and at the end of
         # the match, so it holds for every alternative of the expression.
-        body = _scope_body(term)
+        body = _scope_body(_force_case_insensitive(term))
         pattern = LEFT_BOUNDARY + "(?:" + body + ")" + RIGHT_BOUNDARY
     else:
         # A plain term knows its own first and last character, so its boundary
@@ -246,6 +247,55 @@ def _compile(term, is_regex):
         right = RIGHT_PLAIN if _is_word_char(term[-1]) else ""
         pattern = left + re.escape(term) + right
     return re.compile(pattern, re.IGNORECASE)
+
+
+def _force_case_insensitive(body):
+    """Remove scoped regex flags that would disable case-insensitive matching.
+
+    Rules are always compiled with ``re.IGNORECASE``.  Python allows a nested
+    scoped group such as ``(?-i:...)`` to override that flag, so remove ``i``
+    from negative inline flag sets before compiling.  Only group openers are
+    rewritten; escaped text and character classes retain their literal
+    meaning.
+    """
+    pieces = []
+    index = 0
+    in_class = False
+    class_first = False
+    while index < len(body):
+        char = body[index]
+        if char == "\\":
+            pieces.append(body[index:index + 2])
+            if in_class:
+                class_first = False
+            index += 2
+            continue
+        if in_class:
+            pieces.append(char)
+            if char == "]" and not class_first:
+                in_class = False
+            elif char != "^" or not class_first:
+                class_first = False
+            index += 1
+            continue
+        if char == "[":
+            in_class = True
+            class_first = True
+            pieces.append(char)
+            index += 1
+            continue
+        if body.startswith("(?", index):
+            match = SCOPED_FLAG_GROUP.match(body, index)
+            if match and "i" in (match.group(2) or ""):
+                positive, negative = match.groups()
+                negative = negative.replace("i", "")
+                flags = positive + ("-" + negative if negative else "")
+                pieces.append("(?" + flags + ":")
+                index = match.end()
+                continue
+        pieces.append(char)
+        index += 1
+    return "".join(pieces)
 
 
 def _scope_body(body):

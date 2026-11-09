@@ -191,6 +191,11 @@ class DenylistMatchTests(unittest.TestCase):
         self.assertEqual(len(matcher.scan(BUS_TERM)), 1)
         self.assertEqual(matcher.scan("bus-fixture-xx"), [])
 
+    def test_regex_cannot_disable_case_insensitive_matching(self):
+        """Inline regex flags must not weaken the denylist's case-insensitive rule."""
+        matcher = self.matcher(rule("host", "re:(?-i:fixture)"))
+        self.assertEqual(len(matcher.scan("FIXTURE")), 1)
+
     def test_regular_expression_rules_respect_word_boundaries(self):
         matcher = self.matcher(rule("host", "re:gw-fixture-[0-9]+"))
         self.assertEqual(matcher.scan("x" + HOST_TERM + "y"), [])
