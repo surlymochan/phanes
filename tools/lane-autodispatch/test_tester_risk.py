@@ -150,7 +150,9 @@ class TesterRiskDispatchTests(unittest.TestCase):
             (root / "PAUSE-MINT").write_text("test: no replenishment")
             env = {"OPENSWARM_HOME": str(root / "swrm"),
                    "OPENSWARM_CTL_STATE_DIR": str(root / "ctl"),
-                   "AD_TESTER_RISK_SAMPLE_RATE": rate, "AD_TESTER_RISK_SEED": seed}
+                   "AD_TESTER_RISK_SEED": seed}
+            if rate is not None:
+                env["AD_TESTER_RISK_SAMPLE_RATE"] = rate
             with patch.dict(os.environ, env), patch.multiple(
                 ad, D=tmp, BRAIN_LOG=str(root / "brain.log"), AD_VERIFY_SHARE_ENABLED=False,
                 sh=fake_sh, remote=lambda *args: {"lane": "idle"},
@@ -191,6 +193,15 @@ class TesterRiskDispatchTests(unittest.TestCase):
             {"changed_files": 1, "additions": 2, "deletions": 1,
              "labels": [{"name": "needs-human"}]})
         self.assertEqual(state["tester_risk"]["decision"], "full_read")
+
+    def test_default_sample_rate_keeps_full_read_for_routine_cards(self):
+        """Without any env override no card is sampled: the default gate stays full review."""
+        with patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("AD_TESTER_RISK_SAMPLE_RATE", None)
+            for pr_number in range(1, 40):
+                state, _, _ = self.run_card(target=f"https://github.com/surlymochan/phanes/pull/{pr_number}",
+                                            rate=None)
+                self.assertEqual(state["tester_risk"]["decision"], "full_read", pr_number)
 
     def test_tick_sampling_uses_target_pr_instead_of_card_number(self):
         for rate, expected in (("0", "sampled"), ("1", "full_read"), ("0.2", None)):

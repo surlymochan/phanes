@@ -11,7 +11,8 @@ only live on the box after that sync.
 **旧 dispatcher 已退役**：上游已删除 `lib/dispatch/engine.py`；本轮一并移除无生产调用方的
 phanes_only dispatch 扩展及其测试。当前自动派发使用 swrm 原生 batch/fleet。
 本目录仍保留独立的旧控制面镜像和离线测试；审查车道按积压分配（Refs #1701，见下文）落在
-本镜像里，旧 engine 的其余实现不再保留。
+本镜像里，旧 engine 的其余实现不再保留。**注意**：#1701 的按积压分配目前只接在这份旧控制面镜像上，
+尚未接入当前 swrm 原生 batch/fleet 派发路径，离线 tick 回放不能证明生产派发已按积压分配。
 `tools/check-ad-review-pause-uncounted.py` 的运行副本契约不适用于本镜像。
 
 Base-commit validation: the base commit must exist in the target repo before a lane is assigned
@@ -109,7 +110,7 @@ export AD_VERIFY_SHARE_ENABLED=1        # 可选：export AD_VERIFY_SHARE=0.2 AD
 
 | 环境变量 | 默认 | 含义 |
 | --- | --- | --- |
-| `AD_TESTER_RISK_SAMPLE_RATE` | `0.2` | 常规卡中被稳定抽中（按全读处理）的比例（0 = 常规卡一律抽检，1 = 常规卡一律全读） |
+| `AD_TESTER_RISK_SAMPLE_RATE` | `1` | 常规卡中被稳定抽中（按全读处理）的比例（0 = 常规卡一律抽检，1 = 常规卡一律全读）。默认 1：所有卡默认全量审查，抽检需显式调低才启用，不放松默认门禁 |
 | `AD_TESTER_RISK_SEED` | `risk-v1` | 抽检散列种子，同一 seed 下同一 PR 的结果稳定 |
 
 ### 部署

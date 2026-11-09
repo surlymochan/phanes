@@ -1805,7 +1805,8 @@ def tester_risk_decision(body):
     try:
         return tester_risk.classify_card(
             body, repo=REPO, read=sh,
-            sample_rate=os.environ.get("AD_TESTER_RISK_SAMPLE_RATE", "0.2"),
+            # default 1 = every card is read in full: sampling is opt-in and never lowers the default gate
+            sample_rate=os.environ.get("AD_TESTER_RISK_SAMPLE_RATE", "1"),
             seed=os.environ.get("AD_TESTER_RISK_SEED", "risk-v1"))
     except (OSError, ValueError, TypeError, subprocess.SubprocessError):
         return {"decision": "full_read", "reason": "risk classification unavailable"}
