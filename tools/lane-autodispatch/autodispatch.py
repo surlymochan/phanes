@@ -1192,7 +1192,7 @@ if any(a["ticks"]!=b["ticks"] or a["wchan"]!=b["wchan"] or a["threads"]!=b["thre
 # kernel waits, even when their counters are stable. No ptrace-only syscall/IO
 # files are needed, and ordinary pipe/futex deadlocks need not be SIGSTOP'ed.
 # Newer kernels rename the futex wait symbol (futex_wait_queue -> futex_do_wait).
-local_waits={"do_wait","pipe_read","futex_wait_queue","futex_wait_queue_me",
+local_waits={"do_wait","pipe_read","anon_pipe_read","futex_wait_queue","futex_wait_queue_me",
              "futex_do_wait","futex_wait","do_signal_stop","ptrace_stop"}
 for row in second[1:]:
   if any(thread[1] not in ("S","T","t") or thread[5] not in local_waits

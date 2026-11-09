@@ -210,6 +210,28 @@ class LaneStuckTickTest(unittest.TestCase):
             with mock.patch.dict(os.environ, {"AD_PROC_ROOT": str(proc_root)}):
                 self.assertFalse(self.run_probe(home)["cleaned"])
 
+    def test_stable_anonymous_pipe_wait_is_cleaned(self):
+        with tempfile.TemporaryDirectory(dir=Path(__file__).resolve().parents[2]) as directory:
+            home = Path(directory)
+            self.make_run_data(home)
+            proc_root = home / "proc"
+            self.make_fake_process_tree(proc_root)
+            (proc_root / "43211/wchan").write_text("anon_pipe_read")
+            (home / "lanes/M19").mkdir(parents=True)
+            (home / "lanes/M19/state.json").write_text('{"child_pid":43210}')
+
+            def deliver(pid, sig):
+                path = proc_root / str(pid) / "stat"
+                path.write_text(path.read_text().replace(") S ", ") Z "))
+
+            output = io.StringIO()
+            with mock.patch.dict(os.environ, {"OPENSWARM_HOME": str(home), "AD_PROC_ROOT": str(proc_root)}), \
+                 mock.patch.object(sys, "argv", ["-", "M19"]), \
+                 mock.patch.object(os, "kill", side_effect=deliver), \
+                 mock.patch.object(time, "sleep"), contextlib.redirect_stdout(output):
+                exec(AUTODISPATCH.REMOTE_STUCK_CLEANUP, {})
+            self.assertTrue(json.loads(output.getvalue())["cleaned"])
+
     def test_rpc_exit_alone_does_not_confirm_tree_cleanup(self):
         for unreadable in (False, True):
             with self.subTest(unreadable=unreadable), \

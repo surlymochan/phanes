@@ -74,6 +74,21 @@ class LaneStreakTickTest(unittest.TestCase):
             self.assertFalse((directory / "PAUSE-M19").exists())
         self.with_state_dir(run)
 
+    def test_m19_interleaved_terminal_sequence_does_not_pause(self):
+        # Representative sequence: the original log is not present in this checkout.
+        def run(directory):
+            sequence = [("exec_error", False), ("failed", False),
+                        ("budget_exceeded", False), ("exec_error", False),
+                        ("finished", True), ("exec_error", False),
+                        ("done", False), ("exec_error", False)]
+            for index, (status, committed) in enumerate(sequence):
+                AUTODISPATCH.record_lane_terminal("M19", f"run-{index}",
+                                                  {"status": status}, committed=committed)
+                self.assertFalse((directory / "PAUSE-M19").exists())
+            self.assertEqual(AUTODISPATCH.read_lane_streaks()["M19"],
+                             {"n": 1, "runs": ["run-7"]})
+        self.with_state_dir(run)
+
     def test_third_failure_blocks_same_tick_dispatch_only_on_paused_lane(self):
         def run(directory):
             lanes = {name: {"host": "executor", "backend": "pi"} for name in ("M19", "M20")}
