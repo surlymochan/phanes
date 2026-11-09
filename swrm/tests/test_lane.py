@@ -411,7 +411,7 @@ class LaneTests(unittest.TestCase):
                  "fs sandbox helper failed: bwrap: Can't mkdir /var/lib/gorelay-codex/control: Permission denied")
         self.env["FAKE_APP_SERVER_THREAD_START_ERROR"] = error
         self.start_lane()
-        run_id = self.assign("reproduce gorelay codex sandbox initialization failure")
+        run_id = self.assign("reproduce <host> codex sandbox initialization failure")
         state = self.wait_run(run_id)
         result = json.loads((self.data / "runs" / run_id / "result.json").read_text())
         self.assertEqual(state["status"], "failed")

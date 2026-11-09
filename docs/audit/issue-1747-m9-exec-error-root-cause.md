@@ -1,4 +1,4 @@
-# Issue #1747：M9（gores1，pi）连续 exec_error 秒挂的根因诊断
+# Issue #1747：M9（<host>，pi）连续 exec_error 秒挂的根因诊断
 
 状态：**验收未完成；M9 根因尚未确认，现场首跑未验真，PAUSE-M9 保持（§6）**。
 现有实现补齐了后续 run 的执行器错误串、spawn 路径采集及首跑闸门；这些机制不能代替本次事故的现场证据。
@@ -18,7 +18,7 @@
   `exists=false, is_socket=false`；普通文件记录 `exists=true, is_socket=false`。
   三个入口均新增回归测试：修复前缺失路径和悬空链接共 6 个子用例失败，修复后 9 个子用例全部通过。
 - **现场 FOLLOW-UP（既往 BLOCKER 1：根因与恢复验真未闭环）**：当前工作树没有 M9 实际错误串或 spawn 路径，
-  也没有 gores1 恢复后首跑的 run ID、状态和提交。撤回此前“根因已定位”的表述。
+  也没有 <host> 恢复后首跑的 run ID、状态和提交。撤回此前“根因已定位”的表述。
   M19 的转述及离线 fake executor 记录均不能完成 M9 现场验收。
 - **既有环境隔离实现（保留）**：基线已有取证环境的三条规则（第 4 节）和测试覆盖：
   快照/systemd 环境**不继承终端变量**、缺失变量点名、冲突显式报告；未与运行中的 supervisor
@@ -29,7 +29,7 @@
 
 ## 1. 待核验的共因假说
 
-**待核验假说：gores1 上 idle lane serve（release `a9ac8f33`）持续泄漏僵尸 `git` 进程，
+**待核验假说：<host> 上 idle lane serve（release `a9ac8f33`）持续泄漏僵尸 `git` 进程，
 占满主机的进程/线程表，车道的 worktree 准备随即以 EAGAIN 失败，run 约两分钟内以
 `failed/exec_error` 结束且无提交。**
 
@@ -42,12 +42,12 @@
 2. **机制清楚**。lane serve 是 Linux subreaper（`lane_become_subreaper()`，`PR_SET_CHILD_SUBREAPER`），
    执行端留下的孤儿被它收养；而 `git` 的后台工作（`git gc --auto` fork 的后台 `git`）会脱离父进程，
    死后**没有人 wait**，于是变成 serve 的僵尸进程，一直挂到下次重启。
-3. **现场计数转述（待核验）**。builder 2026-11-03 14:15 在 gores1 实测：约 4600 个僵尸（以 `git` 为主），
+3. **现场计数转述（待核验）**。builder 2026-11-03 14:15 在 <host> 实测：约 4600 个僵尸（以 `git` 为主），
    全部挂在三个**空闲** serve 上（lane serve M9/GH2/M19，release `a9ac8f33`，已运行 18h/18h/13h），
    各约 1533 个，约每 17–40 秒泄漏一个；同机 M8 的 serve（release `df02c552`）为 **0**。
 4. **版本对照线索**。M9（2026-11-03 00:47–01:04，九卡 #1694/#1700/#1702/#1709/#1711/
    #1719/#1685/#1705/#1730）、GH2（00:08–00:25，九连挂）、M19（当日六连死：04:23 #1361、04:25 #1793、
-   04:36 #1794、04:50 #1771、05:41 #1786、13:48 #1690）都是 gores1 上的 Nov02 release `a9ac8f33`；
+   04:36 #1794、04:50 #1771、05:41 #1786、13:48 #1690）都是 <host> 上的 Nov02 release `a9ac8f33`；
    同机跑 Nov01 release `df02c552` 的 M8 同期不速败。
    卡片互不相关，签名相同本身就说明是车道/主机/版本层故障，不是卡片缺陷。
 5. **M9 那九次的归属**。前版称 M9 自身的历史 run 目录已被清理，但本轮无法核验清理情况，也未取得它自己的错误串；
@@ -65,7 +65,7 @@
 | 证据 | 内容 | 来源 |
 | --- | --- | --- |
 | 现场错误串 | `lane worktree preparation failed (checkout -B): fatal: unable to create threaded lstat: Resource temporarily unavailable`（M19 run `20261103-134716-6e76f7`） | `#1817` 事故文档（提交 `1e51c5ef77301c3e016650f539e6bfcbb3ddd433`，`openswarm/docs/issue-1817-zombie-leak.md`） |
-| 僵尸实测 | gores1 约 4600 个僵尸，三个空闲 Nov02 serve 各约 1533 个，泄漏率 1 个 / 17–40 s；M8（Nov01）0 个 | 同上（builder 2026-11-03 14:15 实测） |
+| 僵尸实测 | <host> 约 4600 个僵尸，三个空闲 Nov02 serve 各约 1533 个，泄漏率 1 个 / 17–40 s；M8（Nov01）0 个 | 同上（builder 2026-11-03 14:15 实测） |
 | 修复后 soak | 30 分钟 idle serve：`rounds=127`、`reaped=127`、`serve_zombies=0`、`host_zombies=0` | 同提交 `openswarm/docs/evidence/pr-1822-zombie-soak.txt`（当前工作树无此文件，引用的 git 对象不可读取） |
 | 上游修复提交 | `1e51c5ef77301c3e016650f539e6bfcbb3ddd433`（#1817：`lane_reap_zombies()` + SIGCHLD 唤醒 + 僵尸计数告警） | 前版引用；当前对象库无法读取，待取得来源 |
 | 现场构建身份 | 三个故障 serve 跑的是 release `a9ac8f33`，构建路径 `/releases/a9ac8f3370b72fcd290a84cdc60166066c8fe75c/` | 卡片正文 + `#1817` 事故文档的 release 对照表 |
@@ -75,9 +75,9 @@
 
 - **本轮未取得 M9 自己的九次 run 记录**，第 1 节第 5 条的归属是推定，不是 M9 的实测报错文本。
 - **当前代码的排除性线索，不能证明现场已修复**：迁移后的 `swrm/bin/swrm` 不含 subreaper 扩展
-  （可用 `rg SUBREAPER swrm/` 核对）。这不证明 gores1 已部署该版本，也不能排除其它进程资源耗尽原因；
-  现场仍需把修复后的构建重新钉到 gores1 的 systemd unit，旧 unit 备份在
-  `gores1 /root/openswarm-executor-*.service.bak-20261103`。因此本卡**不**把 `#1817` 的回收逻辑
+  （可用 `rg SUBREAPER swrm/` 核对）。这不证明 <host> 已部署该版本，也不能排除其它进程资源耗尽原因；
+  现场仍需把修复后的构建重新钉到 <host> 的 systemd unit，旧 unit 备份在
+  `<host> /root/openswarm-executor-*.service.bak-20261103`。因此本卡**不**把 `#1817` 的回收逻辑
   移植进 `swrm/bin/swrm`：那会把 subreaper 扩展重新引进来。
 
 ## 2.1 卡片列出的两个怀疑项仍需排查
@@ -167,7 +167,7 @@ python3 -m pytest -q swrm/tests/test_lane_spawn_evidence.py
 python3 -m pytest -q swrm/tests/test_lane.py -k spawn
 ```
 
-### 5.2 现场首跑（gores1）：解除 PAUSE-M9 的前置条件
+### 5.2 现场首跑（<host>）：解除 PAUSE-M9 的前置条件
 
 M9 恢复后的受控首跑尚未执行：run_id、开始时间、`status` 与实际产出的 commit 均未取得（待回填）。
 现场首跑必须走 `tools/check-lane-first-run.py` 这道闸门，命令与判据见第 6 节；
@@ -179,7 +179,7 @@ M9 恢复后的受控首跑尚未执行：run_id、开始时间、`status` 与�
 正式解除必须同时满足：
 
 1. **现场根因已确认且故障部件已修复或替换**：先取得 M9 自身的错误串或 spawn 路径，
-   记录来源、时间及部署身份，并核验 M19/GH2 是否同因。若确认僵尸泄漏假说，则验证 gores1 上 M9/GH2/M19 的 systemd unit 指向的构建包含 `#1817` 的修复
+   记录来源、时间及部署身份，并核验 M19/GH2 是否同因。若确认僵尸泄漏假说，则验证 <host> 上 M9/GH2/M19 的 systemd unit 指向的构建包含 `#1817` 的修复
    （`1e51c5ef77301c3e016650f539e6bfcbb3ddd433`）或等效实现，且现场 `ps` 读到的僵尸数为 0
    （对照现场基线：Nov02 三个 serve 各约 1533 个）。
 2. **环境与 socket 一致**：`tools/check-pi-spawn-failure.py --lane M9 --json` 报告
@@ -196,7 +196,7 @@ M9 恢复后的受控首跑尚未执行：run_id、开始时间、`status` 与�
 M19 与 GH2 保持各自暂停和各自验真要求。同主机共因需由各车道自己的记录支持，
 不能用 M9 的一次成功替代其它车道的恢复验收。
 
-## 7. 现场只读取证（在 gores1 执行，不解除暂停）
+## 7. 现场只读取证（在 <host> 执行，不解除暂停）
 
 ```bash
 python3 tools/check-pi-spawn-failure.py --lane M9 --json
@@ -235,7 +235,7 @@ python3 -m pytest -q swrm/tests/test_lane.py
   1 项为 `AuditDocumentTests::test_the_audit_states_the_root_cause_of_the_incident`，
   因本文如实保留 M9 根因尚未确认而失败。保留该验收测试，不删改或绕过。
 - `git diff --check` 通过。以上不是现场验真，也不是测试全绿；需要宿主机重跑上述六个模块，
-  并取得第 5.2 节的 gores1 真实首跑记录后再评审。本轮不提交、不推送、不写 GitHub。
+  并取得第 5.2 节的 <host> 真实首跑记录后再评审。本轮不提交、不推送、不写 GitHub。
 
 ### 本轮取证误报修复验证（基于 `79ce0b0ee`，2026-11-08）
 
