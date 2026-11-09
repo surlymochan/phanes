@@ -55,7 +55,10 @@ import unittest
 from pathlib import Path
 
 MODULE_PATH = Path(__file__).with_name("autodispatch.py")
-SCRATCH = Path(__file__).resolve().parents[2] / ".swrm-tmp"
+# The scratch of the test: the TMPDIR of the run (the repo keeps the scratch of the
+# tools inside the worktree, see tools/check-ad-base-fetch-on-miss.py), the scratch
+# root of the repo as the fallback.
+SCRATCH = Path(os.environ.get("TMPDIR") or (Path(__file__).resolve().parents[2] / ".swrm-tmp"))
 LANE = "M17"
 HOST = "lane-host"
 ISSUE = 1392
@@ -270,8 +273,7 @@ class BudgetRequeueTest(unittest.TestCase):
     """The budget failures of a card: the classification, the hold and the requeue."""
 
     def setUp(self):
-        SCRATCH.mkdir(parents=True, exist_ok=True)
-        self.root = Path(tempfile.mkdtemp(prefix="ad-budget-", dir=str(SCRATCH)))
+        self.root = Path(self.scratch())
         self.addCleanup(shutil.rmtree, self.root, ignore_errors=True)
         self.clock = Clock()
         # The cap of the consecutive budget failures of a card: the environment wins, so
@@ -311,6 +313,20 @@ class BudgetRequeueTest(unittest.TestCase):
         self.lanes = {LANE: {"host": HOST, "backend": "pi", "repo": "/tmp/fleet",
                              "fleet": "/tmp/swrm-fleet"}}
         self.state = {}
+
+    def scratch(self):
+        """A private scratch directory of the test.
+
+        The scratch root of the worktree can disappear while the tests run (the
+        sandbox of swrm removes it), so it is created again instead of failing.
+        """
+        for _ in range(5):
+            try:
+                SCRATCH.mkdir(parents=True, exist_ok=True)
+                return tempfile.mkdtemp(prefix="ad-budget-", dir=str(SCRATCH))
+            except FileNotFoundError:
+                continue
+        raise AssertionError("the scratch root of the budget test is gone")
 
     def _restore_home(self, old_home):
         if old_home is None:
