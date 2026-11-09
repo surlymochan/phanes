@@ -148,6 +148,10 @@ VERIFY_MIN = env_number("AD_VERIFY_MIN", 1, int)
 # chosen lane and the backlog of every review lane) goes to the AD log, so the assignment
 # can be reviewed afterwards.
 REVIEW_MAX_IN_FLIGHT = max(1, env_number("AD_REVIEW_MAX_IN_FLIGHT", 1, int))
+# Tie-break rotation for review lanes (#1701 asks only for round-robin among equal backlogs).
+# Deliberately process-local: autodispatch is one long-running loop, and the real selection
+# input (the in-flight review counts) is re-derived every tick, so a restart merely restarts
+# the rotation and can never skew the load balancing or lose a review.
 REVIEW_ROTATION = {}  # review lane set -> {"count": n, "last": {lane: n}}: the turns of the rotation
 
 def ctl_state_dir():
