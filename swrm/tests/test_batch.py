@@ -390,6 +390,12 @@ class BatchTests(FakeFleetFixture, unittest.TestCase):
         for name in ("b1", "b2"):
             self.hosts[name]["kind"] = "local"
         (self.data / "fleet.json").write_text(json.dumps({"hosts": list(self.hosts.values())}))
+        # The CLI picks the backend from the cached routing state. Without a cached state it
+        # probes the machine's real backends (the opencode/codex binaries and their network
+        # calls), so this test would depend on the host and could outrun its own timeout.
+        # A seeded state keeps the CLI offline; the fake fleet still runs the card.
+        (self.data / "state.json").write_text(json.dumps(
+            {"generated_at": time.time(), "codex": {"binary": "", "models": [], "limits": {}}}))
         proc = subprocess.run([sys.executable, str(Path(_load.ROOT) / "bin" / "swrm"), "batch",
                                "--repo", "project", "--cards", str(self.cards), "--hosts", "b1,b2", "--detach",
                                "--poll-seconds", "0.01"], capture_output=True, text=True, timeout=10,
