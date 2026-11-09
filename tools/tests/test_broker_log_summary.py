@@ -80,7 +80,11 @@ class BrokerLogSummaryTests(unittest.TestCase):
                 err = io.StringIO()
                 with contextlib.redirect_stderr(err):
                     with self.assertRaises(SystemExit) as raised:
+<<<<<<< HEAD
                         bls.main(["--tz", value, "missing.jsonl"])
+=======
+                        bls.main(["--tz=" + value, "missing.jsonl"])
+>>>>>>> 919efe3631f1ab060dc70678b69bbf01ca792c0e
                 self.assertEqual(raised.exception.code, 2)
                 self.assertIn("argument --tz:", err.getvalue())
                 self.assertNotIn("Traceback", err.getvalue())
