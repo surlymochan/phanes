@@ -8534,7 +8534,8 @@ def lane_begin_turn(lane, child, prompt, worktree, event_file, turn, spec=None):
             session_file = session_state.get("sessionFile")
         if spec and (session_id or session_file):
             spec["session_id"], spec["session_file"] = session_id, session_file
-            lane_save_assignment(spec)
+            if spec.get("run_id"):
+                lane_save_assignment(spec)
         pid = "prompt-" + uuid.uuid4().hex
         child.send({"id": pid, "type": "prompt", "message": prompt})
         turn["id"] = pid
@@ -9008,6 +9009,25 @@ def lane_wait_rate_limit(seconds, lane, spec, child, server, turn, pending):
             return False
         time.sleep(min(0.1, max(0, deadline - NOW())))
     return NOW() < budget_deadline
+
+
+def lane_wait_stream_retry(seconds, lane, spec, child, server, turn, pending):
+    """Wait before the next stream retry (#1594): honour an abort and the run budget."""
+    budget_deadline = spec["started"] + max(0, float(spec.get("budget_minutes") or 0)) * 60
+    deadline = min(NOW() + seconds, budget_deadline)
+    while NOW() < deadline:
+        lane_control_messages(server, lane, spec, child, turn, pending)
+        if spec.get("abort_requested") or spec.get("down_requested") or not child.alive():
+            return False
+        time.sleep(min(0.1, max(0, deadline - NOW())))
+    return NOW() < budget_deadline
+
+
+def lane_note_stream_retry(rdir, event_file, retries, max_retries, error_text, wait_seconds):
+    """Record a stream retry (#1594): the counter goes to status.json, the attempt to the events."""
+    set_status(rdir, stream_retries=retries)
+    lane_record_event(event_file, {"type": "STREAM_RETRY", "retry": retries, "max_retries": max_retries,
+                                   "wait_seconds": round(wait_seconds, 3), "error": error_text})
 
 
 def lane_finalize_run(lane, spec, ws, final, usage, error_class, rc, event_file, attempts=None,
