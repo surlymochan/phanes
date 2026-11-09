@@ -141,6 +141,8 @@ class TesterRiskDispatchTests(unittest.TestCase):
             if cmd[:2] == ["git", "ls-remote"]:
                 return 0, "a" * 40 + "\n", ""
             if cmd[0] == "ssh":
+                if "MemAvailable" in " ".join(map(str, cmd)):
+                    return 0, "16777216\n", ""  # the host memory admission probe (KiB)
                 return 0, '{"id": "risk-run"}', ""
             if any(str(part).endswith("mm-burn-rate.py") for part in cmd):
                 return 0, "", ""  # the MiniMax burn watchdog (Refs #1671) runs every tick
