@@ -2224,6 +2224,9 @@ def sleep_chunk(total=TICK, chunk=5):
     open(f"{D}/heartbeat", "w").write(time.strftime("%F %T") + "\n")
 
 
+SHADOW_VERDICT_LOG = f"{D}/shadow-verdicts.jsonl"  # append-only tester shadow log (Refs #1986)
+
+
 def _validate_shadow(row):
     verdicts = ("pass", "fail", "insufficient_evidence")
     if type(row.get("pr")) is not int or row["pr"] <= 0:
@@ -2259,16 +2262,18 @@ def _shadow_samples(stream):
     return samples
 
 
-def record_shadow_verdict(path, *, pr, lane_verdict, tester_verdict, timestamp,
+def record_shadow_verdict(path=None, *, pr, lane_verdict, tester_verdict, timestamp,
                           final_outcome=None):
     """Append observational evidence only; never dispatch, merge, or alter gates.
 
     One immutable pair of opinions per PR. Retries (including a new timestamp)
     are no-ops; final pass/fail correctness may be filled once. Insufficient
-    evidence is an abstention, never a hit. Caller supplies an explicit log path.
+    evidence is an abstention, never a hit. The log is append-only JSONL; the
+    default path is the control plane shadow log, a caller may pass its own.
     I/O/corruption errors propagate; callers must not interpret them as approval.
     """
     import fcntl
+    path = path or SHADOW_VERDICT_LOG
     row = dict(pr=pr, lane_verdict=lane_verdict, tester_verdict=tester_verdict,
                timestamp=timestamp, final_outcome=final_outcome)
     _validate_shadow(row)
@@ -2289,9 +2294,10 @@ def record_shadow_verdict(path, *, pr, lane_verdict, tester_verdict, timestamp,
     return True
 
 
-def shadow_verdict_stats(path):
+def shadow_verdict_stats(path=None):
     """Count unique PRs, disagreements and hits; accuracy uses resolved PRs only."""
     import fcntl
+    path = path or SHADOW_VERDICT_LOG
     try:
         stream = open(path, encoding="utf-8")
     except FileNotFoundError:
