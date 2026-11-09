@@ -78,6 +78,13 @@ WORK_HOST = "lane-host-1"
 RUNNING_ISSUE = 90      # the ordinary card that is already in flight on the review lane
 VERIFY_ISSUE = 101      # the verify card of the scenario
 WORK_ISSUE = 102        # an ordinary work card
+REVIEW_EVIDENCE = {
+    "version": 1,
+    "ci": {"conclusion": "success", "workflow": "tests", "url": "https://example.com/ci"},
+    "tests": {"summary": "passed"},
+    "diff": {"files": 1, "insertions": 1, "deletions": 0},
+    "acceptance": [{"text": "Review completed", "ok": True}],
+}
 # The clock of the test starts at a whole second of a fixed date.
 START = time_module.mktime(time_module.strptime("2027-01-15 08:00:00", "%Y-%m-%d %H:%M:%S"))
 WAIT_S = 300.0          # the verify card waits for the busy review lane
@@ -487,6 +494,8 @@ class VerifyMetricsTest(unittest.TestCase):
             self.fleet.commits["refs/fleet/%s" % lane] = issue
             result["branch"] = "fleet/%s-issue%d-run-%d" % (lane, issue, issue)
             result["commit"] = head
+            if issue == VERIFY_ISSUE:
+                result["evidence"] = REVIEW_EVIDENCE
         (run_dir / "result.json").write_text(json.dumps(result))
         (run_dir / "status.json").write_text(json.dumps({
             "id": run, "state": "finished", "status": "done", "finished": ended,
@@ -585,6 +594,25 @@ class VerifyMetricsTest(unittest.TestCase):
         self.step_verdict()
 
     # --- the tests -----------------------------------------------------------------------
+    def test_valid_review_evidence_is_harvested_without_redispatch(self):
+        self.step_queue()
+        self.step_dispatch()
+        self.step_harvest()
+        self.assertIn("lane-pr", self.fleet.issues[VERIFY_ISSUE]["labels"])
+        self.assertIsNotNone(point(verify_records(self.state)[VERIFY_ISSUE], "evidence_ready"))
+        self.tick()
+        self.assertEqual(self.state[self.module.VERIFY_METRICS_KEY]["dispatches"]["verify"], 1)
+
+    def test_missing_review_evidence_does_not_mark_evidence_ready(self):
+        self.step_queue()
+        self.step_dispatch()
+        result = self.module.finish(REVIEW_LANE, self.lanes[REVIEW_LANE],
+                                    self.state[REVIEW_LANE],
+                                    {"branch": "branch", "commit": "commit", "repo": "repo"},
+                                    self.state)
+        self.assertEqual(result["status"], "pr-validation-failed")
+        self.assertIsNone(point(verify_records(self.state)[VERIFY_ISSUE], "evidence_ready"))
+
     def test_queue_cycle_includes_time_before_the_dispatcher_discovers_the_card(self):
         created = self.clock.now
         self.fleet.issues[VERIFY_ISSUE]["createdAt"] = time_module.strftime(
@@ -608,7 +636,7 @@ class VerifyMetricsTest(unittest.TestCase):
         result = self.module.finish(REVIEW_LANE, self.lanes[REVIEW_LANE],
                                     self.state[REVIEW_LANE],
                                     {"status": "failed", "branch": None, "commit": None,
-                                     "error_class": "executor-failed"}, self.state)
+                                     "error_class": "executor-failed", "evidence": REVIEW_EVIDENCE}, self.state)
         self.assertEqual(result["status"], "lane-failed")
         self.assertIsNone(point(verify_records(self.state)[VERIFY_ISSUE], "evidence_ready"))
 
@@ -619,7 +647,8 @@ class VerifyMetricsTest(unittest.TestCase):
              mock.patch.object(self.module, "filter_harvest", return_value=(self.base, [], True)):
             result = self.module.finish(REVIEW_LANE, self.lanes[REVIEW_LANE],
                                         self.state[REVIEW_LANE],
-                                        {"branch": "branch", "commit": "commit", "repo": "repo"},
+                                        {"branch": "branch", "commit": "commit", "repo": "repo",
+                                         "evidence": REVIEW_EVIDENCE},
                                         self.state)
         self.assertEqual(result["status"], "lane-failed")
         self.assertIsNone(point(verify_records(self.state)[VERIFY_ISSUE], "evidence_ready"))
