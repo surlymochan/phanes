@@ -1714,8 +1714,6 @@ def budget_window_open(lane, cfg, info):
             if (not isinstance(held_at, (int, float)) or isinstance(held_at, bool)
                     or not math.isfinite(held_at)): return False
             with open(path) as stream:
-                observed_at = os.fstat(stream.fileno()).st_mtime
-                if not 0 <= time.time() - observed_at <= 900 or observed_at <= held_at: return False
                 payload = json.load(stream)
     except (OSError, subprocess.SubprocessError, ValueError):
         return False
@@ -1742,6 +1740,12 @@ def budget_window_open(lane, cfg, info):
                            seven_day={"remaining_pct": payload.get("weekly_pct")})
     elif any(key in payload for key in ("pi", "codex", "claude", "agy", "ocgo", "deepseek")):
         return False
+
+    if not command:
+        observed_at = payload.get("observed_at") if isinstance(payload, dict) else None
+        if (not isinstance(observed_at, (int, float)) or isinstance(observed_at, bool)
+                or not math.isfinite(observed_at) or observed_at <= held_at
+                or not 0 <= time.time() - observed_at <= 900): return False
 
     def available(row):
         if not isinstance(row, dict): return False

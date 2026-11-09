@@ -593,9 +593,24 @@ class BudgetRequeueTest(unittest.TestCase):
 
     def write_health(self, minimax, age=0):
         path = self.state_dir / "health.json"
-        path.write_text(json.dumps({"minimax": minimax}))
+        path.write_text(json.dumps({"minimax": dict(minimax, observed_at=self.clock.time() - age)}))
         stamp = self.clock.time() - age
         os.utime(path, (stamp, stamp))
+
+    def test_health_file_rewrite_does_not_refresh_quota_observation(self):
+        os.environ.pop("AD_BUDGET_PROBE_CMD", None)
+        self.write_health({"interval_pct": 80, "weekly_pct": 80}, age=300)
+        state = self.running()
+        self.fleet.end_run("run-1")
+        self.tick(state)
+        self.advance(1)
+        path = self.state_dir / "health.json"
+        data = json.loads(path.read_text())
+        data["executor_tasks"] = {"worker": {}}
+        path.write_text(json.dumps(data))
+        self.tick(state)
+        self.assertEqual(self.fleet.dispatches, [])
+        self.assertIn("in-progress", self.labels())
 
     def test_default_health_source_releases_only_after_both_windows_recover(self):
         """No operator probe is needed for the deployed MiniMax remains snapshot."""

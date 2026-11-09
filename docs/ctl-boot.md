@@ -432,6 +432,10 @@ backend, `minimax.interval_pct` and `minimax.weekly_pct` are percentages remaini
 both must be positive. An explicit `minimax.exhausted`/`remaining_pct` observation
 is also supported. Missing or unknown short-window data cannot be inferred from
 weekly headroom alone.
+The `minimax` entry must carry its own `observed_at` (epoch seconds, set by the
+health loop only when it actually queried MiniMax); the file's modification time is
+not used, so a refresh of other sources cannot revive an old quota reading. Without
+a fresh `observed_at` newer than the hold, the card stays held.
 
 `AD_BUDGET_PROBE_CMD` can override this source with a command that prints JSON
 quota state, for example `{"exhausted": false}` or
