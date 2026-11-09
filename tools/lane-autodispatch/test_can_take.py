@@ -566,26 +566,29 @@ class ReviewBacklogTickTest(TickHarness, unittest.TestCase):
         self.assertIn("CX2=2, CX4=3, CX5=2", assignment)
         self.assertIn("lane CX2", assignment)
 
-    def test_waiting_queue_at_cap_blocks_dispatch_until_backlog_falls(self):
+    def test_waiting_queue_at_default_cap_dispatches_and_resumes(self):
         rows = [issue(n, VERIFY_BODY, ("lane-ready", "verify-intent")) for n in range(1, 5)]
-        with patch.object(AUTODISPATCH, "REVIEW_MAX_IN_FLIGHT", 1):
-            dispatched, logs = self.run_tick(rows, self.LANES)
-            self.assertEqual(dispatched, [])
-            self.assertEqual(sum(self.last_state["_review_waiting"].values()), 4)
-            plan = next(row for row in logs if "review plan" in row)
-            self.assertIn("lane none (backlog: CX2=1, CX4=1, CX5=1)", plan)
-            self.assertIn("at its cap (1)", plan)
-            # Once the queue falls below the cap, eligible lanes can take reviews.
-            resumed, _ = self.run_tick(rows[:2], self.LANES, {})
-            self.assertEqual(len(resumed), 2)
+        dispatched, logs = self.run_tick(rows, self.LANES)
+        self.assertEqual(len(dispatched), 3)
+        self.assertEqual(sum(self.last_state["_review_waiting"].values()), 1)
+        assignment = next(row for row in logs if "review assignment" in row)
+        self.assertIn("backlog: CX2=1, CX4=1, CX5=1", assignment)
+        remaining = [row for row in rows if row["number"] not in {n for _, n in dispatched}]
+        state = self.busy("CX4", "verify")
+        state.update(self.busy("CX5", "verify"))
+        resumed, _ = self.run_tick(remaining, self.LANES, state)
+        self.assertEqual(len(resumed), 1)
+        self.assertEqual(resumed[0][0], "CX2")
 
-    def test_waiting_and_running_reviews_together_reach_cap(self):
+    def test_waiting_and_running_reviews_count_in_backlog(self):
         rows = [issue(n, VERIFY_BODY, ("lane-ready", "verify-intent")) for n in range(1, 5)]
         state = self.busy("CX2", "verify")
         with patch.object(AUTODISPATCH, "REVIEW_MAX_IN_FLIGHT", 1):
             dispatched, logs = self.run_tick(rows, self.LANES, state)
-        self.assertEqual(dispatched, [])
-        self.assertTrue(any("lane none (backlog:" in row and "at its cap (1)" in row for row in logs))
+        self.assertEqual(len(dispatched), 2)
+        assignment = next(row for row in logs if "review assignment" in row)
+        self.assertIn("CX2=2", assignment)
+        self.assertEqual(sum(self.last_state["_review_waiting"].values()), 2)
 
     def test_tick_rotation_records_the_unique_minimum_before_the_next_round(self):
         rows = [issue(n, VERIFY_BODY, ("lane-ready", "verify-intent")) for n in range(1, 4)]

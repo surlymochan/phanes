@@ -2356,10 +2356,10 @@ def tick(lanes, state, last_warn):
             eligible = [lane for lane in idle if lane in review_ids
                         and can_take(lanes[lane]["backend"], pick, lane)]
             queued = review_waiting_counts(review_ids, waiting, running, head_eligible=eligible)
-            # Apply the cap to the same running + waiting backlog used for ranking.
+            # Forecast waiting cards for ranking, but cap only reviews already admitted.
             loads = {lane: running[lane] + queued.get(lane, 0) for lane in review_ids}
             chosen, snapshot = pick_reviewer(review_ids, loads, eligible=eligible,
-                                             max_in_flight=REVIEW_MAX_IN_FLIGHT,
+                                             max_in_flight=REVIEW_MAX_IN_FLIGHT, in_flight=running,
                                              pr=review_target_pr(pick),
                                              log=lambda row: log(row, brain=False))
             if chosen is None: return "no-capacity"
