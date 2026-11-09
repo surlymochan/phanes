@@ -1234,6 +1234,49 @@ def can_take(backend, item, lane=None, verify_gate=True):
     if item.get("strict"): return False
     if backend == "codex" and SOCKET_RE.search(item["title"] + "\n" + item["body"]): return False
     return True
+
+DEFAULT_CODEX_MIN_MEMORY_MB = 400
+
+def available_memory_mb(host):
+    """Read available memory on a Linux or macOS executor through the normal SSH shim."""
+    # vm_stat reports pages, with the host's page size in its header (4K or 16K).
+    # Count free/reclaimable pages without adding purgeable pages a second time.
+    # Both platform branches emit KiB; a missing/incomplete probe stays unavailable.
+    command = """case "$(uname -s)" in
+Linux)
+    awk '/^MemAvailable:/ {print $2; found=1} END {if (!found) exit 1}' /proc/meminfo ;;
+Darwin)
+    vm_stat | awk '
+        /^Mach Virtual Memory Statistics:/ {
+            for (i=1; i<NF; i++) if ($i == "of") pagesize=$(i+1)
+        }
+        /^(Pages free|Pages inactive|Pages speculative):/ {
+            sub(/\\.$/, "", $NF)
+            if ($NF !~ /^[0-9]+$/) exit 1
+            pages+=$NF; found++
+        }
+        END {if (pagesize > 0 && found == 3) printf "%.0f\\n", pages*pagesize/1024; else exit 1}' ;;
+*) exit 1 ;;
+esac"""
+    # SSH joins remote arguments with spaces; keep the entire script as one -c argument.
+    try: rc, out, _ = sh(ssh_argv(ssh_opts(host), host, "sh", "-lc", shlex.quote(command)), timeout=30)
+    except (OSError, subprocess.TimeoutExpired): return None
+    if rc: return None
+    try: return int(out.strip().splitlines()[-1]) // 1024
+    except (ValueError, IndexError): return None
+
+def memory_preflight(lane, cfg, item, cache):
+    """Return the codex host's memory rejection detail, or None when it can run."""
+    if cfg.get("backend") != "codex": return None
+    threshold = cfg.get("min_available_memory_mb", DEFAULT_CODEX_MIN_MEMORY_MB)
+    try: threshold = max(0, int(threshold))
+    except (TypeError, ValueError): threshold = DEFAULT_CODEX_MIN_MEMORY_MB
+    host = cfg["host"]
+    if host not in cache: cache[host] = available_memory_mb(host)
+    available = cache[host]
+    if available is not None and available >= threshold: return None
+    return {"host": host, "available_mb": available, "threshold_mb": threshold, "reason": "blocked-by-host-memory"}
+
 def is_review_lane(lane):
     """The review lanes a verify card may be dispatched to (CX2/CX4/CX5)."""
     return bool(re.fullmatch(r"CX(?:2|4|5)(?:[-_].*)?", str(lane), re.I))
@@ -2458,6 +2501,8 @@ def run_tick(lanes, state, last_warn, publisher):
     base = None
     outcomes = {}
     freed_lanes = set()
+    memory_rejections = {}
+    dispatch_eligible_lanes = set()
 
     def tick_queue():
         """Load the shared queue on the first dispatch attempt, after that lane's harvest.
@@ -2533,7 +2578,22 @@ def run_tick(lanes, state, last_warn, publisher):
             if preferred and any(bool(i.get("verify")) == preferred for i in candidates):
                 candidates.sort(key=lambda i: bool(i.get("verify")) != preferred)
                 log(f"queue share: {L} prefers verify (verify deficit={verify_slots}, work slots={work_slots}); other class yields", brain=False)
+        if candidates: dispatch_eligible_lanes.add(L)
+        # Share a probe across this lane's candidates only. Another lane on the
+        # same host must recheck after a session starts or memory recovers.
+        memory_cache = {}
+        eligible = []
+        for candidate in candidates:
+            rejection = memory_preflight(L, cfg, candidate, memory_cache)
+            if rejection:
+                memory_rejections.setdefault(candidate["n"], {})[L] = rejection
+                detail = rejection["available_mb"]
+                shown = "unavailable" if detail is None else f"{detail}MB"
+                log(f"{L} #{candidate['n']} skipped: blocked-by-host-memory host={rejection['host']} available={shown} threshold={rejection['threshold_mb']}MB", brain=False)
+                continue
+            eligible.append(candidate)
         for c in candidates:
+            if c not in eligible: continue
             status, detail = label_state(c["n"])
             if status == "fresh": pick = c; break
             if status == "stale":
@@ -2626,6 +2686,17 @@ def run_tick(lanes, state, last_warn, publisher):
     # stale search rows are not dispatchable: drop them (and log the skip) before counting
     q = freshen_queue(q, state)
     blocked = sum(not i["deps_ok"] for i in q)
+    memory_blocks = {}
+    for item in q:
+        # A lane that took a card (or failed dispatch) no longer offers capacity
+        # to the remaining queue, even though it was eligible earlier this tick.
+        candidates = [L for L in dispatch_eligible_lanes
+                      if outcomes.get(L) == "no-card" and not state.get(L)
+                      and can_take(lanes[L]["backend"], item, L) and item.get("deps_ok", True)]
+        rejections = memory_rejections.get(item["n"], {})
+        if candidates and all(L in rejections for L in candidates):
+            memory_blocks[item["n"]] = list(rejections.values())
+    blocked += len(memory_blocks)
     ready = len(q) - blocked
     publisher.publish(res=res, ready=ready, blocked=blocked, phase="queue")  # the queue counters are measured
     # refill when the queue is short, or when some backend's lanes could not all be fed (counting cross-pin fallback)
@@ -2648,7 +2719,14 @@ def run_tick(lanes, state, last_warn, publisher):
     observe_verify_verdicts(state)
     save_state(state)
     refresh_minimax_burn()  # the burn watchdog refreshes the reading the status shows (Refs #1671)
+<<<<<<< HEAD
     publisher.publish(res=res, ready=ready, blocked=blocked, phase="idle")
+=======
+    st = status_snapshot(lanes, state, res, ready, blocked, records)
+    st["_memory_blocks"] = memory_blocks
+    with open(f"{D}/lanes-status.json", "w") as stream:
+        json.dump(st, stream, ensure_ascii=False, indent=1)
+>>>>>>> be8dfba6b5c4e2ba4cc351aa25f45d07cd65c0d6
     return last_warn
 
 def file_issue(text, extra=()):
@@ -2727,6 +2805,100 @@ def sleep_chunk(total=TICK, chunk=5):
         time.sleep(step)
         rem -= step
     write_heartbeat()
+
+
+SHADOW_VERDICT_LOG = f"{D}/shadow-verdicts.jsonl"  # append-only tester shadow log (Refs #1986)
+
+
+def _validate_shadow(row):
+    verdicts = ("pass", "fail", "insufficient_evidence")
+    if type(row.get("pr")) is not int or row["pr"] <= 0:
+        raise ValueError("shadow PR must be a positive integer")
+    if row.get("lane_verdict") not in verdicts or row.get("tester_verdict") not in verdicts:
+        raise ValueError("invalid shadow verdict")
+    stamp = row.get("timestamp")
+    if not isinstance(stamp, str):
+        raise ValueError("shadow timestamp must be an ISO-8601 string")
+    parsed = datetime.fromisoformat(stamp.replace("Z", "+00:00"))
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        raise ValueError("shadow timestamp requires a timezone")
+    if row.get("final_outcome") not in (None, "pass", "fail"):
+        raise ValueError("final outcome must be pass or fail")
+
+
+def _shadow_samples(stream):
+    samples = {}
+    for line in stream:
+        if not line.endswith("\n"):
+            raise ValueError("incomplete shadow log record")
+        row = json.loads(line)
+        if not isinstance(row, dict):
+            raise ValueError("invalid shadow log record")
+        _validate_shadow(row)
+        old = samples.get(row["pr"])
+        if old:
+            if any(old[k] != row[k] for k in ("lane_verdict", "tester_verdict")):
+                raise ValueError("conflicting shadow verdict")
+            if old.get("final_outcome") not in (None, row.get("final_outcome")):
+                raise ValueError("conflicting final outcome")
+        samples[row["pr"]] = row
+    return samples
+
+
+def record_shadow_verdict(path=None, *, pr, lane_verdict, tester_verdict, timestamp,
+                          final_outcome=None):
+    """Append observational evidence only; never dispatch, merge, or alter gates.
+
+    One immutable pair of opinions per PR. Retries (including a new timestamp)
+    are no-ops; final pass/fail correctness may be filled once. Insufficient
+    evidence is an abstention, never a hit. The log is append-only JSONL; the
+    default path is the control plane shadow log, a caller may pass its own.
+    I/O/corruption errors propagate; callers must not interpret them as approval.
+    """
+    import fcntl
+    path = path or SHADOW_VERDICT_LOG
+    row = dict(pr=pr, lane_verdict=lane_verdict, tester_verdict=tester_verdict,
+               timestamp=timestamp, final_outcome=final_outcome)
+    _validate_shadow(row)
+    with open(path, "a+", encoding="utf-8") as stream:
+        fcntl.flock(stream, fcntl.LOCK_EX)
+        stream.seek(0)
+        old = _shadow_samples(stream).get(pr)
+        if old:
+            if any(old[k] != row[k] for k in ("lane_verdict", "tester_verdict")):
+                raise ValueError("conflicting shadow verdict")
+            if final_outcome is None or final_outcome == old.get("final_outcome"):
+                return False
+            if old.get("final_outcome") is not None:
+                raise ValueError("conflicting final outcome")
+        stream.write(json.dumps(row, sort_keys=True) + "\n")
+        stream.flush()
+        os.fsync(stream.fileno())
+    return True
+
+
+def shadow_verdict_stats(path=None):
+    """Count unique PRs, disagreements and hits; accuracy uses resolved PRs only."""
+    import fcntl
+    path = path or SHADOW_VERDICT_LOG
+    try:
+        stream = open(path, encoding="utf-8")
+    except FileNotFoundError:
+        rows = []
+    else:
+        with stream:
+            fcntl.flock(stream, fcntl.LOCK_SH)
+            rows = list(_shadow_samples(stream).values())
+    resolved = [r for r in rows if r.get("final_outcome") is not None]
+    result = dict(samples=len(rows),
+                  disagreements=sum(r["lane_verdict"] != r["tester_verdict"] for r in rows),
+                  resolved=len(resolved))
+    for side in ("lane", "tester"):
+        hits = sum(r[side + "_verdict"] == r["final_outcome"] for r in resolved)
+        result[side + "_hits"] = hits
+        result[side + "_accuracy"] = hits / len(resolved) if resolved else None
+    return result
+
 
 def main():
     lanes = load(f"{D}/lanes.json", {}); last_warn = 0
