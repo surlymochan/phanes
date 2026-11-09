@@ -2768,6 +2768,100 @@ def sleep_chunk(total=TICK, chunk=5):
         rem -= step
     open(f"{D}/heartbeat", "w").write(time.strftime("%F %T") + "\n")
 
+
+SHADOW_VERDICT_LOG = f"{D}/shadow-verdicts.jsonl"  # append-only tester shadow log (Refs #1986)
+
+
+def _validate_shadow(row):
+    verdicts = ("pass", "fail", "insufficient_evidence")
+    if type(row.get("pr")) is not int or row["pr"] <= 0:
+        raise ValueError("shadow PR must be a positive integer")
+    if row.get("lane_verdict") not in verdicts or row.get("tester_verdict") not in verdicts:
+        raise ValueError("invalid shadow verdict")
+    stamp = row.get("timestamp")
+    if not isinstance(stamp, str):
+        raise ValueError("shadow timestamp must be an ISO-8601 string")
+    parsed = datetime.fromisoformat(stamp.replace("Z", "+00:00"))
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        raise ValueError("shadow timestamp requires a timezone")
+    if row.get("final_outcome") not in (None, "pass", "fail"):
+        raise ValueError("final outcome must be pass or fail")
+
+
+def _shadow_samples(stream):
+    samples = {}
+    for line in stream:
+        if not line.endswith("\n"):
+            raise ValueError("incomplete shadow log record")
+        row = json.loads(line)
+        if not isinstance(row, dict):
+            raise ValueError("invalid shadow log record")
+        _validate_shadow(row)
+        old = samples.get(row["pr"])
+        if old:
+            if any(old[k] != row[k] for k in ("lane_verdict", "tester_verdict")):
+                raise ValueError("conflicting shadow verdict")
+            if old.get("final_outcome") not in (None, row.get("final_outcome")):
+                raise ValueError("conflicting final outcome")
+        samples[row["pr"]] = row
+    return samples
+
+
+def record_shadow_verdict(path=None, *, pr, lane_verdict, tester_verdict, timestamp,
+                          final_outcome=None):
+    """Append observational evidence only; never dispatch, merge, or alter gates.
+
+    One immutable pair of opinions per PR. Retries (including a new timestamp)
+    are no-ops; final pass/fail correctness may be filled once. Insufficient
+    evidence is an abstention, never a hit. The log is append-only JSONL; the
+    default path is the control plane shadow log, a caller may pass its own.
+    I/O/corruption errors propagate; callers must not interpret them as approval.
+    """
+    import fcntl
+    path = path or SHADOW_VERDICT_LOG
+    row = dict(pr=pr, lane_verdict=lane_verdict, tester_verdict=tester_verdict,
+               timestamp=timestamp, final_outcome=final_outcome)
+    _validate_shadow(row)
+    with open(path, "a+", encoding="utf-8") as stream:
+        fcntl.flock(stream, fcntl.LOCK_EX)
+        stream.seek(0)
+        old = _shadow_samples(stream).get(pr)
+        if old:
+            if any(old[k] != row[k] for k in ("lane_verdict", "tester_verdict")):
+                raise ValueError("conflicting shadow verdict")
+            if final_outcome is None or final_outcome == old.get("final_outcome"):
+                return False
+            if old.get("final_outcome") is not None:
+                raise ValueError("conflicting final outcome")
+        stream.write(json.dumps(row, sort_keys=True) + "\n")
+        stream.flush()
+        os.fsync(stream.fileno())
+    return True
+
+
+def shadow_verdict_stats(path=None):
+    """Count unique PRs, disagreements and hits; accuracy uses resolved PRs only."""
+    import fcntl
+    path = path or SHADOW_VERDICT_LOG
+    try:
+        stream = open(path, encoding="utf-8")
+    except FileNotFoundError:
+        rows = []
+    else:
+        with stream:
+            fcntl.flock(stream, fcntl.LOCK_SH)
+            rows = list(_shadow_samples(stream).values())
+    resolved = [r for r in rows if r.get("final_outcome") is not None]
+    result = dict(samples=len(rows),
+                  disagreements=sum(r["lane_verdict"] != r["tester_verdict"] for r in rows),
+                  resolved=len(resolved))
+    for side in ("lane", "tester"):
+        hits = sum(r[side + "_verdict"] == r["final_outcome"] for r in resolved)
+        result[side + "_hits"] = hits
+        result[side + "_accuracy"] = hits / len(resolved) if resolved else None
+    return result
+
+
 def main():
     lanes = load(f"{D}/lanes.json", {}); last_warn = 0
     if "--once" in sys.argv: tick(lanes, load(f"{D}/state.json", {}), 0); return
