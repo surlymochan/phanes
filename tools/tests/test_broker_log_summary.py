@@ -57,6 +57,12 @@ TODAY_FRAGMENT = (
 
 
 class BrokerLogSummaryTests(unittest.TestCase):
+    def test_timezone_offsets_reject_invalid_format(self):
+        for value in ("+08:00\n", "08:00", "++08:00", "-+08:00"):
+            with self.subTest(value=value):
+                with self.assertRaises(bls.argparse.ArgumentTypeError):
+                    bls.parse_tz(value)
+
     def test_timezone_offsets_reject_out_of_range_components(self):
         for value in ("+00:60", "-00:60", "+00:99", "-00:99",
                       "+24:00", "-24:00", "+99:00", "-99:00"):

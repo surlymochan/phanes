@@ -48,7 +48,7 @@ ERR_CHARS = 80
 def parse_tz(text):
     if text == "Z":
         return timezone.utc
-    if not TZ_RE.match(text):
+    if not TZ_RE.fullmatch(text):
         raise argparse.ArgumentTypeError(f"expected +HH:MM or Z, got {text!r}")
     hours, minutes = int(text[1:3]), int(text[4:6])
     if hours > 23 or minutes > 59:
