@@ -21,6 +21,9 @@ The reason of an idle lane:
     configuration, the key the dispatcher reads).
 ``deps``
     every card the lane could take waits for a dependency that is still open.
+``memory_blocked``
+    every card the lane could take is held back by the dispatcher for low host
+    memory (the ``_memory_blocks`` of the lane status).
 ``hot_blocked:<file>``
     every card the lane could take waits for a file that another busy lane holds.
 ``no_card``
@@ -363,6 +366,11 @@ def summarize(lanes_cfg, lanes_status, state, pauses, queue, config=None, can_ta
             for filename in entry.get("hot") or []:
                 held[filename] = held.get(filename, 0) + 1
 
+    # Cards the dispatcher held back for low host memory (``_memory_blocks``,
+    # keyed by issue number; JSON turns the keys into text) are not ready.
+    memory_held = status.get("_memory_blocks")
+    memory_held = {str(key) for key in memory_held} if isinstance(memory_held, dict) else set()
+
     busy_counts, idle_counts, idle = {}, {}, []
     for name, spec in rows:
         backend = spec.get("backend") or "unknown"
@@ -400,12 +408,16 @@ def summarize(lanes_cfg, lanes_status, state, pauses, queue, config=None, can_ta
                         if (can_take(backend, item) if can_take is not None
                             else _default_can_take(backend, item, cfg, lane=name))]
             ready = [item for item in eligible if item.get("deps_ok", True) is not False]
+            unblocked = [item for item in ready
+                         if str(item.get("n", item.get("number"))) not in memory_held]
             if not eligible:
                 reason = "no_card"
             elif not ready:
                 reason = "deps"
+            elif not unblocked:
+                reason = "memory_blocked"
             else:
-                blocked = _hot_conflict(ready, held, cfg)
+                blocked = _hot_conflict(unblocked, held, cfg)
                 reason = ("hot_blocked:" + blocked) if blocked else "ready"
         idle.append({"lane": name, "backend": backend, "reason": reason})
     return {"backends": {backend: {"busy": busy_counts[backend], "idle": idle_counts[backend]}
