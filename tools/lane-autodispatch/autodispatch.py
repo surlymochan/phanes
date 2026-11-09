@@ -1520,9 +1520,6 @@ def update_busy_stale(lanes, state, res):
             log(f"{lane} #{st['issue']} run {st['run']} stale: no trusted activity; review required", brain=False)
     save_state(state)
 
-<<<<<<< HEAD
-def status_snapshot(lanes, state, res, ready, blocked, records=None, phase=None, tick_at=None):
-=======
 def minimax_burn_path():
     """The path of the MiniMax burn snapshot the status surface shows (Refs #1671)."""
     return os.environ.get("MM_BURN_STATUS") or os.path.join(D, "minimax-burn.json")
@@ -1663,8 +1660,7 @@ def minimax_burn_status(now=None, max_age_s=MM_BURN_MAX_AGE_S):
         if rows: fields["_minimax_hourly_buckets"] = rows
     return fields
 
-def status_snapshot(lanes, state, res, ready, blocked, records=None):
->>>>>>> 368bf00482d210d399e70d4a5631ac6040d3c905
+def status_snapshot(lanes, state, res, ready, blocked, records=None, phase=None, tick_at=None):
     """Build the observable lane status row, including this process's stale skips."""
     lanes = lanes or {}
     status = {L: (("stale #%s (review required)" if "stale_since" in state[L] else "busy #%s") % state[L]["issue"]) if state.get(L) else (res[L].get("error") or res[L].get("lane") or "?") for L in lanes}
@@ -1683,17 +1679,14 @@ def status_snapshot(lanes, state, res, ready, blocked, records=None):
     status["_idle_open_s"] = idle_open_s    # the gap the idle lanes are in right now
     status["_idle_worst_s"] = max(idle_open_s.values(), default=0.0)
     status["_at"] = time.strftime("%F %T")
-<<<<<<< HEAD
     # The phase and the tick start tell the reader how far the current tick got (Refs #1697):
     # a snapshot whose phase does not change while `_at` advances means a slow step is running.
     status["_phase"] = phase or "idle"
     status["_tick_at"] = tick_at or status["_at"]
-=======
     # The burn watchdog measures the real MiniMax token burn of the hour; the
     # lane status shows its reading, so an operator compares it with the
     # MiniMax console instead of watching the dispatch count (Refs #1671).
     status.update(minimax_burn_status())
->>>>>>> 368bf00482d210d399e70d4a5631ac6040d3c905
     metrics = verify_metrics(state)
     status["_verify_wait_histogram"] = verify_histogram(state, "dispatched")
     status["_verify_cycle_histogram"] = verify_histogram(state, "verdict")
@@ -2654,14 +2647,8 @@ def run_tick(lanes, state, last_warn, publisher):
     state["_tick_at"] = now
     observe_verify_verdicts(state)
     save_state(state)
-<<<<<<< HEAD
-    publisher.publish(res=res, ready=ready, blocked=blocked, phase="idle")
-=======
     refresh_minimax_burn()  # the burn watchdog refreshes the reading the status shows (Refs #1671)
-    st = status_snapshot(lanes, state, res, ready, blocked, records)
-    with open(f"{D}/lanes-status.json", "w") as stream:
-        json.dump(st, stream, ensure_ascii=False, indent=1)
->>>>>>> 368bf00482d210d399e70d4a5631ac6040d3c905
+    publisher.publish(res=res, ready=ready, blocked=blocked, phase="idle")
     return last_warn
 
 def file_issue(text, extra=()):
