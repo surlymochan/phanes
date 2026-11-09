@@ -17,13 +17,13 @@ Checked bindings:
   review, delivery, with no stage missing and none invented;
 * every receipt digest matches its content and every receipt binds the digest
   of its parent, so the chain is one unbroken history;
-* the model of every model stage is one of the profiles swrm approved for that
-  role and stage (see ``swrm/bin/evalid_roles.py``);
+* each model matches the assignment frozen in the Issue receipt and an approved
+  profile for its stage (see ``swrm/bin/evalid_roles.py``);
 * the frozen base and head are identical in the recording, in the Issue
   receipt, in the Build receipts, in the holdout receipt, in the Review
   receipt and in the delivery receipt;
 * the Reviewer saw the whole base..head commit chain, not just its tip;
-* the artifact bytes still hash to the recorded digest;
+* the Spec receipt binds the artifact digest, which matches its bytes;
 * the chain ends in the controller state VERIFIED, with a passing Reviewer
   that raised no BLOCKER finding and a holdout receipt from an isolated run.
 
@@ -73,8 +73,8 @@ EXPECTED_MODELS = {
 # rejected: a recording carries no private material, so an unexpected field
 # can only be an attempt to smuggle content into the transcript.
 RECEIPT_FIELDS = {
-    "issue": ({"stage", "issue_ref", "base_commit", "parent_digest", "digest"}, set()),
-    "spec": ({"stage", "run_id", "model", "artifact", "status", "parent_digest",
+    "issue": ({"stage", "issue_ref", "base_commit", "models", "parent_digest", "digest"}, set()),
+    "spec": ({"stage", "run_id", "model", "artifact", "artifact_digest", "status", "parent_digest",
               "digest"}, {"backend", "effort"}),
     "spec-check": ({"stage", "run_id", "model", "verdict", "parent_digest",
                     "digest"}, {"backend", "effort"}),
@@ -272,6 +272,17 @@ def _binding_errors(chain: dict[str, Any], receipts: list[Any]) -> list[str]:
             errors.append("issue_ref_missing")
         if issue.get("base_commit") != base:
             errors.append("base_commit_mismatch:issue")
+        models = issue.get("models")
+        if not isinstance(models, dict) or set(models) != set(EXPECTED_MODELS):
+            errors.append("invalid_frozen_models")
+        else:
+            for stage, allowed in EXPECTED_MODELS.items():
+                model = models[stage]
+                if not isinstance(model, str) or model not in allowed:
+                    errors.append(f"invalid_frozen_model:{stage}")
+                receipt = by_stage.get(stage)
+                if receipt is not None and receipt.get("model") != model:
+                    errors.append(f"frozen_model_mismatch:{stage}")
 
     spec = by_stage.get("spec")
     if spec is not None:
@@ -284,6 +295,13 @@ def _binding_errors(chain: dict[str, Any], receipts: list[Any]) -> list[str]:
                 isinstance(item, dict) and item.get("name") == name
                 for item in artifacts):
             errors.append(f"spec_artifact_unknown:{name}")
+        else:
+            matching = [item for item in artifacts
+                        if isinstance(item, dict) and item.get("name") == name]
+            declared = spec.get("artifact_digest")
+            if (not isinstance(declared, str) or not DIGEST.fullmatch(declared)
+                    or any(item.get("sha256") != declared for item in matching)):
+                errors.append(f"spec_artifact_digest_mismatch:{name}")
 
     spec_check = by_stage.get("spec-check")
     if spec_check is not None and spec_check.get("verdict") != "PASS":

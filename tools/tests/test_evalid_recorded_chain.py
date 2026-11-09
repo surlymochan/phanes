@@ -110,6 +110,39 @@ class RecordedChainTests(unittest.TestCase):
         self.chain['artifacts'][0]['bytes_base64'] = base64.b64encode(b'changed').decode()
         self.assert_rejected(self.chain)
 
+    def test_artifact_rehashed_without_receipt_change(self):
+        artifact = self.chain['artifacts'][0]
+        artifact['bytes_base64'] = base64.b64encode(b'changed').decode()
+        artifact['sha256'] = 'sha256:' + hashlib.sha256(b'changed').hexdigest()
+        self.assert_rejected(self.chain)
+
+    def test_allowed_model_change_violates_frozen_assignment(self):
+        for stage in ('red', 'green'):
+            with self.subTest(stage=stage):
+                chain = copy.deepcopy(self.chain)
+                next(r for r in chain['receipts'] if r['stage'] == stage)['model'] = 'gpt-6-luna'
+                reseal(chain)
+                self.assert_rejected(chain)
+
+    def test_cli_rejects_reviewed_binding_changes(self):
+        artifact_chain = copy.deepcopy(self.chain)
+        artifact = artifact_chain['artifacts'][0]
+        artifact['bytes_base64'] = base64.b64encode(b'changed').decode()
+        artifact['sha256'] = 'sha256:' + hashlib.sha256(b'changed').hexdigest()
+        model_chain = copy.deepcopy(self.chain)
+        next(r for r in model_chain['receipts'] if r['stage'] == 'green')['model'] = 'gpt-6-luna'
+        reseal(model_chain)
+        with tempfile.TemporaryDirectory(dir=ROOT) as directory:
+            path = Path(directory) / 'invalid.json'
+            for chain, diagnostic in ((artifact_chain, 'spec_artifact_digest_mismatch'),
+                                      (model_chain, 'frozen_model_mismatch:green')):
+                with self.subTest(diagnostic=diagnostic):
+                    path.write_text(json.dumps(chain), encoding='utf-8')
+                    result = subprocess.run([sys.executable, '-m', MODULE, str(path)],
+                                            cwd=ROOT, capture_output=True, text=True, timeout=15)
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertIn(diagnostic, result.stderr)
+
     def test_final_verified_is_required(self):
         self.chain['receipts'][-1]['controller_status'] = 'REVIEW_PENDING'
         reseal(self.chain)

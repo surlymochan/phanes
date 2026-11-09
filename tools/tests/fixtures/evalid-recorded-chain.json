@@ -19,7 +19,14 @@
       "issue_ref": "issue:example",
       "base_commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
       "parent_digest": null,
-      "digest": "sha256:7131f009ed59a0991e07736b00d3af93e47d2b46580baad1ab7a170c4aa1e758"
+      "models": {
+        "spec": "gpt-6.1-sol",
+        "spec-check": "gpt-6.1-terra",
+        "red": "MiniMax-M3.1-Flash",
+        "green": "MiniMax-M3.1-Flash",
+        "review": "gpt-6.1-terra"
+      },
+      "digest": "sha256:8b389d344cba63faa792ece9fdd69d0891f8a84129bec1f10b3e7932bcb0aa25"
     },
     {
       "stage": "spec",
@@ -27,16 +34,17 @@
       "model": "gpt-6.1-sol",
       "artifact": "spec.md",
       "status": "PASS",
-      "parent_digest": "sha256:7131f009ed59a0991e07736b00d3af93e47d2b46580baad1ab7a170c4aa1e758",
-      "digest": "sha256:1f907460d203bdf6bd313451ac630776e1a77354900e98d988726d0caf5304f2"
+      "parent_digest": "sha256:8b389d344cba63faa792ece9fdd69d0891f8a84129bec1f10b3e7932bcb0aa25",
+      "artifact_digest": "sha256:ac4e84bc04b2e6db812057043dcc2d6fe2575c6adf2fe72e49de475f2853a60b",
+      "digest": "sha256:a061f9661f95092df4372358528b0ea4737b98dae125701ac83bff29613a83d0"
     },
     {
       "stage": "spec-check",
       "run_id": "run-check",
       "model": "gpt-6.1-terra",
       "verdict": "PASS",
-      "parent_digest": "sha256:1f907460d203bdf6bd313451ac630776e1a77354900e98d988726d0caf5304f2",
-      "digest": "sha256:3347e263e4f3fba0079d403de0af53dc576d7bb2c0ee533b8229540d7d008e08"
+      "parent_digest": "sha256:a061f9661f95092df4372358528b0ea4737b98dae125701ac83bff29613a83d0",
+      "digest": "sha256:51b627742b5af6a1413017bc3b6c612bea721c814de68f546907f88b52d57534"
     },
     {
       "stage": "red",
@@ -44,8 +52,8 @@
       "model": "MiniMax-M3.1-Flash",
       "head_commit": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
       "status": "PASS",
-      "parent_digest": "sha256:3347e263e4f3fba0079d403de0af53dc576d7bb2c0ee533b8229540d7d008e08",
-      "digest": "sha256:3108c1d398cb47009fc75f22e76eae21e92baee82ceba4ad4f9a343b07694c42"
+      "parent_digest": "sha256:51b627742b5af6a1413017bc3b6c612bea721c814de68f546907f88b52d57534",
+      "digest": "sha256:3c19d1a298e8ac890f291a9472902875edba0f329af637df0d4b04e88bb1898f"
     },
     {
       "stage": "green",
@@ -53,16 +61,16 @@
       "model": "MiniMax-M3.1-Flash",
       "head_commit": "cccccccccccccccccccccccccccccccccccccccc",
       "status": "PASS",
-      "parent_digest": "sha256:3108c1d398cb47009fc75f22e76eae21e92baee82ceba4ad4f9a343b07694c42",
-      "digest": "sha256:42b1c09fb5f8ba1fb7cdbc9a6f4854335860e66a51551c5d0f3b39a1ddb95c61"
+      "parent_digest": "sha256:3c19d1a298e8ac890f291a9472902875edba0f329af637df0d4b04e88bb1898f",
+      "digest": "sha256:da8cdd026994b8c0d6ddb6df7763cafc47ecfc9a813ac80061309dc6644a2fa6"
     },
     {
       "stage": "holdout",
       "subject_head": "cccccccccccccccccccccccccccccccccccccccc",
       "status": "PASS",
       "isolation": "verified",
-      "parent_digest": "sha256:42b1c09fb5f8ba1fb7cdbc9a6f4854335860e66a51551c5d0f3b39a1ddb95c61",
-      "digest": "sha256:99aa6b224215d8b30ccafb4f182c9679c3e61ed1a15f394f27fd3f7576159a7c"
+      "parent_digest": "sha256:da8cdd026994b8c0d6ddb6df7763cafc47ecfc9a813ac80061309dc6644a2fa6",
+      "digest": "sha256:f69de268bae40dc72d94790c2737d347c9f1b6b4d6d992b85171eb88996f80ed"
     },
     {
       "stage": "review",
@@ -76,15 +84,15 @@
       ],
       "verdict": "PASS",
       "findings": [],
-      "parent_digest": "sha256:99aa6b224215d8b30ccafb4f182c9679c3e61ed1a15f394f27fd3f7576159a7c",
-      "digest": "sha256:62baa1fda5532b33bfdb256e46bd356c7e3923c596f64c2f7c259f8fb8ed7b87"
+      "parent_digest": "sha256:f69de268bae40dc72d94790c2737d347c9f1b6b4d6d992b85171eb88996f80ed",
+      "digest": "sha256:e1731c9580c1bd617905260b0cb102ec440607bd4122ad5e8467fc8f1dd196cc"
     },
     {
       "stage": "delivery",
       "head_commit": "cccccccccccccccccccccccccccccccccccccccc",
       "controller_status": "VERIFIED",
-      "parent_digest": "sha256:62baa1fda5532b33bfdb256e46bd356c7e3923c596f64c2f7c259f8fb8ed7b87",
-      "digest": "sha256:2aa64685d7003cbc7e1c9a3167007a9a16eede12834099bf68a1a898f4b81c74"
+      "parent_digest": "sha256:e1731c9580c1bd617905260b0cb102ec440607bd4122ad5e8467fc8f1dd196cc",
+      "digest": "sha256:b08fd66d56f0caeb4e225f0a07bf5d12f7ee30ea515c2240e4ed8185b3598b6a"
     }
   ]
 }
