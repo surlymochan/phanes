@@ -72,6 +72,20 @@ class LanesReportTests(unittest.TestCase):
         self.assertEqual(reasons(got), {"P1": "ready", "C1": "no_card"})
         self.assertEqual(rule.call_args_list, [mock.call("pi", card), mock.call("codex", card)])
 
+    def test_memory_blocked_cards_are_not_ready(self):
+        lanes = {"P1": {"backend": "pi"}}
+        blocks = {"_memory_blocks": {"7": [{"host": "<host>", "reason": "blocked-by-host-memory"}]}}
+        for key in ("7", 7):
+            with self.subTest(key=key):
+                status = {"_memory_blocks": {key: blocks["_memory_blocks"]["7"]}}
+                got = report.summarize(lanes, status, {}, {}, [{"n": 7, "backend": "pi"}])
+                self.assertEqual(reasons(got), {"P1": "memory_blocked"})
+        # another card that is not held keeps the lane ready; without the block it is ready
+        got = report.summarize(lanes, blocks, {}, {}, [{"n": 7, "backend": "pi"}, {"n": 8, "backend": "pi"}])
+        self.assertEqual(reasons(got), {"P1": "ready"})
+        got = report.summarize(lanes, {}, {}, {}, [{"n": 7, "backend": "pi"}])
+        self.assertEqual(reasons(got), {"P1": "ready"})
+
     def test_caller_can_take_preserves_external_deps_and_hot_guards(self):
         lanes = {"P1": {"backend": "pi"}, "P2": {"backend": "pi"}}
         state = {"P1": {"issue": 12, "hot": ["a.py"]}}
