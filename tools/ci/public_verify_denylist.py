@@ -14,9 +14,15 @@ well.  Blank lines and lines starting with ``#`` are ignored.
 
 Every rule matches on word boundaries, regular expressions included: a match
 that touches a neighbouring word character is not a finding.  The boundary is
-only required on a side where the matched text itself ends with a word
-character, so that a suffix such as ``.internal`` still matches inside a
+only required on a side where the matched text itself starts or ends with a
+word character, so that a suffix such as ``.internal`` still matches inside a
 longer name.
+
+The boundary is part of the rule pattern and not a filter applied to the
+matches afterwards.  The engine then settles on an alternative of a regular
+expression that respects the boundary, so a rule such as ``re:foo|foobar``
+reports ``foobar`` and not the shorter alternative ``foo``: no finding is lost
+because an earlier alternative matched first.
 
 The scanner is fail-closed: a missing or empty denylist raises
 ``DenylistError`` (exit code 2) and only an explicit ``generic_only`` request
@@ -42,6 +48,25 @@ DENYLIST_ENV = "PUBLIC_VERIFY_DENYLIST"
 REGEX_PREFIX = "re:"
 CONFIG_ERROR_EXIT_CODE = 2
 HASH_LENGTH = 8
+
+# The word boundary of a rule is part of the pattern: a match is rejected when
+# the character next to it is a word character as well.  The guard in front of
+# the rule rejects a match that starts inside a word, the guard behind it
+# rejects a match that ends inside a word.  Both guards are zero-width, the
+# reported match keeps the span of the rule itself.
+LEFT_BOUNDARY = r"(?!(?<=\w)\w)"
+RIGHT_BOUNDARY = r"(?!(?<=\w)\w)"
+
+# A plain term knows its own first and last character, so its boundary can be
+# spelled out directly.  That means the same thing as the general guard and is
+# cheaper to match.
+LEFT_PLAIN = r"(?<!\w)"
+RIGHT_PLAIN = r"(?!\w)"
+
+# A global flag group at the start of a regular expression applies to that
+# expression only.  The group is turned into a scoped group, so that the
+# boundary guards of the rule keep their own meaning.
+GLOBAL_FLAG_GROUP = re.compile(r"^\(\?([aiLmsux]+)\)")
 
 __all__ = [
     "CATEGORIES",
@@ -116,7 +141,11 @@ class Matcher:
         return bool(self.rules)
 
     def scan(self, text):
-        """Return the findings of ``text``, ordered by position."""
+        """Return the findings of ``text``, ordered by position.
+
+        The rule patterns carry the word boundary, so a match reported here
+        always respects it and never carries the matched text.
+        """
         hits = []
         seen = set()
         for rule in self.rules:
@@ -125,8 +154,6 @@ class Matcher:
                 if not matched:
                     continue
                 start, end = match.span()
-                if not _on_word_boundary(text, start, end):
-                    continue
                 key = (rule.category, start, end)
                 if key in seen:
                     continue
@@ -187,15 +214,62 @@ def parse(content, source="denylist"):
             if not expression:
                 raise DenylistError(f"{source}:{number}: empty regular expression")
             try:
-                pattern = re.compile(expression, re.IGNORECASE)
-            except re.error:
+                pattern = _compile(expression, is_regex=True)
+            except (re.error, ValueError):
                 # The message of re.error quotes the pattern, so it must not
                 # be chained into the traceback of the configuration error.
                 raise DenylistError(f"{source}:{number}: invalid regular expression") from None
             rules.append(Rule(category, pattern, True))
         else:
-            rules.append(Rule(category, re.compile(re.escape(term), re.IGNORECASE), False))
+            rules.append(Rule(category, _compile(term, is_regex=False), False))
     return rules
+
+
+def _compile(term, is_regex):
+    """Compile a rule with the word boundary built into the pattern.
+
+    The boundary is part of the pattern and not a filter applied to the
+    matches: the engine then settles on an alternative of a regular expression
+    that respects the boundary, so no finding is lost because an earlier
+    alternative matched first.
+    """
+    if is_regex:
+        # The general guard reads the character at the start and at the end of
+        # the match, so it holds for every alternative of the expression.
+        body = _scope_body(term)
+        pattern = LEFT_BOUNDARY + "(?:" + body + ")" + RIGHT_BOUNDARY
+    else:
+        # A plain term knows its own first and last character, so its boundary
+        # can be spelled out directly.  That means the same thing as the
+        # general guard and is cheaper to match.
+        left = LEFT_PLAIN if _is_word_char(term[0]) else ""
+        right = RIGHT_PLAIN if _is_word_char(term[-1]) else ""
+        pattern = left + re.escape(term) + right
+    return re.compile(pattern, re.IGNORECASE)
+
+
+def _scope_body(body):
+    """Return the body of a regular expression as a self-contained group.
+
+    A leading global flag group becomes a scoped group, so that the flags of
+    the rule apply to the body only and the word boundary of the rule keeps
+    its own meaning on every Python version.
+    """
+    match = GLOBAL_FLAG_GROUP.match(body)
+    if not match:
+        return body
+    flags = match.group(1)
+    rest = body[match.end():]
+    if "x" in flags:
+        # A verbose body ends with a comment that would swallow the closing
+        # parenthesis of the group.
+        return "(?" + flags + ":" + rest + "\n)"
+    return "(?" + flags + ":" + rest + ")"
+
+
+def _is_word_char(char):
+    """Return True when ``char`` is a word character."""
+    return bool(re.match(r"\w", char))
 
 
 def _from_env(env):
@@ -218,24 +292,6 @@ def _read_file(path):
         raise DenylistError(f"denylist file is not valid UTF-8: {path}")
     except OSError as exc:
         raise DenylistError(f"denylist file cannot be read: {path} ({exc.strerror or exc})")
-
-
-def _on_word_boundary(text, start, end):
-    """Return True when the match touches no neighbouring word character.
-
-    A boundary is only required on a side where the matched text itself ends
-    with a word character, so that a suffix such as ``.internal`` still
-    matches inside a longer name.
-    """
-    if start > 0 and _is_word_char(text[start]) and _is_word_char(text[start - 1]):
-        return False
-    if end < len(text) and _is_word_char(text[end - 1]) and _is_word_char(text[end]):
-        return False
-    return True
-
-
-def _is_word_char(char):
-    return bool(re.match(r"\w", char))
 
 
 def _position(text, offset):
