@@ -314,6 +314,7 @@ class DispatcherFixture:
             mock.patch.object(ad, "host_ok", lambda host: True),
             mock.patch.object(ad, "host_fail", lambda host, why: None),
             mock.patch.object(ad, "host_good", lambda host: None),
+            mock.patch.object(ad, "available_memory_mb", lambda host: 32768),
             mock.patch.object(ad, "remote", remote),
             mock.patch.object(ad, "finish", finish),
             mock.patch.object(ad, "queue", queue),
