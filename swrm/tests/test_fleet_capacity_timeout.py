@@ -459,6 +459,9 @@ class FleetCapacityTimeoutTests(unittest.TestCase):
         child.proc.poll.return_value = None
         child.alive.side_effect = lambda: child.proc is None or child.proc.poll() is None
         child.close.side_effect = lambda: setattr(child.proc.poll, 'return_value', 1)
+        # The lane may only release a reservation once the child proves its
+        # descendant set is empty, so the fake child reports that proof.
+        child.boundary.finish.return_value = (True, [])
         turns = [
             (None, {}, 'upstream_forbidden', 1, 'events1', 'HTML response 403'),
             ({'status': 'done'}, {}, None, 0, 'events2', None),
