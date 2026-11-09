@@ -4,7 +4,7 @@
 
 ## 1. 队列与任务水位检查（重点）
 
-`lane-autodispatch` 通过 `lanes-status.json` 输出全局派发状态，核心监控字段包括 `_busy`、`_ready`、`_blocked`。
+`lane-autodispatch` 通过 `lanes-status.json` 输出全局派发状态，核心监控字段包括 `_busy`、`_ready`、`_blocked`，以及车道空闲间隙字段 `_idle_s`、`_idle_reason`、`_idle_open_s`、`_idle_worst_s`。
 
 - [ ] **检查 `_ready` 队列水位**：
   - 当 `lanes-status.json` 中 `_ready` 低于 10 时，表明可派发任务不足，需及时补充 backlog 或触发 planner：
@@ -13,6 +13,12 @@
     3. **自动补仓告警**：`autodispatch.py` 在 `ready < 10` 且 backlog 为空时会记录警告日志（`WARNING queue low: X dispatchable lane-ready issue(s) left`）。
 - [ ] **检查 `_blocked` 依赖等待**：
   - 确认标记有 `依赖：#xxx` 的 issue 是否因上游 PR 未合入或未关闭而积压。
+- [ ] **检查车道空闲间隙（Refs #1688）**：
+  - `_idle_s` 给出每条车道最近一次空闲时长（上次 run 结束 → 本次派发，单位秒），`_idle_open_s` 给出仍在等待的车道当前已空闲的秒数，`_idle_worst_s` 是当前最大空窗，`_idle_reason` 给出原因。
+  - 每条车道收割成功后立即尝试重派发，再收割下一条车道；其他车道的慢收割不会阻塞已释放车道的派发。空闲窗口在该车道派发成功时立即关闭；同轮其他车道的派发耗时不计入。旧心跳只核算 tick 开始前的停机，tick 内收割与派发延迟归为 `dispatcher not dispatching`。
+  - 开启 `AD_VERIFY_SHARE_ENABLED` 时，刚收割的车道即使远端快照仍为 `busy` 也纳入可用容量；重派发仍受暂停、主机 backoff 与验证类容量预留约束。
+  - 空闲超过 5 分钟的派发会在 brain log 留一行 `<lane> idle <n>s before dispatch (reason: <原因>)`，巡检时用 `grep "before dispatch" ~/phanes-ctl/brain/log.md` 核对。
+  - 判定：原因 `no card` → 池子空了，补充 backlog；`no capacity` → 查并发/容量上限；`lane paused` → 确认暂停是否有意；`dispatcher not running` → 查派发器停机（对照 `~/phanes-ctl/autodispatch/heartbeat`）；`dispatcher not dispatching` → 查收割/派发延迟。
 
 ## 2. 模式 A — SSH Fleet（受控集群，5 项巡检）
 
@@ -33,7 +39,7 @@
   - 判定：退出码为 0 说明非交互认证与长连接复用正常；若非零退出（含 Permission denied、Connection closed 或超时）则判定 probe 探测失败，容量/健康汇总不得 +1 hosts_ok，需排查 instabox 证书或 key 状态（`ib-refresh` 开启 `ssh_probe` 后该 host 记为 `probe_status: failed` 且不计入 hosts_ok；离线断言见 tools/check-fleet-batchmode-probe.py）。
 - [ ] **2. lane idle**：
   - 命令：`~/phanes-ctl/bin/lane-autodispatch-status`
-  - 判定：输出中各 lane（M1–M4、A1、A2、CX1–CX5）应处于 `busy` 或 `idle` 轮转中，不可异常挂死在非预期状态。
+  - 判定：输出中各 lane（M1–M4、A1、A2、CX1–CX5）应处于 `busy` 或 `idle` 轮转中，不可异常挂死在非预期状态；`lanes-status.json` 的 `_idle_worst_s` 持续高于 300s 时，按第 1 节的空闲间隙检查项核对原因。
 - [ ] **3. coordinator**：
   - 命令：`ssh -F ~/.ssh/swrm-hub/config broker -- python3 ~/.claude/swrm-fleet-capacity/fleet-capacity broker <<< '{"op":"status"}'`
   - 判定：返回 `{"ok": true, "reservations": [...]}`，若报 `coordinator unavailable` 说明协调器或网络退避中。
