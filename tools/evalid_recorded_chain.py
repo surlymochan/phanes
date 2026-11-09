@@ -18,7 +18,8 @@ Checked bindings:
 * every receipt digest matches its content and every receipt binds the digest
   of its parent, so the chain is one unbroken history;
 * each model matches the assignment frozen in the Issue receipt and an approved
-  profile for its stage (see ``swrm/bin/evalid_roles.py``);
+  profile for its stage (see ``swrm/bin/evalid_roles.py``), and the recorded
+  backend and effort are the ones of that profile;
 * the frozen base and head are identical in the recording, in the Issue
   receipt, in the Build receipts, in the holdout receipt, in the Review
   receipt and in the delivery receipt;
@@ -59,16 +60,18 @@ RECORDING_FIELDS = {"version", "base_commit", "head_commit", "commits",
                     "artifacts", "receipts"}
 STAGE_SEQUENCE = ("issue", "spec", "spec-check", "red", "green", "holdout",
                   "review", "delivery")
-# The approved profiles of swrm's role resolver: Spec is sol, the independent
-# checks and the Reviewer are terra, and the Build author is either MiniMax
-# (first half of the 50/50 assignment) or luna.
-EXPECTED_MODELS = {
-    "spec": ("gpt-6.1-sol",),
-    "spec-check": ("gpt-6.1-terra",),
-    "red": ("MiniMax-M3.1-Flash", "gpt-6-luna"),
-    "green": ("MiniMax-M3.1-Flash", "gpt-6-luna"),
-    "review": ("gpt-6.1-terra",),
+# The approved profiles of swrm's role resolver (swrm/bin/evalid_roles.py):
+# Spec is sol on codex, the independent checks and the Reviewer are terra on
+# codex, and the Build author is either MiniMax on pi (first half of the 50/50
+# assignment, no effort) or luna on codex. Every profile is backend plus effort.
+PROFILES = {
+    "spec": {"gpt-6.1-sol": ("codex", "high")},
+    "spec-check": {"gpt-6.1-terra": ("codex", "high")},
+    "red": {"MiniMax-M3.1-Flash": ("pi", None), "gpt-6-luna": ("codex", "high")},
+    "green": {"MiniMax-M3.1-Flash": ("pi", None), "gpt-6-luna": ("codex", "high")},
+    "review": {"gpt-6.1-terra": ("codex", "high")},
 }
+EXPECTED_MODELS = {stage: tuple(sorted(models)) for stage, models in PROFILES.items()}
 # Required and optional fields of every receipt. A field outside these sets is
 # rejected: a recording carries no private material, so an unexpected field
 # can only be an attempt to smuggle content into the transcript.
@@ -90,6 +93,10 @@ RECEIPT_FIELDS = {
     "delivery": ({"stage", "head_commit", "controller_status", "parent_digest",
                   "digest"}, set()),
 }
+# A recorded artifact is public content only: its name, its bytes and the hash
+# of those bytes. Any other field could carry hidden test or evaluation
+# material into the transcript.
+ARTIFACT_FIELDS = {"name", "bytes_base64", "sha256"}
 FINDING_FIELDS = {"severity", "requirement_ref", "artifact_ref", "reason", "path", "line"}
 FINDING_SEVERITIES = ("BLOCKER", "FOLLOW-UP")
 
@@ -208,11 +215,27 @@ def _receipt_errors(receipts: list[Any]) -> list[str]:
             expected = None if previous is None else previous.get("digest")
             if receipt["parent_digest"] != expected:
                 errors.append(f"parent_digest_mismatch:{label}")
-        if stage in EXPECTED_MODELS:
+        if stage in PROFILES:
             model = receipt.get("model")
-            if not isinstance(model, str) or model not in EXPECTED_MODELS[stage]:
+            if not isinstance(model, str) or model not in PROFILES[stage]:
                 errors.append(f"model_mismatch:{label}")
+            else:
+                errors.extend(_profile_errors(label, receipt, PROFILES[stage][model]))
         previous = receipt
+    return errors
+
+
+def _profile_errors(label: str, receipt: dict[str, Any],
+                    profile: tuple[str, str | None]) -> list[str]:
+    """Check the recorded backend and effort against the approved profile."""
+    backend, effort = profile
+    errors: list[str] = []
+    recorded_backend = receipt.get("backend")
+    if recorded_backend is not None and recorded_backend != backend:
+        errors.append(f"backend_mismatch:{label}")
+    recorded_effort = receipt.get("effort")
+    if recorded_effort is not None and recorded_effort != effort:
+        errors.append(f"effort_mismatch:{label}")
     return errors
 
 
@@ -235,6 +258,8 @@ def _artifact_errors(chain: dict[str, Any]) -> list[str]:
         if name in names:
             errors.append(f"duplicate_artifact:{name}")
         names.add(name)
+        for field in sorted(set(artifact) - ARTIFACT_FIELDS):
+            errors.append(f"unsupported_artifact_field:{name}:{field}")
         if name.startswith("/") or ".." in PurePosixPath(name).parts:
             errors.append(f"artifact_path_escapes:{name}")
         encoded = artifact.get("bytes_base64")

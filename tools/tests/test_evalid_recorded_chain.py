@@ -116,6 +116,38 @@ class RecordedChainTests(unittest.TestCase):
         artifact['sha256'] = 'sha256:' + hashlib.sha256(b'changed').hexdigest()
         self.assert_rejected(self.chain)
 
+    def test_recorded_backend_and_effort_follow_the_approved_profile(self):
+        chain = copy.deepcopy(self.chain)
+        for stage, backend, effort in (('spec', 'codex', 'high'),
+                                       ('spec-check', 'codex', 'high'),
+                                       ('red', 'pi', None),
+                                       ('green', 'pi', None),
+                                       ('review', 'codex', 'high')):
+            receipt = next(r for r in chain['receipts'] if r['stage'] == stage)
+            receipt['backend'] = backend
+            if effort is not None:
+                receipt['effort'] = effort
+        reseal(chain)
+        self.assertEqual(self.verify(chain), [])
+
+    def test_backend_drift_is_rejected(self):
+        for stage in ('spec', 'spec-check', 'red', 'green', 'review'):
+            with self.subTest(stage=stage):
+                chain = copy.deepcopy(self.chain)
+                receipt = next(r for r in chain['receipts'] if r['stage'] == stage)
+                receipt['backend'] = 'other-backend'
+                reseal(chain)
+                self.assert_rejected(chain)
+
+    def test_effort_drift_is_rejected(self):
+        for stage in ('spec', 'spec-check', 'review'):
+            with self.subTest(stage=stage):
+                chain = copy.deepcopy(self.chain)
+                receipt = next(r for r in chain['receipts'] if r['stage'] == stage)
+                receipt['effort'] = 'low'
+                reseal(chain)
+                self.assert_rejected(chain)
+
     def test_allowed_model_change_violates_frozen_assignment(self):
         for stage in ('red', 'green'):
             with self.subTest(stage=stage):
@@ -123,6 +155,30 @@ class RecordedChainTests(unittest.TestCase):
                 next(r for r in chain['receipts'] if r['stage'] == stage)['model'] = 'gpt-6-luna'
                 reseal(chain)
                 self.assert_rejected(chain)
+
+    def test_artifact_carries_no_unknown_field(self):
+        self.chain['artifacts'][0]['holdout_tests'] = ['assert reserved_value == 739281']
+        self.assert_rejected(self.chain)
+
+    def test_fixture_carries_no_holdout_tests_or_evaluation_content(self):
+        def keys(node):
+            if isinstance(node, dict):
+                for key, value in node.items():
+                    yield key
+                    yield from keys(value)
+            elif isinstance(node, list):
+                for item in node:
+                    yield from keys(item)
+
+        forbidden = ('holdout_test', 'test_source', 'evaluation', 'grader',
+                     'answer_key', 'secret', 'private', 'token')
+        for key in keys(self.chain):
+            for marker in forbidden:
+                self.assertNotIn(marker, key.lower(),
+                                 f'fixture key {key!r} may carry private content')
+        holdout = next(r for r in self.chain['receipts'] if r['stage'] == 'holdout')
+        self.assertEqual(set(holdout), {'stage', 'subject_head', 'status',
+                                         'isolation', 'parent_digest', 'digest'})
 
     def test_cli_rejects_reviewed_binding_changes(self):
         artifact_chain = copy.deepcopy(self.chain)
