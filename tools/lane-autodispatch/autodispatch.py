@@ -2104,17 +2104,18 @@ def harvest_push(lane, n, branch, head):
     origin before the failure was reported: the harvest goes on to the PR instead of
     pushing again on every tick (Refs #1640; the dispatch engine reads the same
     evidence).  A push that said why it failed, a branch that is not on origin and a
-    branch that carries another head all stay push failures."""
+    branch that carries another head or an unresolved local head all stay push failures."""
     rc, _, err = sh(["git", "-C", LOCAL, "push", "-q", "origin", f"{head}:refs/heads/{branch}"], timeout=180)
     if not rc: return True, None
     reason = err.strip()[-200:]
     if not reason:
         remote, pushed = origin_branch_head(branch), local_commit(head)
-        if remote and (not pushed or remote == pushed):
+        if remote and pushed and remote == pushed:
             log(f"{lane} #{n} push rc={rc} without error output; branch {branch} is on origin "
                 f"at {remote[:8]}; continuing to PR", brain=False)
             return True, None
         reason = ("no error output and the branch is not on origin" if not remote else
+                  f"no error output; cannot resolve the pushed head {head}" if not pushed else
                   f"no error output; branch {branch} is on origin at {remote[:8]}, "
                   f"not at the pushed head {pushed[:8]}")
     return False, f"push failed: {reason}"
