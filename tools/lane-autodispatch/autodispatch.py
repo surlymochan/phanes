@@ -1693,7 +1693,6 @@ def label_lane_failed(n, body):
     gh(["issue", "edit", str(n), "--remove-label", "in-progress", "--remove-label", "lane-ready", "--add-label", "lane-failed"])
     gh(["issue", "comment", str(n), "--body", body])
 
-<<<<<<< HEAD
 def budget_window_open(lane, cfg, info):
     """Confirm recovery from a scoped probe, or the health-loop quota snapshot.
 
@@ -1853,10 +1852,7 @@ def hold_budget_failure(lane, cfg, st, info, state):
     log(f"{lane} #{n} run {st['run']} budget-exceeded ({tries}/{maximum}); held pending window recovery", brain=False)
     return {"done": True, "status": "budget-held", "error": None, "missing": []}
 
-def harvest_fetch(lane, n, fetch, st):
-=======
 def harvest_fetch(lane, n, fetch, st, cfg=None):
->>>>>>> e10376015100591e0fc16b53c94009676407945a
     """Fetch a finished lane branch with bounded attempts.
 
     Returns (ok, error, failures); `failures` counts the consecutive failed harvest
@@ -2057,11 +2053,8 @@ def finish(lane, cfg, st, info, state):
         rc, out, err = gh(["pr", "create", "--base", "main", "--head", b, "--title", title, "--body", body])
         url = (out.strip().splitlines() or [""])[-1] if not rc else f"(pr create failed: {err.strip()[-160:]})"
         gh(["issue", "edit", str(n), "--remove-label", "in-progress", "--remove-label", "lane-ready", "--add-label", "lane-pr"])
-<<<<<<< HEAD
         clear_budget_history(state, n)
-=======
         record_verify_time(state, n, "evidence_ready")
->>>>>>> e10376015100591e0fc16b53c94009676407945a
         log(f"{lane} finished #{n} (run {run}, {info.get('status')}) → {url}"); mark_done(state, n)
         return {"done": True, "status": "pr-created", "error": None, "missing": []}
     else:
@@ -2266,11 +2259,6 @@ def tick(lanes, state, last_warn):
         h = lanes[L]["host"]
         if h in seen: continue
         errs = [res[x] for x in live if lanes[x]["host"] == h and "error" in res[x]]
-<<<<<<< HEAD
-        if errs: host_fail(h, errs[0]["error"]); seen.add(h)
-        else: host_good(h); seen.add(h)
-    release_recovered_budget_holds(state, lanes)
-=======
         if errs:
             host_fail(h, errs[0]["error"]); seen.add(h)
             note_host_unreachable(state, h)  # the outage is recorded (Refs #1673)
@@ -2284,7 +2272,7 @@ def tick(lanes, state, last_warn):
         release_unreachable_pauses(h, host_pause_paths(h, lanes_of_host(lanes, h)))
         mark_recovery_runs(state, h, lanes)
         scopes = paused_scopes()  # the released pause opens the host again
->>>>>>> e10376015100591e0fc16b53c94009676407945a
+    release_recovered_budget_holds(state, lanes)
     q = None
     queue_failed = False
     queue_error = ""
