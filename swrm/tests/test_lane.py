@@ -39,7 +39,11 @@ class CodexSandboxTests(unittest.TestCase):
         self.git(self.repo, "commit", "--allow-empty", "-qm", "base")
         self.worktrees = [self.root / "lanes" / name / "wt" for name in ("CX5", "CX10")]
         for wt in self.worktrees:
-            self.git(self.repo, "worktree", "add", "-qb", wt.parent.name, str(wt), "HEAD")
+            # main requires standalone lane clones (lane_worktree_matches rejects
+            # linked worktrees), so the gitdir and common dir are the same path.
+            wt.parent.mkdir(parents=True)
+            subprocess.run(["git", "clone", "-q", str(self.repo), str(wt)], check=True,
+                           capture_output=True)
         self.policy = {"codex": {"sandbox": "workspace-write"}}
         patch = mock.patch.object(self.swrm, "load_policy", return_value=self.policy)
         patch.start()
@@ -76,8 +80,7 @@ class CodexSandboxTests(unittest.TestCase):
                                          network.get("network_access", network.get("networkAccess", False)))
                     if mode == "workspace-write":
                         self.assertEqual(policy["writableRoots"], [
-                            self.git(self.worktrees[0], "rev-parse", "--absolute-git-dir"),
-                            str(self.repo / ".git")])
+                            os.path.realpath(self.worktrees[0] / ".git")])
                     else:
                         self.assertNotIn("writableRoots", policy)
 
