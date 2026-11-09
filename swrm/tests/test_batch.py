@@ -17,6 +17,41 @@ xs = _load.load()
 STUB = Path(_load.HERE) / "fixtures" / "fake_fleet_swrm.py"
 
 
+class BatchSummaryWaitTests(unittest.TestCase):
+    def test_waits_past_old_deadline_and_retries_transient_reads(self):
+        path = mock.Mock()
+        path.read_text.side_effect = [FileNotFoundError("pending"), "{", 
+                                      '{"state": "running"}', '{"state": "finished"}']
+        with mock.patch.object(time, "monotonic", side_effect=[0, 0, 10, 20, 30]), \
+                mock.patch.object(time, "sleep"):
+            self.assertEqual(wait_for_batch_summary(path), {"state": "finished"})
+        self.assertEqual(path.read_text.call_count, 4)
+
+    def test_failed_is_terminal_and_is_not_reported_as_success(self):
+        path = mock.Mock()
+        path.read_text.return_value = '{"state": "failed", "error": "runner failed"}'
+        with mock.patch.object(time, "sleep") as sleep:
+            self.assertEqual(wait_for_batch_summary(path)["state"], "failed")
+        sleep.assert_not_called()
+
+    def test_timeout_reports_last_summary_and_read_error(self):
+        path = mock.Mock()
+        path.read_text.side_effect = ['{"state": "running", "cards": []}',
+                                      PermissionError("replacement pending")]
+        with mock.patch.object(time, "monotonic", side_effect=[0, 0, 1, 2]), \
+                mock.patch.object(time, "sleep"):
+            with self.assertRaisesRegex(AssertionError, "running.*PermissionError.*replacement pending"):
+                wait_for_batch_summary(path, timeout=2)
+
+    def test_timeout_before_first_summary_is_diagnostic(self):
+        path = mock.Mock()
+        path.read_text.side_effect = FileNotFoundError("not published")
+        with mock.patch.object(time, "monotonic", side_effect=[0, 0, 2]), \
+                mock.patch.object(time, "sleep"):
+            with self.assertRaisesRegex(AssertionError, "None.*FileNotFoundError.*not published"):
+                wait_for_batch_summary(path, timeout=2)
+
+
 class FakeFleetFixture:
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory(prefix="swrm-batch-")
