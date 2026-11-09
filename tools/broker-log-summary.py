@@ -20,6 +20,13 @@ error and the duration.  --pauses box-pauses.jsonl marks every listed request
 with the pause window it falls into ("during_pause=<from→to>") and counts the
 failed requests that happened during a pause.  Broker "ts" is UTC; the pause
 stamps are local time of the "tz" field of the pause record (default UTC+8).
+A pause stamp that no platform can represent (a non-finite number or an epoch
+outside the datetime range) makes its record unusable: it is skipped, and the
+other windows of the log are kept.
+
+A duration that is not a finite, non-negative number (NaN, an infinity, a
+negative value or a value too large to compute a span with) is a missing
+value: the request keeps its timestamp and is reported without a duration.
 
 The JSON report keeps the old fields and adds "slow_ms", "slow" (the listed
 slow requests) and "pause_overlaps" ({"pauses", "requests", "failed",
@@ -28,6 +35,7 @@ are used.
 """
 import argparse
 import json
+import math
 import re
 import sys
 from collections import Counter, defaultdict
@@ -50,8 +58,11 @@ def parse_tz(text):
         return timezone.utc
     if not TZ_RE.match(text):
         raise argparse.ArgumentTypeError(f"expected +HH:MM or Z, got {text!r}")
+    hours, minutes = int(text[1:3]), int(text[4:6])
+    if hours > 23 or minutes > 59:
+        raise argparse.ArgumentTypeError(f"timezone offset out of range: {text!r}")
     sign = -1 if text[0] == "-" else 1
-    offset = timedelta(hours=int(text[1:3]), minutes=int(text[4:6]))
+    offset = timedelta(hours=hours, minutes=minutes)
     return timezone(sign * offset)
 
 
@@ -72,6 +83,33 @@ def classify(status, err):
     return "other"
 
 
+def valid_duration(ms, end=None):
+    """Return True when ``ms`` is a usable request duration.
+
+    A duration must be a finite, non-negative number that still fits in a
+    timedelta and, when an end timestamp is supplied, can be subtracted from
+    it. NaN, infinities, negative and out-of-range values are missing values.
+    """
+    if isinstance(ms, bool) or not isinstance(ms, (int, float)):
+        return False
+    if isinstance(ms, float) and not math.isfinite(ms):
+        return False
+    if ms < 0:
+        return False
+    try:
+        duration = timedelta(milliseconds=ms)
+        if end is not None:
+            end - duration
+    except (OverflowError, ValueError):
+        return False
+    return True
+
+
+def duration_or_none(ms, end=None):
+    """Return the duration of a request, or None when it is not usable."""
+    return ms if valid_duration(ms, end) else None
+
+
 def parse_line(line):
     try:
         obj = json.loads(line)
@@ -89,9 +127,7 @@ def parse_line(line):
     lane = obj.get("lane") if isinstance(obj.get("lane"), str) else "-"
     rid = obj.get("id") if isinstance(obj.get("id"), str) else None
     err = obj.get("err") if isinstance(obj.get("err"), str) else ""
-    ms = obj.get("ms")
-    if isinstance(ms, bool) or not isinstance(ms, (int, float)):
-        ms = None
+    ms = duration_or_none(obj.get("ms"), when)
     return {"ts": when, "lane": lane, "status": status, "cls": classify(status, err),
             "id": rid, "ms": ms, "err": err}
 
@@ -136,26 +172,48 @@ def parse_pause_tz(text):
         raise ValueError(f"unknown pause timezone {text!r}") from exc
 
 
-def parse_pause_dt(value, tz):
-    """Return the instant of a pause stamp; a naive stamp is local to ``tz``."""
+def parse_pause_stamp(value, tz):
+    """Return ``(instant, unusable)`` for one pause stamp value.
+
+    ``instant`` is None when the value holds no stamp at all.  ``unusable`` is
+    True when the value is a number no platform can turn into a datetime: a
+    non-finite float or an epoch outside the datetime range.  Such a stamp is
+    a bad record, not a crash.
+    """
     if value is None or isinstance(value, bool):
-        return None
+        return None, False
     if isinstance(value, (int, float)):
-        return datetime.fromtimestamp(value, tz)
+        if isinstance(value, float) and not math.isfinite(value):
+            return None, True
+        try:
+            return datetime.fromtimestamp(value, tz), False
+        except (OverflowError, OSError, ValueError):
+            return None, True
     if not isinstance(value, str) or not value.strip():
-        return None
+        return None, False
     try:
         parsed = datetime.fromisoformat(value.strip().replace("Z", "+00:00"))
     except ValueError:
-        return None
-    return parsed if parsed.tzinfo else parsed.replace(tzinfo=tz)
+        return None, False
+    return (parsed if parsed.tzinfo else parsed.replace(tzinfo=tz)), False
+
+
+def parse_pause_dt(value, tz):
+    """Return the instant of a pause stamp; a naive stamp is local to ``tz``.
+
+    A stamp that no platform can represent is skipped: it is a bad record,
+    not a crash.
+    """
+    return parse_pause_stamp(value, tz)[0]
 
 
 def parse_pause_record(obj):
     """Return one pause window, or None when the record is unusable.
 
     A window is ``{"start": datetime, "end": datetime|None, "tz": timezone}``;
-    ``end`` is None for a pause that is still open.
+    ``end`` is None for a pause that is still open.  A record that holds a
+    stamp no platform can represent is unusable: skipping the stamp would
+    turn a bounded window into an open one.
     """
     if not isinstance(obj, dict):
         return None
@@ -165,15 +223,21 @@ def parse_pause_record(obj):
         return None
     start = None
     for key in PAUSE_FROM_KEYS:
-        start = parse_pause_dt(obj.get(key), tz)
-        if start is not None:
+        stamp, unusable = parse_pause_stamp(obj.get(key), tz)
+        if unusable:
+            return None
+        if stamp is not None:
+            start = stamp
             break
     if start is None:
         return None
     end = None
     for key in PAUSE_TO_KEYS:
-        end = parse_pause_dt(obj.get(key), tz)
-        if end is not None:
+        stamp, unusable = parse_pause_stamp(obj.get(key), tz)
+        if unusable:
+            return None
+        if stamp is not None:
+            end = stamp
             break
     if end is not None and end < start:
         return None
@@ -218,9 +282,12 @@ def fmt_ms(ms):
 
 
 def request_span(record):
-    """Return the (start, end) instants of a request; the start is ts - ms."""
+    """Return the (start, end) instants of a request; the start is ts - ms.
+
+    A request without a usable duration spans the instant of its timestamp.
+    """
     end = record["ts"]
-    ms = record.get("ms")
+    ms = duration_or_none(record.get("ms"), end)
     return (end - timedelta(milliseconds=ms) if ms else end), end
 
 
@@ -228,7 +295,7 @@ def slow_requests(records, threshold_ms):
     """Return the requests that took at least ``threshold_ms`` or answered non-200."""
     picked = []
     for record in records:
-        ms = record.get("ms")
+        ms = duration_or_none(record.get("ms"), record["ts"])
         if (ms is not None and ms >= threshold_ms) or record["status"] != 200:
             picked.append(record)
     return sorted(picked, key=lambda record: record["ts"])
@@ -275,7 +342,7 @@ def slow_entries(records, threshold_ms, pauses, tz):
             "status": record["status"],
             "err": err[:ERR_CHARS],
             "err_truncated": len(err) > ERR_CHARS,
-            "ms": record.get("ms"),
+            "ms": duration_or_none(record.get("ms"), record["ts"]),
             "during_pause": pause_window_text(pause) if pause else None,
         })
     return rows
@@ -488,6 +555,17 @@ def run_self_test():
     # --slow picks the three long 502s and the fast 429, but not the 200.
     slow = slow_requests(records, 60000)
     assert [rec["lane"] for rec in slow] == ["M6", "M7", "M13", "M2"], slow
+
+    # An invalid duration is a missing value: no crash, no reversed span.
+    for bad in (float("nan"), float("inf"), float("-inf"), -1, 1e100):
+        rec = parse_line(json.dumps({"ts": "2026-11-01T23:40:00Z", "id": "rX",
+                                     "lane": "MX", "status": 502, "err": "", "ms": bad}))
+        assert rec["ms"] is None, (bad, rec)
+        start, end = request_span(rec)
+        assert start == end, (bad, start, end)
+        assert slow_requests([rec], 0) == [rec], (bad, rec)
+    assert parse_line(json.dumps({"ts": "2026-11-01T23:40:00Z", "id": "rY",
+                                  "lane": "MY", "status": 200, "err": "", "ms": 1200}))["ms"] == 1200
 
     pauses = parse_pause_lines([json.dumps(SELF_TEST_PAUSE)])
     assert len(pauses) == 1, pauses

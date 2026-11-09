@@ -51,7 +51,7 @@ export function buildDemandProfile(input = {}) {
   const description = String(input.description || input.requirement_description || '').trim();
   const combined = `${title} ${description}`.toLowerCase();
   const repoCount = normalizeRepoCount(input);
-  const estimatedFileCount = Number(input.estimated_file_count || input.file_count || 1);
+  const estimatedFileCount = normalizeEstimatedFileCount(input);
   const demandType = input.demand_type || input.change_type || classifyDemandType(combined);
   const affectsApi = hasAny(combined, ['api', '接口', 'endpoint', 'rpc', 'grpc']);
   const affectsDatabase = hasAny(combined, ['database', 'db', '数据库', 'ddl', 'migration', 'schema']);
@@ -89,9 +89,41 @@ function normalizeDemandType(type) {
 }
 
 function normalizeRepoCount(input = {}) {
-  if (Array.isArray(input.repositories)) return input.repositories.length || 1;
-  const value = Number(input.repo_count || input.repositories || 1);
-  return Number.isFinite(value) && value > 0 ? value : 1;
+  let rawValue;
+  if (input.repo_count !== undefined) {
+    rawValue = input.repo_count;
+  } else if (Array.isArray(input.repositories)) {
+    rawValue = input.repositories.length;
+  } else if (input.repositories !== undefined) {
+    rawValue = input.repositories;
+  } else {
+    return 1;
+  }
+
+  const value = parseDemandSize(rawValue);
+  if (!Number.isInteger(value) || value <= 0) {
+    throw new Error('repo_count must be a positive integer');
+  }
+  return value;
+}
+
+function normalizeEstimatedFileCount(input = {}) {
+  const rawValue = input.estimated_file_count !== undefined
+    ? input.estimated_file_count
+    : input.file_count !== undefined
+      ? input.file_count
+      : 1;
+  const value = parseDemandSize(rawValue);
+  if (!Number.isInteger(value) || value < 0) {
+    throw new Error('estimated_file_count must be a non-negative integer');
+  }
+  return value;
+}
+
+function parseDemandSize(value) {
+  if (typeof value !== 'number' && typeof value !== 'string') return NaN;
+  if (typeof value === 'string' && value.trim() === '') return NaN;
+  return Number(value);
 }
 
 function assessRisk({ involvesPayment, involvesUserData, affectsDatabase, repoCount }) {

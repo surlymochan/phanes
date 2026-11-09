@@ -190,6 +190,18 @@ jobs:
       - name: Run organization health demo E2E
         run: xvfb-run -a bun run test:org-health-demo
 
+      - name: Run the agent threads database upgrade E2E test
+        if: ${{ !cancelled() }}
+        run: xvfb-run -a bun test ./scripts/agent-threads-upgrade-e2e.ts ./scripts/ci-agent-threads-upgrade.test.ts
+
+      - name: Upload agent threads database upgrade report
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: agent-threads-upgrade-e2e
+          path: .volto-build/agent-threads-upgrade-e2e/report.json
+          if-no-files-found: error
+
       - name: Upload organization health demo report
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -222,8 +234,9 @@ jobs:
         with:
           install: ignore-scripts
 
+      # The upgrade test runs with Bun and real Electron in the browser job above.
       - name: Run desktop tests
-        run: bun run test:desktop -- --shard=${{ matrix.shard }}/2
+        run: bun run test:desktop -- --shard=${{ matrix.shard }}/2 --exclude scripts/ci-agent-threads-upgrade.test.ts
 
   signal-e2e:
     # Starts the real Signal service with throwaway secrets and checks its secret and
