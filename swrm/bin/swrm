@@ -3982,13 +3982,9 @@ def provider_concurrency_limits(policy, keys):
     return limits
 
 
-<<<<<<< HEAD
 # Confirmed tokens are cached here; acquire tokens are also journaled before sending.
 # Unknown executor liveness still requires evidence-backed recovery, never an unsafe TTL.
-=======
-# Tokens stay in this supervisor process. Lost supervisors leave reservations
-# until the coordinator independently verifies an owner reboot and the lease expires.
->>>>>>> 2d6690586c7922c633ca702fab3f67728e9b68fb
+# Lost supervisors retain reservations until independently verified reboot evidence permits recovery.
 _FLEET_RESERVATIONS = {}
 _FLEET_RENEWALS = {}
 
@@ -4074,7 +4070,10 @@ def fleet_release_worker(rdir):
 
 
 def release_fleet_slot(rdir):
-<<<<<<< HEAD
+    key = os.path.realpath(rdir)
+    renewal = _FLEET_RENEWALS.pop(key, None)
+    if renewal:
+        renewal[0].set()
     if os.path.exists(os.path.join(rdir, "fleet-release-pending.json")):
         _FLEET_RESERVATIONS.pop(os.path.realpath(rdir), None)
         start_fleet_release_worker(rdir)
@@ -4095,25 +4094,6 @@ def release_fleet_slot(rdir):
                state="routing" if status.get("state") == "running" else status.get("state", "routing"))
     # Executor ownership ends here; the durable queue now owns the release.
     # A detached worker cannot update its parent's in-memory cache.
-=======
-    key = os.path.realpath(rdir)
-    item = _FLEET_RESERVATIONS.get(key)
-    if not item:
-        return True
-    command, payload = item
-    renewal = _FLEET_RENEWALS.pop(key, None)
-    if renewal:
-        renewal[0].set()
-    for attempt in range(3):
-        try:
-            fleet_guard_call(command, {"op": "release", "run_id": payload["run_id"], "token": payload["token"]})
-            break
-        except RuntimeError as error:
-            if attempt == 2:
-                set_status(rdir, fleet_reservation_error=str(error))
-                return False
-            time.sleep(0.2 * (attempt + 1))
->>>>>>> 2d6690586c7922c633ca702fab3f67728e9b68fb
     _FLEET_RESERVATIONS.pop(os.path.realpath(rdir), None)
     start_fleet_release_worker(rdir)
     return False
@@ -4155,7 +4135,6 @@ def reserve_provider_slot(rdir, backend, provider, policy, lane_name=None, keep_
     status_path = os.path.join(rdir, "status.json")
     command = fleet_guard_command()
     reservation_key = os.path.realpath(rdir)
-<<<<<<< HEAD
     pending_path = os.path.join(rdir, "fleet-release-pending.json")
     if os.path.exists(pending_path):
         start_fleet_release_worker(rdir)
@@ -4186,10 +4165,7 @@ def reserve_provider_slot(rdir, backend, provider, policy, lane_name=None, keep_
     saved = jload(os.path.join(rdir, "fleet-reservation.json"), None)
     command = saved["command"] if saved else command
     token = saved["payload"]["token"] if saved else uuid.uuid4().hex
-=======
-    token = uuid.uuid4().hex
     # The coordinator obtains kernel boot evidence over its own trusted channel.
->>>>>>> 2d6690586c7922c633ca702fab3f67728e9b68fb
     payload = {"op": "acquire", "token": token, "run_id": os.path.basename(rdir),
                "backend": backend, "provider": provider}
     if command:
@@ -4228,31 +4204,8 @@ def reserve_provider_slot(rdir, backend, provider, policy, lane_name=None, keep_
                 for key in counts:
                     if key in row_keys:
                         counts[key] += 1
-<<<<<<< HEAD
             local_available = all(counts[key] < cap for key, cap in limits.items())
             admitted = local_available and fleet_admitted
-=======
-            if all(counts[key] < cap for key, cap in limits.items()):
-                admitted = True
-                answer = {}
-                if command:
-                    try:
-                        answer = fleet_guard_call(command, payload)
-                        admitted = bool(answer.get("admitted"))
-                    except RuntimeError as error:
-                        admitted = False
-                        set_status(rdir, fleet_reservation_error=str(error))
-                if admitted and command:
-                    _FLEET_RESERVATIONS[reservation_key] = (command, payload)
-                    interval = max(0.1, float(answer.get("lease_ttl_seconds", 300)) / 3)
-                    stop = threading.Event()
-                    thread = threading.Thread(target=renew_fleet_slot, args=(command, payload, interval, stop),
-                                              daemon=True)
-                    _FLEET_RENEWALS[reservation_key] = (stop, thread)
-                    thread.start()
-            else:
-                admitted = False
->>>>>>> 2d6690586c7922c633ca702fab3f67728e9b68fb
             if admitted and keep_waiting and not keep_waiting():
                 cancelled = True
             if admitted and not cancelled:
@@ -4274,7 +4227,8 @@ def reserve_provider_slot(rdir, backend, provider, policy, lane_name=None, keep_
         # After remote admission, loop to recheck local caps under that lock.
         if local_available and command and not fleet_admitted:
             try:
-                fleet_admitted = bool(fleet_guard_call(command, payload).get("admitted"))
+                answer = fleet_guard_call(command, payload)
+                fleet_admitted = bool(answer.get("admitted"))
             except RuntimeError as error:
                 coordinator_failures += 1
                 set_status(rdir, fleet_reservation_error=str(error),
@@ -4303,6 +4257,12 @@ def reserve_provider_slot(rdir, backend, provider, policy, lane_name=None, keep_
                     lane_write_state(lane_name, capacity_unreachable=False, queue_reason=None)
                 if fleet_admitted:
                     _FLEET_RESERVATIONS[reservation_key] = (command, payload)
+                    interval = max(0.1, float(answer.get("lease_ttl_seconds", 300)) / 3)
+                    stop = threading.Event()
+                    thread = threading.Thread(target=renew_fleet_slot, args=(command, payload, interval, stop),
+                                              daemon=True)
+                    _FLEET_RENEWALS[reservation_key] = (stop, thread)
+                    thread.start()
                     continue
         if keep_waiting and not keep_waiting():
             # No executor started, so even an uncertain acquire can be released.
@@ -8959,14 +8919,9 @@ def lane_do_run(lane, spec, child, server, current):
         attempts = resume.get("attempts", [])
         final, usage, error_class, rc, evp, error_tail = None, {}, "exec_error", 1, None, None
         attempt_lane = lane
-<<<<<<< HEAD
         attempt_number = resume.get("attempt_number", 0)
         forbidden_retried = resume.get("forbidden_retried", False)
-=======
-        attempt_number = 0
-        forbidden_retried = False
         stream_retries = 0
->>>>>>> 2d6690586c7922c633ca702fab3f67728e9b68fb
         _, max_rate_retries = rate_limit_policy(load_policy())
         for number, model in enumerate(models, 1):
             if number < resume.get("model_number", 1):
