@@ -272,6 +272,16 @@ class AuditTests(unittest.TestCase):
 
         self.assertEqual(result["alerts"], [])
 
+    def test_two_successful_runs_with_different_commits_and_branches_are_double_write_back(self):
+        result = audit_module.audit(
+            [],
+            [run("run-a", 1795, state="finished", commit="aaa111", branch="fleet/M1"),
+             run("run-b", 1795, state="finished", commit="bbb222", branch="fleet/M2")],
+            NOW)
+
+        self.assertEqual([(a["kind"], a["detail"]["reason"], a["detail"]["shared"]) for a in result["alerts"]],
+                         [("dual_execution", "write_back", "issue")])
+
 
 class ReaderTests(unittest.TestCase):
     """The readers of the stores: the tool and the health report read the same files."""

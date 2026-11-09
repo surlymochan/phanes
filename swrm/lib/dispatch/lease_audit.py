@@ -640,8 +640,8 @@ def _detect_dual_execution(lease_rows: List[Dict[str, Any]], run_rows: List[Dict
                  "lanes": sorted({row["lane"] for row in rows if row["lane"]})},
                 SEVERITY[ALERT_DUAL_EXECUTION], moment))
 
-    # Two runs that wrote the same card back: the same commit was written
-    # twice.  The branch is not a signal: a card that is dispatched to the
+    # Two successful runs that wrote the same card back (the same commit
+    # or different commits).  The branch is not a signal: a card that is dispatched to the
     # same lane twice in a row carries the same branch and that is normal.
     by_issue: Dict[str, List[Dict[str, Any]]] = {}
     for row in run_rows:
@@ -653,16 +653,19 @@ def _detect_dual_execution(lease_rows: List[Dict[str, Any]], run_rows: List[Dict
             for second in rows[index + 1:]:
                 if first["run_id"] == second["run_id"]:
                     continue
-                commit = first["commit"]
-                if not commit or commit != second["commit"]:
-                    continue
+                # Two successful runs of one card wrote it back twice, whether
+                # they produced the same commit or different ones.
+                commit = first["commit"] if first["commit"] == second["commit"] else None
+                if not commit and first["branch"] and first["branch"] == second["branch"]:
+                    continue  # a card dispatched to the same lane twice in a row: normal
                 runs = sorted([first["run_id"], second["run_id"]])
                 alerts.append(_alert(
                     ALERT_DUAL_EXECUTION, issue,
                     _fingerprint(ALERT_DUAL_EXECUTION, issue, "write_back", *runs),
                     "card {} was written back by two runs: {}".format(issue, ", ".join(runs)),
-                    {"reason": "write_back", "runs": runs, "shared": "commit",
-                     "value": commit,
+                    {"reason": "write_back", "runs": runs,
+                     "shared": "commit" if commit else "issue",
+                     "value": commit or issue,
                      "branches": sorted({row["branch"] for row in (first, second) if row["branch"]})},
                     SEVERITY[ALERT_DUAL_EXECUTION], moment))
 
