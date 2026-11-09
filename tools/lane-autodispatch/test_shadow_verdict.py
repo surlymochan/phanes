@@ -121,6 +121,29 @@ class ShadowVerdictTest(unittest.TestCase):
     def test_default_log_path_is_the_control_plane_shadow_log(self):
         self.assertTrue(ad.SHADOW_VERDICT_LOG.endswith("/shadow-verdicts.jsonl"))
 
+    def test_default_log_accumulates_thirty_samples_and_backfills(self):
+        with mock.patch.object(ad, "SHADOW_VERDICT_LOG", str(self.path)), \
+                mock.patch.object(ad, "sh", side_effect=AssertionError("external action")):
+            for pr in range(1, 31):
+                fields = dict(BASE, pr=pr)
+                self.assertTrue(ad.record_shadow_verdict(**fields))
+                self.assertFalse(ad.record_shadow_verdict(**fields))
+            first = self.path.read_bytes()
+            self.assertEqual(ad.shadow_verdict_stats(),
+                             dict(samples=30, disagreements=30, resolved=0, lane_hits=0,
+                                  tester_hits=0, lane_accuracy=None, tester_accuracy=None))
+            for pr in range(1, 31):
+                fields = dict(BASE, pr=pr, final_outcome="pass" if pr <= 20 else "fail")
+                self.assertTrue(ad.record_shadow_verdict(**fields))
+                self.assertFalse(ad.record_shadow_verdict(**fields))
+                # Replaying the original report must retain its resolved outcome.
+                self.assertFalse(ad.record_shadow_verdict(**dict(BASE, pr=pr)))
+            self.assertTrue(self.path.read_bytes().startswith(first))
+            self.assertEqual(len(self.path.read_text().splitlines()), 60)
+            self.assertEqual(ad.shadow_verdict_stats(),
+                             dict(samples=30, disagreements=30, resolved=30, lane_hits=20,
+                                  tester_hits=10, lane_accuracy=20 / 30, tester_accuracy=10 / 30))
+
     def test_multiple_samples_and_initial_final_outcome(self):
         record(self.path, final_outcome="pass")
         record(self.path, pr=2, lane_verdict="fail", tester_verdict="fail", final_outcome="fail")
