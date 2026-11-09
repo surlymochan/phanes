@@ -11,9 +11,11 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
+sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "harness"))
 
-import swe_env as E
+import swe_env as E  # noqa: E402
+import solution_diff as SD  # noqa: E402
 
 
 def read_runs(path: Path) -> list[dict]:
@@ -49,15 +51,19 @@ def regrade_cell(row: dict, inst: dict | None, label: str, raw_root: Path, emit)
     E.checkout(inst, repo)
     E.build_env(inst, repo, venv, workdir / "env.log")
 
-    diff = raw_root / str(arm) / iid / f"r{rep}" / "solution.diff"
+    rundir = raw_root / str(arm) / iid / f"r{rep}"
+    diff_text = SD.read_solution_diff(rundir)
     patch_applied = False
-    if diff.is_file() and diff.stat().st_size > 0:
-        ap = E.sh(E.GIT + ["apply", "--whitespace=nowarn", str(diff)], cwd=repo, check=False)
+    if diff_text.strip():
+        # Diffs over the export cap are stored gzipped; git apply needs them as text.
+        patch_file = workdir / "solution.diff"
+        patch_file.write_text(diff_text)
+        ap = E.sh(E.GIT + ["apply", "--whitespace=nowarn", str(patch_file)], cwd=repo, check=False)
         patch_applied = ap.returncode == 0
 
     res = E.grade(inst, repo, venv, workdir / "grade")
 
-    dest = diff.parent / "regrade"
+    dest = rundir / "regrade"
     dest.mkdir(parents=True, exist_ok=True)
     for name in ("grade.json", "test_output.txt"):
         src = workdir / "grade" / name
