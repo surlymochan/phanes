@@ -76,10 +76,117 @@ if [ ! -s "$extra_source_found" ]; then
 fi
 rm -f "$extra_source_found"
 
+TAB=$(printf '\t')
+EXTRA_MANAGED_SKILLS=$(mktemp)
+
+# The standalone xmem family installer rewrites the xmem install and drops its
+# skillhub marker, so xmem is only managed here when that installer is off.
+standalone_xmem_install_enabled() {
+  [ -n "$XMEM_SOURCE_DIR" ] || return 1
+  [ -d "$XMEM_SOURCE_DIR" ] || return 1
+  [ -f "$XMEM_SOURCE_DIR/skill.md" ] || return 1
+  return 0
+}
+
+normalize_skill_source_path() {
+  normalize_candidate=$1
+  normalize_candidate_dir=${normalize_candidate%/*}
+  normalize_candidate_name=${normalize_candidate##*/}
+  [ "$normalize_candidate_dir" != "$normalize_candidate" ] || normalize_candidate_dir=.
+  normalize_candidate_dir=$(CDPATH= cd -P "$normalize_candidate_dir" 2>/dev/null && pwd -P) || return 1
+  if [ "$normalize_candidate_dir" = / ]; then
+    printf '/%s\n' "$normalize_candidate_name"
+  else
+    printf '%s/%s\n' "$normalize_candidate_dir" "$normalize_candidate_name"
+  fi
+}
+
+# The shared skillhub sync resolves managed skills from a single extra source
+# dir, so the aggregated list of extra source dirs makes it prune the managed
+# skills owned by the other sources. Snapshot those managed skills before the
+# sync, restore them afterwards and keep their source marker intact.
+snapshot_extra_managed_skills() {
+  printf '%s\n' "$TARGET_DIRS" | while IFS= read -r target_dir; do
+    [ -n "$target_dir" ] || continue
+    printf '%s\n' "$EXTRA_SOURCE_DIRS" | while IFS= read -r source_dir; do
+      [ -n "$source_dir" ] || continue
+      [ -d "$source_dir" ] || continue
+      # Resolve source identity physically for comparison, while retaining the
+      # original .skillhub-source value below for restoration.
+      source_dir=$(CDPATH= cd -P "$source_dir" 2>/dev/null && pwd -P) || continue
+      for source_path in "${source_dir%/}"/*; do
+        [ -d "$source_path" ] || continue
+        skill_name=$(basename "$source_path")
+        if [ "$skill_name" = "xmem" ] && standalone_xmem_install_enabled; then
+          continue
+        fi
+        target_path=$target_dir/$skill_name
+        [ -d "$target_path" ] || continue
+        marker_path=$target_path/.skillhub-source
+        [ -f "$marker_path" ] || continue
+        recorded_source=$(cat "$marker_path" 2>/dev/null || true)
+        normalized_recorded_source=$(normalize_skill_source_path "$recorded_source") || continue
+        [ "$normalized_recorded_source" = "$source_path" ] || continue
+        printf '%s%s%s%s%s\n' "$target_dir" "$TAB" "$skill_name" "$TAB" "$recorded_source" >>"$EXTRA_MANAGED_SKILLS"
+      done
+    done
+  done
+}
+
+restore_extra_managed_skills() {
+  [ -f "$EXTRA_MANAGED_SKILLS" ] || return 0
+  [ -s "$EXTRA_MANAGED_SKILLS" ] || return 0
+  while IFS="$TAB" read -r target_dir skill_name source_path; do
+    [ -n "$target_dir" ] || continue
+    [ -n "$skill_name" ] || continue
+    [ -n "$source_path" ] || continue
+    target_path=$target_dir/$skill_name
+    if [ ! -d "$target_path" ]; then
+      [ -d "$source_path" ] || continue
+      rm -rf "$target_path"
+      cp -RL "$source_path" "$target_path"
+      printf 'restored extra-source managed skill: %s\n' "$target_path"
+    fi
+    marker_path=$target_path/.skillhub-source
+    recorded_source=$(cat "$marker_path" 2>/dev/null || true)
+    if [ "$recorded_source" != "$source_path" ]; then
+      printf '%s\n' "$source_path" >"$marker_path"
+    fi
+  done <"$EXTRA_MANAGED_SKILLS"
+}
+
+verify_extra_managed_skills() {
+  [ -f "$EXTRA_MANAGED_SKILLS" ] || return 0
+  [ -s "$EXTRA_MANAGED_SKILLS" ] || return 0
+  while IFS="$TAB" read -r target_dir skill_name source_path; do
+    [ -n "$target_dir" ] || continue
+    [ -n "$skill_name" ] || continue
+    target_path=$target_dir/$skill_name
+    if [ ! -d "$target_path" ]; then
+      printf 'sync_installed_xflow_skill.sh: extra-source managed skill missing after sync: %s\n' "$target_path" >&2
+      exit 1
+    fi
+    marker_path=$target_path/.skillhub-source
+    recorded_source=$(cat "$marker_path" 2>/dev/null || true)
+    if [ "$recorded_source" != "$source_path" ]; then
+      printf 'sync_installed_xflow_skill.sh: extra-source managed skill marker lost after sync: %s\n' "$target_path" >&2
+      exit 1
+    fi
+  done <"$EXTRA_MANAGED_SKILLS"
+}
+
+# Restore the extra-source managed skills even when the sync fails, so a
+# failed sync never leaves the installed skills without their managed ones.
+trap 'restore_extra_managed_skills || true; rm -f "$EXTRA_MANAGED_SKILLS"' 0
+
+snapshot_extra_managed_skills
+
 SKILLHUB="$PROJECT_ROOT" \
 SKILL_SYNC_EXTRA_SOURCE_DIRS="$EXTRA_SOURCE_DIRS" \
 SKILL_SYNC_TARGET_DIRS="$TARGET_DIRS" \
   sh "$SYNC_SCRIPT" xflow
+
+restore_extra_managed_skills
 
 install_xmem_skill_family() {
   [ -n "$XMEM_SOURCE_DIR" ] || return 0
@@ -105,6 +212,11 @@ install_xmem_skill_family() {
 }
 
 install_xmem_skill_family
+
+verify_extra_managed_skills
+
+rm -f "$EXTRA_MANAGED_SKILLS"
+trap - 0
 
 printf '%s\n' "$TARGET_DIRS" | while IFS= read -r target_dir; do
   [ -n "$target_dir" ] || continue

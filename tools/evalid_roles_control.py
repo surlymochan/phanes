@@ -27,6 +27,7 @@ from typing import Any
 
 
 STAGES = ("spec", "spec-check", "red", "green", "holdout", "review", "delivery")
+MAX_SPEC_REVISIONS = 2
 CHANGE_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]*$")
 OID = re.compile(r"^[0-9a-f]{40,64}$")
 DIGEST = re.compile(r"^sha256:[0-9a-f]{64}$")
@@ -123,6 +124,13 @@ class RoleController:
     implement ``review(context)`` for a separate semantic delivery gate. These
     are controller seams, not functions exported by evidence.py/review_run.py.
     NativeEvidence invokes those tools' CLIs; LocalEvidence is the offline seam.
+
+    A rejected spec-check is kept as evidence and returns to Spec for a
+    bounded number of revisions (``MAX_SPEC_REVISIONS``). Each revision
+    advances the Spec version, changes its digest and binds the receipt of the
+    rejection it answers; a receipt computed against an older Spec revision is
+    refused. The third rejection stops the attempt at NEEDS-BOSS instead of
+    overwriting the accepted Spec or advancing to red.
     """
 
     def __init__(self, control_dir: str | os.PathLike[str], project: str | os.PathLike[str],
@@ -137,7 +145,9 @@ class RoleController:
         self._swrm, self._evidence, self._review_run = swrm, evidence, review_run
         self._events = self._read_log()
         self._changes: dict[tuple[str, int], dict[str, Any]] = {}
-        self._event_keys: dict[tuple[str, int, str, str], dict[str, Any]] = {}
+        self._event_keys: dict[
+            tuple[str, int, str, str, str | None, int | None], dict[str, Any]
+        ] = {}
         for event in self._events:
             self._reduce(event)
 
@@ -159,21 +169,29 @@ class RoleController:
             stream.seek(0)
             existing = [json.loads(raw) for raw in stream if raw.strip()]
             key = self._key(event)
+            attempts = [item for item in existing if (item["change_id"], item["attempt"]) ==
+                        (event["change_id"], event["attempt"])]
+            if event["stage"] == "spec-check":
+                specs = [item for item in attempts if item["stage"] == "spec"]
+                if (not specs or event["data"].get("parent_spec_digest") !=
+                        specs[-1]["data"].get("spec_digest") or
+                        event["data"].get("spec_version") != len(specs)):
+                    raise Rejected("spec_check_parent_mismatch")
             duplicate = next((item for item in existing if self._key(item) == key), None)
             if duplicate:
                 fcntl.flock(stream.fileno(), fcntl.LOCK_UN)
                 return duplicate["data"]
-            attempts = [item for item in existing if (item["change_id"], item["attempt"]) ==
-                        (event["change_id"], event["attempt"])]
+            if event["stage"] == "spec":
+                self._validate_spec_append(event, attempts)
             if event["stage"] == "intake":
                 if attempts:
                     fcntl.flock(stream.fileno(), fcntl.LOCK_UN)
                     raise Rejected("intake_frozen")
             else:
-                next_after = {"intake": "spec", "spec": "spec-check", "spec-check": "red",
-                              "red": "green", "green": "holdout", "holdout": "review",
-                              "review": "delivery", "delivery": "complete"}
-                expected = next_after.get(attempts[-1]["stage"]) if attempts else None
+                expected = self._expected_stage(attempts)
+                if expected == "needs-boss":
+                    fcntl.flock(stream.fileno(), fcntl.LOCK_UN)
+                    raise Rejected("spec_revision_limit")
                 if event["stage"] != expected:
                     fcntl.flock(stream.fileno(), fcntl.LOCK_UN)
                     raise Rejected("controller_order")
@@ -185,6 +203,36 @@ class RoleController:
         self._events.append(event)
         self._reduce(event)
         return event["data"]
+
+    def _validate_spec_append(self, event: dict[str, Any],
+                              attempts: list[dict[str, Any]]) -> None:
+        """Recheck Spec revision bindings against the log while holding its lock."""
+        data = event["data"]
+        specs = [item for item in attempts if item["stage"] == "spec"]
+        if not specs:
+            if data.get("spec_version") != 1:
+                raise Rejected("spec_version_mismatch")
+            if data.get("parent_receipt") is not None:
+                raise Rejected("parent_receipt_mismatch")
+            return
+
+        expected_version = len(specs) + 1
+        if data.get("spec_version") != expected_version:
+            raise Rejected("spec_version_mismatch")
+        if not data.get("versioned"):
+            raise Rejected("spec_version_missing")
+        if data.get("spec_digest") == specs[-1]["data"].get("spec_digest"):
+            raise Rejected("spec_not_revised")
+
+        checks = [item for item in attempts if item["stage"] == "spec-check" and
+                  item["data"].get("verdict") == "FAIL"]
+        if not checks:
+            raise Rejected("missing_parent_receipt")
+        parent = self._rejection(checks[-1]["data"], len(specs))["receipt_digest"]
+        if data.get("parent_receipt") is None:
+            raise Rejected("missing_parent_receipt")
+        if data["parent_receipt"] != parent:
+            raise Rejected("parent_receipt_mismatch")
 
     def _refresh(self) -> None:
         """Reload committed events before decisions made by a long-lived worker."""
@@ -201,15 +249,43 @@ class RoleController:
             self._reduce(item)
 
     @staticmethod
-    def _key(event: dict[str, Any]) -> tuple[str, int, str, str]:
-        return (event["change_id"], event["attempt"], event["stage"], event["input_digest"])
+    def _expected_stage(attempts: list[dict[str, Any]]) -> str | None:
+        """The stage that may follow the recorded attempt history.
+
+        A rejected spec-check returns to Spec for a bounded revision. Once
+        the revision budget is spent the attempt stops at NEEDS-BOSS instead
+        of overwriting the old Spec or advancing to red.
+        """
+        if not attempts:
+            return None
+        last = attempts[-1]
+        if last["stage"] == "spec-check" and last["data"].get("verdict") == "FAIL":
+            revisions = sum(1 for item in attempts if item["stage"] == "spec") - 1
+            return "needs-boss" if revisions >= MAX_SPEC_REVISIONS else "spec"
+        return {"intake": "spec", "spec": "spec-check", "spec-check": "red",
+                "red": "green", "green": "holdout", "holdout": "review",
+                "review": "delivery", "delivery": "complete"}.get(last["stage"])
+
+    @staticmethod
+    def _key(event: dict[str, Any]) -> tuple[str, int, str, str, str | None, int | None]:
+        """Receipt identity: stage, evidence digest, parent and Spec version.
+
+        A receipt only speaks about one parent: a Spec revision answers a
+        rejected check, a spec-check answers a Spec revision. The parent and
+        checked Spec version are part of identity, so a receipt replayed from
+        an earlier round is not mistaken for a duplicate of the current one.
+        """
+        data = event.get("data") or {}
+        return (event["change_id"], event["attempt"], event["stage"], event["input_digest"],
+                data.get("parent_receipt") or data.get("parent_spec_digest"),
+                data.get("spec_version") if event["stage"] == "spec-check" else None)
 
     def _reduce(self, event: dict[str, Any]) -> None:
         self._event_keys[self._key(event)] = event
         key = (event["change_id"], event["attempt"])
         state = self._changes.setdefault(key, {"change_id": key[0], "attempt": key[1],
             "status": "INTAKE_PENDING", "next": "intake", "receipts": {}, "intake": None,
-            "private_holdout": None})
+            "private_holdout": None, "spec_version": 0, "spec_revisions": 0, "rejections": []})
         if event["stage"] == "intake":
             state["intake"] = event["data"]
             state["private_holdout"] = event.get("private_holdout")
@@ -219,8 +295,27 @@ class RoleController:
             state["receipts"][event["stage"]] = event["data"]
             if event["stage"] == "holdout":
                 state["private_holdout_evidence"] = event.get("private_evidence")
-            state["next"] = STAGES[STAGES.index(event["stage"]) + 1] if event["stage"] != "delivery" else "complete"
+            if event["stage"] == "spec":
+                state["spec_version"] += 1
+                state["spec_revisions"] = state["spec_version"] - 1
+            if event["stage"] == "spec-check" and event["data"].get("verdict") == "FAIL":
+                # A rejected check is kept as evidence and returns to Spec.
+                state["rejections"].append(self._rejection(event["data"], state["spec_version"]))
+                state["next"] = ("needs-boss" if state["spec_revisions"] >= MAX_SPEC_REVISIONS
+                                 else "spec")
+            else:
+                state["next"] = STAGES[STAGES.index(event["stage"]) + 1] if event["stage"] != "delivery" else "complete"
             state["status"] = event["data"].get("controller_status", "INFRA")
+
+    @staticmethod
+    def _rejection(data: dict[str, Any], spec_version: int) -> dict[str, Any]:
+        """Summarise a rejected spec-check receipt without lane text."""
+        blockers = data.get("blockers")
+        return {"verdict": "FAIL",
+                "receipt_digest": data.get("evidence_digest") or digest(data),
+                "spec_version": spec_version,
+                "spec_digest": data.get("parent_spec_digest"),
+                "blocker_count": len(blockers) if isinstance(blockers, list) else 0}
 
     def _record(self, change_id: str, attempt: int, stage: str, data: dict[str, Any],
                 *, private_holdout: Any = None, private_evidence: Any = None,
@@ -280,11 +375,20 @@ class RoleController:
         if event_digest != digest(evidence):
             raise Rejected("input_digest_mismatch")
         state = self.state(change_id, attempt)
-        previous = self._event_keys.get((change_id, attempt, stage, event_digest))
+        binding = self._parent_binding(state, stage)
+        spec_version = state["spec_version"] if stage == "spec-check" and state else None
+        previous = self._event_keys.get(
+            (change_id, attempt, stage, event_digest, binding, spec_version))
+        if previous is None and stage == "spec-check":
+            previous = self._legacy_spec_check(change_id, attempt, event_digest, binding, state)
         if previous:
             return self._public(previous["data"], change_id=change_id, attempt=attempt)
+        if state and state["next"] == "needs-boss" and stage in ("spec", "spec-check"):
+            raise Rejected("spec_revision_limit")
         if not state or state["next"] != stage:
             raise Rejected("controller_order")
+        if stage == "spec-check" and self._stale_spec_check(change_id, attempt, event_digest, binding):
+            raise Rejected("stale_spec_check_receipt")
         if not isinstance(evidence, dict) or not evidence:
             raise Rejected("missing_evidence")
         submitted_evidence = dict(evidence)
@@ -299,7 +403,8 @@ class RoleController:
         # Commands/manifests are structured public replay inputs, and may
         # legitimately overlap the private runner. They are never published.
         binding_fields = {"spec_digest", "proof_digest", "snapshot_digest", "tdd_digest",
-                          "holdout_receipt", "head_commit", "reviewed_head", "reviewed_base"}
+                          "holdout_receipt", "head_commit", "reviewed_head", "reviewed_base",
+                          "parent_receipt"}
         text = {key: value for key, value in evidence.items()
                 if not (stage in ("red", "green") and key in {"command", "test_manifest"}) and
                 not (key in binding_fields and isinstance(value, str) and
@@ -313,12 +418,19 @@ class RoleController:
             if run.get("status") != "done":
                 raise Rejected("run_not_complete")
             evidence = dict(evidence, run_id=run["run_id"], model=run.get("model"))
+        spec_version = None
         if stage == "spec":
             if evidence.get("status") != "PASS" or not evidence.get("spec_digest"):
                 raise Rejected("spec_not_accepted")
+            spec_version = self._check_spec_revision(state, evidence)
         elif stage == "spec-check":
-            if evidence.get("verdict") != "PASS" or evidence.get("blockers"):
+            # The controller owns the NEEDS-BOSS escalation: a lane may only
+            # pass or reject a Spec revision.
+            if evidence.get("verdict") not in ("PASS", "FAIL"):
+                raise Rejected("spec_check_verdict_unknown")
+            if evidence.get("verdict") == "PASS" and evidence.get("blockers"):
                 raise Rejected("spec_check_failed")
+            self._check_spec_check(state, evidence)
         elif stage == "red":
             head = evidence.get("head_commit")
             self._check_head(state, evidence)
@@ -372,19 +484,145 @@ class RoleController:
             if evidence.get("holdout_receipt") != state["receipts"]["holdout"].get("digest"):
                 raise Rejected("holdout_binding")
         data = dict(evidence)
+        if stage != "spec-check":
+            # Only a spec-check receipt binds the spec revision it checked.
+            data.pop("parent_spec_digest", None)
+        if stage != "spec":
+            # Only a Spec revision binds the rejected receipt it answers.
+            data.pop("parent_receipt", None)
         if stage == "review":
             data["review_payload"] = submitted_evidence
         data["evidence_digest"] = digest(evidence)
         data["controller_status"] = {"spec": "SPEC_PENDING", "spec-check": "SPEC_PENDING",
             "red": "RED_ACCEPTED", "green": "GREEN_ACCEPTED",
             "review": "REVIEW_PENDING"}[stage]
+        if stage == "spec":
+            data["spec_version"] = spec_version
+            data["versioned"] = evidence.get("spec_version") is not None
+            parent = self._revision_parent(state)
+            if parent:
+                data["parent_receipt"] = parent
+        elif stage == "spec-check":
+            data["parent_spec_digest"] = binding
+            data["spec_version"] = state["spec_version"]
+            if (evidence.get("verdict") == "FAIL" and
+                    state["spec_revisions"] >= MAX_SPEC_REVISIONS):
+                data["controller_status"] = "NEEDS-BOSS"
         result = self._record(change_id, attempt, stage, data, dedupe_digest=event_digest)
         return self._public(result, change_id=change_id, attempt=attempt)
+
+    def _parent_binding(self, state: dict[str, Any] | None, stage: str) -> str | None:
+        """The parent a receipt binds to; part of the receipt identity."""
+        if not state:
+            return None
+        if stage == "spec-check":
+            return state["receipts"].get("spec", {}).get("spec_digest")
+        if stage == "spec":
+            return self._revision_parent(state)
+        return None
+
+    @staticmethod
+    def _revision_parent(state: dict[str, Any]) -> str | None:
+        """The rejected receipt a revision answers, if there is one."""
+        rejections = state["rejections"]
+        return rejections[-1]["receipt_digest"] if rejections else None
+
+    def _check_spec_revision(self, state: dict[str, Any], evidence: dict[str, Any]) -> int:
+        """Validate a Spec receipt against the bounded revision contract.
+
+        The first Spec opens the version line at 1 and has no parent. A
+        revision answers a rejected check: it advances the version, changes
+        the digest and binds the receipt of the rejection it answers.
+        """
+        current = state["receipts"].get("spec", {})
+        declared = evidence.get("spec_version")
+        if declared is not None and (isinstance(declared, bool) or
+                                     not isinstance(declared, int) or declared < 1):
+            raise Rejected("spec_version_invalid")
+        parent = evidence.get("parent_receipt")
+        if parent is not None and not DIGEST.fullmatch(str(parent)):
+            raise Rejected("parent_receipt_invalid")
+        expected = state["spec_version"] + 1
+        if state["spec_version"] == 0:
+            if declared is not None and declared != expected:
+                raise Rejected("spec_version_mismatch")
+            if parent is not None:
+                raise Rejected("parent_receipt_mismatch")
+            return expected
+        if declared is not None and declared != expected:
+            raise Rejected("spec_version_mismatch")
+        if declared is None:
+            raise Rejected("spec_version_missing")
+        rejections = state["rejections"]
+        if not rejections:
+            raise Rejected("missing_parent_receipt")
+        if parent is None:
+            raise Rejected("missing_parent_receipt")
+        elif parent != rejections[-1]["receipt_digest"]:
+            raise Rejected("parent_receipt_mismatch")
+        if evidence.get("spec_digest") == current.get("spec_digest"):
+            raise Rejected("spec_not_revised")
+        return expected
+
+    def _check_spec_check(self, state: dict[str, Any], evidence: dict[str, Any]) -> None:
+        """Bind a spec-check receipt to the spec revision it checked."""
+        current = state["receipts"].get("spec", {})
+        versioned = bool(current.get("versioned"))
+        declared = evidence.get("spec_digest")
+        version = evidence.get("spec_version")
+        if version is not None and (isinstance(version, bool) or not isinstance(version, int)):
+            raise Rejected("spec_check_parent_mismatch")
+        if declared is not None and declared != current.get("spec_digest"):
+            raise Rejected("spec_check_parent_mismatch")
+        if version is not None and version != state["spec_version"]:
+            raise Rejected("spec_check_parent_mismatch")
+        if versioned and (declared is None or version is None):
+            raise Rejected("spec_check_parent_missing")
+
+    def _stale_spec_check(self, change_id: str, attempt: int, event_digest: str,
+                           binding: str | None) -> bool:
+        """True when a receipt replays an earlier round's spec-check."""
+        return any(event["change_id"] == change_id and event["attempt"] == attempt and
+                   event["stage"] == "spec-check" and event["input_digest"] == event_digest and
+                   event["data"].get("parent_spec_digest") != binding
+                   for event in self._events)
+
+    def _legacy_spec_check(self, change_id: str, attempt: int, event_digest: str,
+                           binding: str | None, state: dict[str, Any] | None) -> dict[str, Any] | None:
+        """Find an unbound pre-revision receipt only while its Spec is current.
+
+        Older logs identify retries by stage and input digest alone. Infer the
+        old receipt's parent from the immediately preceding Spec, and accept it
+        only if no later Spec revision has superseded that parent.
+        """
+        current_spec = (state or {}).get("receipts", {}).get("spec", {})
+        if not binding or current_spec.get("spec_digest") != binding:
+            return None
+
+        latest_spec = next(((index, event) for index, event in reversed(list(enumerate(self._events)))
+                            if (event["change_id"], event["attempt"], event["stage"]) ==
+                            (change_id, attempt, "spec")), None)
+        if latest_spec is None or latest_spec[1]["data"].get("spec_digest") != binding:
+            return None
+
+        for index, event in reversed(list(enumerate(self._events))):
+            if ((event["change_id"], event["attempt"], event["stage"], event["input_digest"]) !=
+                    (change_id, attempt, "spec-check", event_digest) or
+                    event["data"].get("parent_spec_digest") is not None):
+                continue
+            preceding_spec = next(((spec_index, spec_event) for spec_index, spec_event in
+                                   reversed(list(enumerate(self._events[:index])))
+                                   if (spec_event["change_id"], spec_event["attempt"],
+                                       spec_event["stage"]) == (change_id, attempt, "spec")), None)
+            if preceding_spec and preceding_spec[0] == latest_spec[0]:
+                return event
+        return None
 
     def run_holdout(self, change_id: str, *, attempt: int = 0) -> dict[str, Any]:
         self._refresh()
         state = self.state(change_id, attempt)
-        prior = self._event_keys.get((change_id, attempt, "holdout", digest({"suite": state["intake"]["intake_digest"]}) if state else ""))
+        prior = self._event_keys.get((change_id, attempt, "holdout",
+            digest({"suite": state["intake"]["intake_digest"]}) if state else "", None, None))
         if prior:
             return self._public(prior["data"], change_id=change_id, attempt=attempt)
         if not state or state["next"] != "holdout":
@@ -537,7 +775,7 @@ class RoleController:
         public = {"change_id": change_id, "attempt": attempt}
         for key in ("intake_digest", "policy_digest", "spec_digest", "suite_digest",
                     "evidence_digest", "digest", "proof_digest", "snapshot_digest",
-                    "tdd_digest", "holdout_receipt"):
+                    "tdd_digest", "holdout_receipt", "parent_receipt", "parent_spec_digest"):
             item = value.get(key)
             if isinstance(item, str) and DIGEST.fullmatch(item):
                 public[key] = item
@@ -555,8 +793,11 @@ class RoleController:
         for key, choices in enums.items():
             if isinstance(value.get(key), str) and value[key] in choices:
                 public[key] = value[key]
-        for key in ("required", "holdout_required", "l1_eligible"):
+        for key in ("required", "holdout_required", "l1_eligible", "versioned"):
             if type(value.get(key)) is bool:
+                public[key] = value[key]
+        for key in ("spec_version",):
+            if type(value.get(key)) is int:
                 public[key] = value[key]
         if "issue_ref" in value:
             public["issue_ref_digest"] = digest(value["issue_ref"])
@@ -587,6 +828,19 @@ class RoleController:
                                           for item in findings)
         return public
 
+    @staticmethod
+    def _public_rejection(record: dict[str, Any]) -> dict[str, Any]:
+        """Public summary of one rejected spec-check receipt."""
+        public = {"verdict": record["verdict"]}
+        for key in ("receipt_digest", "spec_digest"):
+            item = record.get(key)
+            if isinstance(item, str) and DIGEST.fullmatch(item):
+                public[key] = item
+        for key in ("spec_version", "blocker_count"):
+            if type(record.get(key)) is int:
+                public[key] = record[key]
+        return public
+
     def public_state(self, change_id: str, attempt: int = 0) -> dict[str, Any] | None:
         state = self.state(change_id, attempt)
         if state is None:
@@ -594,7 +848,8 @@ class RoleController:
         return {"change_id": state["change_id"], "attempt": state["attempt"], "status": state["status"],
                 "next": state["next"], "intake": self._public(state["intake"], change_id=change_id, attempt=attempt),
                 "receipts": {stage: self._public(receipt, change_id=change_id, attempt=attempt)
-                             for stage, receipt in state["receipts"].items()}}
+                             for stage, receipt in state["receipts"].items()},
+                "rejections": [self._public_rejection(item) for item in state["rejections"]]}
 
 
 class MockSwrm:
