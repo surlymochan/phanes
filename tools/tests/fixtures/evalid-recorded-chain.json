@@ -1,0 +1,98 @@
+{
+  "version": 1,
+  "base_commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "head_commit": "cccccccccccccccccccccccccccccccccccccccc",
+  "commits": [
+    "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "cccccccccccccccccccccccccccccccccccccccc"
+  ],
+  "artifacts": [
+    {
+      "name": "spec.md",
+      "bytes_base64": "cHVibGljIHNwZWM6IHJldHVybiB0aGUgZXhwZWN0ZWQgcmVzdWx0Cg==",
+      "sha256": "sha256:ac4e84bc04b2e6db812057043dcc2d6fe2575c6adf2fe72e49de475f2853a60b"
+    }
+  ],
+  "receipts": [
+    {
+      "stage": "issue",
+      "issue_ref": "issue:example",
+      "base_commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "parent_digest": null,
+      "models": {
+        "spec": "gpt-6.1-sol",
+        "spec-check": "gpt-6.1-terra",
+        "red": "MiniMax-M3.1-Flash",
+        "green": "MiniMax-M3.1-Flash",
+        "review": "gpt-6.1-terra"
+      },
+      "digest": "sha256:8b389d344cba63faa792ece9fdd69d0891f8a84129bec1f10b3e7932bcb0aa25"
+    },
+    {
+      "stage": "spec",
+      "run_id": "run-spec",
+      "model": "gpt-6.1-sol",
+      "artifact": "spec.md",
+      "status": "PASS",
+      "parent_digest": "sha256:8b389d344cba63faa792ece9fdd69d0891f8a84129bec1f10b3e7932bcb0aa25",
+      "artifact_digest": "sha256:ac4e84bc04b2e6db812057043dcc2d6fe2575c6adf2fe72e49de475f2853a60b",
+      "digest": "sha256:a061f9661f95092df4372358528b0ea4737b98dae125701ac83bff29613a83d0"
+    },
+    {
+      "stage": "spec-check",
+      "run_id": "run-check",
+      "model": "gpt-6.1-terra",
+      "verdict": "PASS",
+      "parent_digest": "sha256:a061f9661f95092df4372358528b0ea4737b98dae125701ac83bff29613a83d0",
+      "digest": "sha256:51b627742b5af6a1413017bc3b6c612bea721c814de68f546907f88b52d57534"
+    },
+    {
+      "stage": "red",
+      "run_id": "run-red",
+      "model": "MiniMax-M3.1-Flash",
+      "head_commit": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "status": "PASS",
+      "parent_digest": "sha256:51b627742b5af6a1413017bc3b6c612bea721c814de68f546907f88b52d57534",
+      "digest": "sha256:3c19d1a298e8ac890f291a9472902875edba0f329af637df0d4b04e88bb1898f"
+    },
+    {
+      "stage": "green",
+      "run_id": "run-green",
+      "model": "MiniMax-M3.1-Flash",
+      "head_commit": "cccccccccccccccccccccccccccccccccccccccc",
+      "status": "PASS",
+      "parent_digest": "sha256:3c19d1a298e8ac890f291a9472902875edba0f329af637df0d4b04e88bb1898f",
+      "digest": "sha256:da8cdd026994b8c0d6ddb6df7763cafc47ecfc9a813ac80061309dc6644a2fa6"
+    },
+    {
+      "stage": "holdout",
+      "subject_head": "cccccccccccccccccccccccccccccccccccccccc",
+      "status": "PASS",
+      "isolation": "verified",
+      "parent_digest": "sha256:da8cdd026994b8c0d6ddb6df7763cafc47ecfc9a813ac80061309dc6644a2fa6",
+      "digest": "sha256:f69de268bae40dc72d94790c2737d347c9f1b6b4d6d992b85171eb88996f80ed"
+    },
+    {
+      "stage": "review",
+      "run_id": "run-review",
+      "model": "gpt-6.1-terra",
+      "reviewed_base": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "reviewed_head": "cccccccccccccccccccccccccccccccccccccccc",
+      "commits": [
+        "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "cccccccccccccccccccccccccccccccccccccccc"
+      ],
+      "verdict": "PASS",
+      "findings": [],
+      "parent_digest": "sha256:f69de268bae40dc72d94790c2737d347c9f1b6b4d6d992b85171eb88996f80ed",
+      "digest": "sha256:e1731c9580c1bd617905260b0cb102ec440607bd4122ad5e8467fc8f1dd196cc"
+    },
+    {
+      "stage": "delivery",
+      "head_commit": "cccccccccccccccccccccccccccccccccccccccc",
+      "controller_status": "VERIFIED",
+      "parent_digest": "sha256:e1731c9580c1bd617905260b0cb102ec440607bd4122ad5e8467fc8f1dd196cc",
+      "digest": "sha256:b08fd66d56f0caeb4e225f0a07bf5d12f7ee30ea515c2240e4ed8185b3598b6a"
+    }
+  ]
+}
