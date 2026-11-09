@@ -10,8 +10,7 @@ only live on the box after that sync.
 
 **旧 dispatcher 已退役**：上游已删除 `lib/dispatch/engine.py`；本轮一并移除无生产调用方的
 phanes_only dispatch 扩展及其测试。当前自动派发使用 swrm 原生 batch/fleet。
-本目录仍保留独立的旧控制面镜像和离线测试；审查车道按积压分配（Refs #1701，见下文）落在
-本镜像里，旧 engine 的其余实现不再保留。
+本目录仍保留独立的旧控制面镜像和离线测试，不包含旧 engine 的审查派发实现。
 `tools/check-ad-review-pause-uncounted.py` 的运行副本契约不适用于本镜像。
 
 Base-commit validation: the base commit must exist in the target repo before a lane is assigned
@@ -91,49 +90,6 @@ export AD_VERIFY_SHARE_ENABLED=1        # 可选：export AD_VERIFY_SHARE=0.2 AD
 - `queue share: dispatched <class> #<n> on <lane>` —— 本次派发的类别。
 
 离线验证：`python3 tools/lane-autodispatch/test_can_take.py`（含工作洪峰 / 验证洪峰 / 工作类上限三个场景）。
-
-## 审查车道按积压分配（Refs #1701）
-
-审查只认 CX2/CX4/CX5 三条 review 车道。以前 AD 按车道顺序派审查卡：一条车道先空出来就
-先拿下一张，快的车道反复连审，另一条车道空着。现在审查卡**按在途积压分配**：
-
-- **积压** = 该车道正在审的审查数 + 当前等待队列按积压均衡分摊的审查卡数（review 队列 + 在途）；
-- **选车道**：积压最少的那条车道先拿；积压相同时**轮询**（轮到最久的那条车道先拿，轮转记在三条
-  review 车道上，某条车道临时忙一下不会打断轮转）；
-- **上限**：单车道实际已接纳的在途审查达到 `AD_REVIEW_MAX_IN_FLIGHT`（默认 1）时**跳过**
-  该车道，审查卡留在共享队列里等空闲车道；共享等待队列的预测分摊不占用准入容量；
-- **留痕**：每次分配写一行审查日志（PR、所选车道、当时各车道积压快照），供事后复核。
-
-审查队列在每次实际派发时重新统计，包含全部等待卡（包括超过执行容量的等待卡）。
-统计使用当前轮询记录的副本，不改变实际派发的轮询顺序；先预留队列头的轮次，再分摊其余等待卡，
-队列头本身不计入本次选择的积压。上一轮 `_review_waiting` 快照不作为新一轮的输入。
-排序和日志使用完整积压快照，上限检查使用实际已接纳的在途数，避免队列预测将空闲车道判为满载。
-例如默认上限 1 下，四张待审卡的首张决策快照为 `CX2=1, CX4=1, CX5=1`，三条空闲车道各接纳
-一张审查卡，第四张等待；任一车道释放后继续派发，无需减少输入或调高上限。
-每次选择都记录轮次（包括唯一最小积压的选择），下一次积压并列时按最近选择时间轮询。
-
-分配决策在工作优先级和队列份额规则选出卡之后执行：工作卡占用 CX2 时，审查卡立即在剩余
-空闲车道中重新选择。只有成功派发的审查进入运行数，未执行的计划不会污染后续日志。
-日志中的 PR 号取自验证卡正文的 `目标 PR`（支持 `#1785` 和 PR URL），不使用验证 issue 号。
-
-日志（`~/phanes-ctl/autodispatch/autodispatch.log`）：
-
-- `review plan: PR #<n> → lane <CX2|CX4|CX5> (backlog: CX2=1, CX4=0, CX5=0)` —— 分配决策与积压快照；
-- `review plan: PR #<n> → lane none (backlog: ...); every free review lane is at its cap (1), the review
-  waits for a free lane` —— 空闲的 review 车道都到上限，审查等空闲车道；
-- `review assignment: PR #<n> → lane <CX2|CX4|CX5> (backlog: ...)` —— 该决策真正落到的那条车道。
-
-`lanes-status.json` 里多一个 `_review_backlog` 字段（三条 review 车道的当前积压：正在审的数 +
-当前完整等待队列分摊数），便于事后复核。
-
-| 环境变量 | 默认 | 含义 |
-| --- | --- | --- |
-| `AD_REVIEW_MAX_IN_FLIGHT` | `1` | 单条 review 车道实际已接纳的在途审查上限；共享等待队列的预测分摊不计入 |
-
-离线验证：`python3 tools/lane-autodispatch/test_can_take.py`（含积压最少者被选中、同积压轮询、
-上限跳过、日志含积压快照、默认上限 1 下突发队列跨 tick 排空，以及通过真实 tick 驱动的
-2026-11-02 晚审查序列回放（使用默认上限 1）：回放里三条车道的审查数之差 ≤1、
-最忙的车道不超过应得份额、且没有一条车道连审两轮）。
 
 ## PR 提交前校验（Refs #1704）
 
