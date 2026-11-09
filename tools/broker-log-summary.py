@@ -50,8 +50,11 @@ def parse_tz(text):
         return timezone.utc
     if not TZ_RE.match(text):
         raise argparse.ArgumentTypeError(f"expected +HH:MM or Z, got {text!r}")
+    hours, minutes = int(text[1:3]), int(text[4:6])
+    if hours > 23 or minutes > 59:
+        raise argparse.ArgumentTypeError(f"timezone offset out of range: {text!r}")
     sign = -1 if text[0] == "-" else 1
-    offset = timedelta(hours=int(text[1:3]), minutes=int(text[4:6]))
+    offset = timedelta(hours=hours, minutes=minutes)
     return timezone(sign * offset)
 
 
