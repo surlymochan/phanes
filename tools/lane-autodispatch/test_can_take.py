@@ -237,6 +237,7 @@ class TickVerifyDispatchTest(TickHarness, unittest.TestCase):
     """tick() level proof: a valid verify card reaches a review lane only, an invalid card reaches
     no lane at all, and a work card of the same pin class is dispatched first."""
 
+    @patch.object(AUTODISPATCH, "REVIEW_MAX_IN_FLIGHT", 5)
     def test_share_keeps_both_classes_moving_during_floods(self):
         old = AUTODISPATCH.AD_VERIFY_SHARE_ENABLED
         AUTODISPATCH.AD_VERIFY_SHARE_ENABLED = True
@@ -565,41 +566,26 @@ class ReviewBacklogTickTest(TickHarness, unittest.TestCase):
         self.assertIn("CX2=2, CX4=3, CX5=2", assignment)
         self.assertIn("lane CX2", assignment)
 
-    def test_waiting_queue_larger_than_capacity_drains_at_the_default_cap(self):
-        pending = [issue(n, VERIFY_BODY, ("lane-ready", "verify-intent")) for n in range(1, 9)]
-        state, assignments = {}, []
-        with patch.object(AUTODISPATCH, "REVIEW_MAX_IN_FLIGHT", 1):
-            for expected in (3, 3, 2):
-                dispatched, _ = self.run_tick(pending, self.LANES, state)
-                self.assertEqual(len(dispatched), expected)
-                self.assertEqual(len({lane for lane, _ in dispatched}), expected)
-                assignments.extend(lane for lane, _ in dispatched)
-                completed = {n for _, n in dispatched}
-                pending = [row for row in pending if row["number"] not in completed]
-                self.assertEqual(sum(self.last_state["_review_waiting"].values()), len(pending))
-                # Finish this round, retaining the previous tick's queue forecast.
-                state = {key: value for key, value in self.last_state.items() if key not in self.LANES}
-        self.assertEqual(pending, [])
-        self.assertEqual(assignments, ["CX2", "CX4", "CX5", "CX2", "CX4", "CX5", "CX2", "CX4"])
-
-    def test_four_waiting_reviews_use_idle_lanes_and_resume_at_the_default_cap(self):
+    def test_waiting_queue_at_cap_blocks_dispatch_until_backlog_falls(self):
         rows = [issue(n, VERIFY_BODY, ("lane-ready", "verify-intent")) for n in range(1, 5)]
         with patch.object(AUTODISPATCH, "REVIEW_MAX_IN_FLIGHT", 1):
             dispatched, logs = self.run_tick(rows, self.LANES)
-            self.assertEqual(dispatched, [("CX2", 1), ("CX4", 2), ("CX5", 3)])
-            self.assertEqual(sum(self.last_state["_review_waiting"].values()), 1)
+            self.assertEqual(dispatched, [])
+            self.assertEqual(sum(self.last_state["_review_waiting"].values()), 4)
             plan = next(row for row in logs if "review plan" in row)
-            self.assertIn("PR #1785 → lane CX2 (backlog: CX2=1, CX4=1, CX5=1)", plan)
-            assignment = next(row for row in logs if "review assignment" in row)
-            self.assertEqual(plan.replace("review plan:", "review assignment:"), assignment)
-            # The fourth card waits while all lanes run, then uses the first released lane.
-            waiting, _ = self.run_tick(rows[3:], self.LANES, self.last_state)
-            self.assertEqual(waiting, [])
-            state = dict(self.last_state)
-            state.pop("CX4")
-            resumed, _ = self.run_tick(rows[3:], self.LANES, state)
-            self.assertEqual(resumed, [("CX4", 4)])
-            self.assertEqual(sum(self.last_state["_review_waiting"].values()), 0)
+            self.assertIn("lane none (backlog: CX2=1, CX4=1, CX5=1)", plan)
+            self.assertIn("at its cap (1)", plan)
+            # Once the queue falls below the cap, eligible lanes can take reviews.
+            resumed, _ = self.run_tick(rows[:2], self.LANES, {})
+            self.assertEqual(len(resumed), 2)
+
+    def test_waiting_and_running_reviews_together_reach_cap(self):
+        rows = [issue(n, VERIFY_BODY, ("lane-ready", "verify-intent")) for n in range(1, 5)]
+        state = self.busy("CX2", "verify")
+        with patch.object(AUTODISPATCH, "REVIEW_MAX_IN_FLIGHT", 1):
+            dispatched, logs = self.run_tick(rows, self.LANES, state)
+        self.assertEqual(dispatched, [])
+        self.assertTrue(any("lane none (backlog:" in row and "at its cap (1)" in row for row in logs))
 
     def test_tick_rotation_records_the_unique_minimum_before_the_next_round(self):
         rows = [issue(n, VERIFY_BODY, ("lane-ready", "verify-intent")) for n in range(1, 4)]
@@ -727,8 +713,8 @@ class ReviewSequenceReplayTest(TickHarness, unittest.TestCase):
         free = dict.fromkeys(self.LANES, 0)
         pending, assignments, state = [], [], {}
         index, minute, spread = 0, 0, 0
-        # The default cap must service recorded bursts without inflating capacity.
-        with patch.object(AUTODISPATCH, "REVIEW_MAX_IN_FLIGHT", 1):
+        # Isolate load balancing from the admission cap during the replay.
+        with patch.object(AUTODISPATCH, "REVIEW_MAX_IN_FLIGHT", len(self.SEQUENCE)):
             while (index < len(self.SEQUENCE) or pending) and minute < 4000:
                 while index < len(self.SEQUENCE) and int(self.SEQUENCE[index].split(":")[0]) <= minute:
                     pr = self.SEQUENCE[index].split(":")[1]

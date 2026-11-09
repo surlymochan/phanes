@@ -1183,11 +1183,9 @@ def pick_reviewer(lanes, loads, max_in_flight=None, log=None, pr=None, eligible=
     `lanes` is the ordered list of the review lanes (CX2/CX4/CX5); the order is also the
     rotation order of the equal backlogs. `loads` maps a lane to the reviews it carries:
     the reviews it runs plus the reviews already queued for it. The lane with the smallest
-    load wins; equal loads rotate over the review lanes. `in_flight` counts reviews
-    actually admitted to each lane for the cap check; it defaults to `loads` for plans
-    whose queues are already assigned. A forecast of the shared waiting queue affects
-    ranking and logging, but must not consume admission capacity. A lane that already
-    carries `max_in_flight` admitted reviews is skipped. `eligible` restricts the lanes
+    load wins; equal loads rotate over the review lanes. `in_flight` defaults to
+    `loads` for the cap check. A lane that already carries `max_in_flight`
+    reviews, including waiting reviews, is skipped. `eligible` restricts the lanes
     that may take the card (a lane that is busy or whose backend cannot take it).
 
     The rotation remembers the turn of every review lane (the turn is taken by the lane
@@ -2358,12 +2356,10 @@ def tick(lanes, state, last_warn):
             eligible = [lane for lane in idle if lane in review_ids
                         and can_take(lanes[lane]["backend"], pick, lane)]
             queued = review_waiting_counts(review_ids, waiting, running, head_eligible=eligible)
-            # Rank and log the running + waiting forecast, but cap only admitted runs.
-            # Shared waiting demand must not prevent an idle lane from draining it.
+            # Apply the cap to the same running + waiting backlog used for ranking.
             loads = {lane: running[lane] + queued.get(lane, 0) for lane in review_ids}
             chosen, snapshot = pick_reviewer(review_ids, loads, eligible=eligible,
                                              max_in_flight=REVIEW_MAX_IN_FLIGHT,
-                                             in_flight=running,
                                              pr=review_target_pr(pick),
                                              log=lambda row: log(row, brain=False))
             if chosen is None: return "no-capacity"
