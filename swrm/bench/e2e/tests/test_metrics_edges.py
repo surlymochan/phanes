@@ -4,14 +4,21 @@ from __future__ import annotations
 
 import json
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from harness.metrics import looks_like_usage, parse_agent_stream, quantile  # noqa: E402
-from harness.swrm_finish import executor_calls  # noqa: E402
+from harness.metrics import (  # noqa: E402
+    empty_usage,
+    looks_like_usage,
+    normalize_usage,
+    parse_agent_stream,
+    quantile,
+)
+from harness.swrm_finish import executor_calls, main as swrm_finish_main  # noqa: E402
 
 
 def _result(usage: dict) -> str:
@@ -65,6 +72,72 @@ def test_malformed_executor_usage_is_missing_and_allows_fallback():
     assert len(calls) == 1
     assert calls[0]["source"] == "swrm-result:usage"
     assert calls[0]["usage"]["inputTokens"] == 17
+
+
+def test_malformed_usage_never_raises_in_normalize_usage():
+    for value in ({"nested": 1}, "", "bad", [], True, -1, 1.5, float("inf"), float("nan")):
+        usage = normalize_usage({"inputTokens": value, "outputTokens": 3})
+
+        assert usage == empty_usage()
+
+    usage = normalize_usage({"inputTokens": 17, "outputTokens": 3})
+    assert usage["inputTokens"] == 17
+    assert usage["outputTokens"] == 3
+
+
+def test_malformed_executor_attempt_does_not_raise_and_keeps_valid_usage():
+    result = {"attempts": [
+        {"meta": {"usage": {"inputTokens": "bad"}}},
+        {"meta": {"usage": {"inputTokens": 17}}},
+    ]}
+
+    calls = executor_calls(result)
+
+    assert len(calls) == 1
+    assert calls[0]["usage"]["inputTokens"] == 17
+
+
+def test_malformed_result_does_not_discard_earlier_valid_usage():
+    text = "\n".join(
+        [
+            _result({"inputTokens": 17, "outputTokens": 3}),
+            _result({"inputTokens": "bad"}),
+        ]
+    )
+
+    call = parse_agent_stream(text, "mixed.jsonl")
+
+    assert call["missing_usage"] is False
+    assert call["usage"]["inputTokens"] == 17
+    assert call["usage"]["outputTokens"] == 3
+
+
+def test_swrm_finish_keeps_artifacts_when_a_result_carries_malformed_usage():
+    with tempfile.TemporaryDirectory() as temp:
+        tempdir = Path(temp)
+        stdout = tempdir / "stdout.txt"
+        stdout.write_text(
+            json.dumps(
+                {
+                    "id": "run-malformed",
+                    "attempts": [
+                        {"meta": {"usage": {"inputTokens": "bad"}}},
+                        {"meta": {"usage": {"inputTokens": 17}}},
+                    ],
+                }
+            ),
+            encoding="utf-8",
+        )
+        events = tempdir / "events"
+        workdir = tempdir / "worktree"
+        workdir.mkdir()
+
+        swrm_finish_main(["swrm_finish.py", str(stdout), str(events), str(workdir)])
+
+        payload = json.loads((events / "executor-usage.json").read_text(encoding="utf-8"))
+        assert len(payload["calls"]) == 1
+        assert payload["calls"][0]["usage"]["inputTokens"] == 17
+        assert (events / "merge.txt").is_file()
 
 
 def test_malformed_counter_types_are_missing_without_losing_valid_usage():
