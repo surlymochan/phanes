@@ -26,34 +26,76 @@ def empty_usage() -> dict:
     return {key: 0 for key in USAGE_KEYS}
 
 
-def looks_like_usage(obj: object) -> bool:
-    if not isinstance(obj, dict):
-        return False
-    for names in _ALIASES.values():
-        if any(name in obj for name in names):
-            return True
-    return False
+def _counter_count(value: object) -> int | None:
+    """Return the token count of an acceptable counter, else None.
+
+    Acceptable counters are nonnegative integers, integral floats and
+    integer strings. Objects, empty strings, booleans, fractional, negative
+    and non-finite numbers are malformed and have no usable count.
+    """
+    if isinstance(value, bool) or not isinstance(value, (int, float, str)):
+        return None
+    try:
+        count = int(value)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    if count < 0:
+        return None
+    if isinstance(value, float) and (not math.isfinite(value) or value != count):
+        return None
+    return count
 
 
-def normalize_usage(obj: dict) -> dict:
-    usage = empty_usage()
+def _selected_counters(obj: dict) -> dict:
+    """Map canonical keys to the raw counter value that would be used."""
+    selected = {}
     for key, names in _ALIASES.items():
         for name in names:
             if name in obj and obj[name] is not None:
-                usage[key] = int(obj[name])
+                selected[key] = obj[name]
                 break
+    return selected
+
+
+def looks_like_usage(obj: object) -> bool:
+    """Recognize usable counters so every caller can skip malformed usage."""
+    if not isinstance(obj, dict):
+        return False
+    if not any(name in obj for names in _ALIASES.values() for name in names):
+        return False
+    return all(_counter_count(value) is not None for value in _selected_counters(obj).values())
+
+
+def normalize_usage(obj: dict) -> dict:
+    """Accept nonnegative integers, integral floats and integer strings.
+
+    Missing/null counters stay zero. A usage object with a malformed
+    counter degrades to empty counters instead of raising, so one unusable
+    usage object can never abort the collection of later results. Callers
+    should use looks_like_usage to detect malformed usage and report it as
+    missing.
+    """
+    if not isinstance(obj, dict):
+        return empty_usage()
+    selected = _selected_counters(obj)
+    counts = {key: _counter_count(value) for key, value in selected.items()}
+    if any(count is None for count in counts.values()):
+        return empty_usage()
+    usage = empty_usage()
+    for key, count in counts.items():
+        usage[key] = int(count)
     return usage
 
 
 def usage_total(usage: dict) -> int:
     """Full context: cursor-agent already subtracts cache tokens from inputTokens."""
-    return sum(int(usage.get(key) or 0) for key in USAGE_KEYS)
+    return sum(_counter_count(usage.get(key)) or 0 for key in USAGE_KEYS)
 
 
 def add_usage(left: dict, right: dict) -> dict:
     out = empty_usage()
     for key in USAGE_KEYS:
-        out[key] = int(left.get(key) or 0) + int(right.get(key) or 0)
+        out[key] = (_counter_count(left.get(key)) or 0) + (_counter_count(right.get(key)) or 0)
     return out
 
 
@@ -99,6 +141,9 @@ def parse_agent_stream(text: str, source: str) -> dict:
             saw_result = True
             session_id = event.get("session_id") or session_id
             if looks_like_usage(event.get("usage")):
+                # Malformed usage is reported as missing: ignore this result's
+                # counters and keep scanning so a later result can provide
+                # valid usage.
                 usage = normalize_usage(event["usage"])
     return {
         "source": source,
