@@ -11,6 +11,7 @@ import importlib.util
 import json
 from pathlib import Path
 import tempfile
+import traceback
 import unittest
 
 
@@ -119,6 +120,31 @@ class DenylistLoadTests(unittest.TestCase):
                 with self.assertRaises(denylist.DenylistError):
                     denylist.load(env={denylist.DENYLIST_ENV: line + "\n"})
 
+    def test_configuration_errors_do_not_echo_the_denylist_content(self):
+        """A configuration error never repeats the private denylist content."""
+        category = "priv" + "ate"
+        term = "zz" + "secret-fixture"
+        group = "grp" + "fixture"
+        cases = [
+            (f"{category}\t{term}\n", (category, term)),
+            (f"host\tre:(?P<{group}>a)(?P<{group}>b)\n", (group,)),
+        ]
+        for content, forbidden in cases:
+            with self.subTest(forbidden=forbidden):
+                with self.assertRaises(denylist.DenylistError) as ctx:
+                    denylist.load(env={denylist.DENYLIST_ENV: content})
+                error = ctx.exception
+                rendered = str(error) + "".join(
+                    traceback.format_exception(type(error), error, error.__traceback__)
+                )
+                for fragment in forbidden:
+                    self.assertNotIn(fragment, rendered)
+                if error.__context__ is not None:
+                    self.assertTrue(
+                        error.__suppress_context__,
+                        "the original error must not be chained into the traceback",
+                    )
+
     def test_comments_and_blank_lines_are_ignored(self):
         content = "\n".join(["# a comment", "", rule("host", HOST_TERM), ""]) + "\n"
         matcher = denylist.load(env={denylist.DENYLIST_ENV: content})
@@ -161,6 +187,18 @@ class DenylistMatchTests(unittest.TestCase):
         self.assertEqual(len(matcher.scan(BUS_TERM)), 1)
         self.assertEqual(matcher.scan("bus-fixture-xx"), [])
 
+    def test_regular_expression_rules_respect_word_boundaries(self):
+        matcher = self.matcher(rule("host", "re:gw-fixture-[0-9]+"))
+        self.assertEqual(matcher.scan("x" + HOST_TERM + "y"), [])
+        self.assertEqual(matcher.scan(HOST_TERM + "x"), [])
+        self.assertEqual(len(matcher.scan(HOST_TERM)), 1)
+        self.assertEqual(len(matcher.scan("node." + HOST_TERM)), 1)
+
+    def test_regular_expression_suffix_matches_a_longer_name(self):
+        matcher = self.matcher(rule("domain", "re:\\.invalid"))
+        self.assertEqual(len(matcher.scan("node.fixture.invalid")), 1)
+        self.assertEqual(matcher.scan("node.fixture.invalidx"), [])
+
     def test_findings_carry_no_raw_text(self):
         matcher = self.matcher(rule("account", ACCOUNT_TERM))
         hits = matcher.scan(f"user {ACCOUNT_TERM} signed in")
@@ -173,8 +211,16 @@ class DenylistMatchTests(unittest.TestCase):
     def test_finding_reports_the_hash_prefix(self):
         matcher = self.matcher(rule("host", HOST_TERM))
         hits = matcher.scan(f"host {HOST_TERM}")
-        expected = hashlib.sha256(HOST_TERM.lower().encode("utf-8")).hexdigest()[:8]
+        expected = hashlib.sha256(HOST_TERM.encode("utf-8")).hexdigest()[:8]
         self.assertEqual(hits[0].hash8, expected)
+
+    def test_finding_hash_is_the_hash_of_the_matched_text(self):
+        matcher = self.matcher(rule("host", HOST_TERM))
+        matched = HOST_TERM.upper()
+        hits = matcher.scan(matched)
+        expected = hashlib.sha256(matched.encode("utf-8")).hexdigest()[:8]
+        self.assertEqual(hits[0].hash8, expected)
+        self.assertNotEqual(hits[0].hash8, hashlib.sha256(HOST_TERM.encode("utf-8")).hexdigest()[:8])
 
     def test_finding_reports_the_position(self):
         matcher = self.matcher(rule("host", HOST_TERM))

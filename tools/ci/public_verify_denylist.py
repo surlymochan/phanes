@@ -12,13 +12,20 @@ file passed with ``--denylist``.  The format is one rule per line::
 ``re:`` rules are regular expressions and are matched case-insensitively as
 well.  Blank lines and lines starting with ``#`` are ignored.
 
+Every rule matches on word boundaries, regular expressions included: a match
+that touches a neighbouring word character is not a finding.  The boundary is
+only required on a side where the matched text itself ends with a word
+character, so that a suffix such as ``.internal`` still matches inside a
+longer name.
+
 The scanner is fail-closed: a missing or empty denylist raises
 ``DenylistError`` (exit code 2) and only an explicit ``generic_only`` request
 skips the private denylist.
 
 A finding never carries the matched text.  It holds the category of the rule,
 the position of the match and the first eight hex digits of the hash of the
-matched text.
+matched text.  A configuration error never repeats the denylist content
+either, it names the source and the line of the offending rule only.
 
 This module is internal to the scanner, it is not a public API.
 """
@@ -60,10 +67,13 @@ class DenylistError(Exception):
 
 @dataclass(frozen=True)
 class Rule:
-    """A single denylist rule."""
+    """A single denylist rule.
+
+    The rule keeps no term of its own: the private text lives in the pattern
+    only and never leaves the matcher.
+    """
 
     category: str
-    term: str
     pattern: "re.Pattern"
     is_regex: bool
 
@@ -115,6 +125,8 @@ class Matcher:
                 if not matched:
                     continue
                 start, end = match.span()
+                if not _on_word_boundary(text, start, end):
+                    continue
                 key = (rule.category, start, end)
                 if key in seen:
                     continue
@@ -153,7 +165,8 @@ def load(env=None, denylist_path=None, generic_only=False, denylist=None):
 def parse(content, source="denylist"):
     """Parse the denylist content into rules.
 
-    Raises ``DenylistError`` for a malformed line.
+    Raises ``DenylistError`` for a malformed line.  The error never repeats
+    the content of the denylist.
     """
     rules = []
     for number, raw in enumerate(str(content).splitlines(), 1):
@@ -166,7 +179,7 @@ def parse(content, source="denylist"):
         category = fields[0].strip().lower()
         term = fields[1].strip()
         if category not in CATEGORIES:
-            raise DenylistError(f"{source}:{number}: unknown category '{fields[0].strip()}'")
+            raise DenylistError(f"{source}:{number}: unknown category")
         if not term:
             raise DenylistError(f"{source}:{number}: empty term")
         if term.startswith(REGEX_PREFIX):
@@ -175,11 +188,13 @@ def parse(content, source="denylist"):
                 raise DenylistError(f"{source}:{number}: empty regular expression")
             try:
                 pattern = re.compile(expression, re.IGNORECASE)
-            except re.error as exc:
-                raise DenylistError(f"{source}:{number}: invalid regular expression: {exc}")
-            rules.append(Rule(category, term, pattern, True))
+            except re.error:
+                # The message of re.error quotes the pattern, so it must not
+                # be chained into the traceback of the configuration error.
+                raise DenylistError(f"{source}:{number}: invalid regular expression") from None
+            rules.append(Rule(category, pattern, True))
         else:
-            rules.append(Rule(category, term, re.compile(_term_pattern(term), re.IGNORECASE), False))
+            rules.append(Rule(category, re.compile(re.escape(term), re.IGNORECASE), False))
     return rules
 
 
@@ -205,17 +220,18 @@ def _read_file(path):
         raise DenylistError(f"denylist file cannot be read: {path} ({exc.strerror or exc})")
 
 
-def _term_pattern(term):
-    """Build the case-insensitive pattern of a plain term.
+def _on_word_boundary(text, start, end):
+    """Return True when the match touches no neighbouring word character.
 
-    The term is matched on word boundaries.  A boundary is only required on a
-    side where the term itself ends with a word character, so that a suffix
-    such as ``.internal`` still matches inside a longer name.
+    A boundary is only required on a side where the matched text itself ends
+    with a word character, so that a suffix such as ``.internal`` still
+    matches inside a longer name.
     """
-    escaped = re.escape(term)
-    prefix = r"(?<!\w)" if _is_word_char(term[0]) else ""
-    suffix = r"(?!\w)" if _is_word_char(term[-1]) else ""
-    return prefix + escaped + suffix
+    if start > 0 and _is_word_char(text[start]) and _is_word_char(text[start - 1]):
+        return False
+    if end < len(text) and _is_word_char(text[end - 1]) and _is_word_char(text[end]):
+        return False
+    return True
 
 
 def _is_word_char(char):
@@ -231,4 +247,4 @@ def _position(text, offset):
 
 def _hash8(matched):
     """Return the first eight hex digits of the hash of the matched text."""
-    return hashlib.sha256(matched.lower().encode("utf-8")).hexdigest()[:HASH_LENGTH]
+    return hashlib.sha256(matched.encode("utf-8")).hexdigest()[:HASH_LENGTH]
