@@ -65,7 +65,6 @@ class UpstreamDriftTests(unittest.TestCase):
             with self.assertRaises(RuntimeError):
                 snapshot({"upstream_repo": str(remote)}, "deadbeef", Path(scratch))
 
-<<<<<<< HEAD
     def test_snapshot_uses_requested_work_dir_for_scratch_and_cleans_it(self):
         with tempfile.TemporaryDirectory(dir=os.environ.get("TMPDIR")) as scratch:
             root = Path(scratch)
@@ -92,7 +91,7 @@ class UpstreamDriftTests(unittest.TestCase):
             self.assertEqual(len(init_locations), 1)
             self.assertEqual(init_locations[0].parent, work_dir)
             self.assertFalse(init_locations[0].exists())
-=======
+
     def test_snapshot_rejects_missing_base_sha_with_localized_git_error(self):
         with tempfile.TemporaryDirectory(dir=os.environ.get("TMPDIR")) as scratch:
             remote = Path(scratch) / "remote.git"
@@ -113,7 +112,6 @@ class UpstreamDriftTests(unittest.TestCase):
             self.assertEqual(len(fetch_results), 1)
             self.assertNotEqual(fetch_results[0].returncode, 0)
             self.assertEqual(fetch_results[0].args[-2:], [str(remote), "deadbeef"])
->>>>>>> 919efe3631f1ab060dc70678b69bbf01ca792c0e
 
     def test_local_files_hash_symlink_targets(self):
         with tempfile.TemporaryDirectory(dir=os.environ.get("TMPDIR")) as scratch:
