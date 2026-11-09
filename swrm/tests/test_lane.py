@@ -9,11 +9,138 @@ import sys
 import tempfile
 import time
 import unittest
+from unittest import mock
 
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 CLI = ROOT / "bin" / "swrm"
 FIXTURES = ROOT / "tests" / "fixtures"
+
+
+class CodexSandboxTests(unittest.TestCase):
+    """#1832: policy unit coverage and real, model-free Codex sandbox commits.
+
+    Host integration command: python3 -m pytest -q swrm/tests/test_lane.py -k CodexSandbox
+    B1-B4 evidence and delivery mapping are retained in the companion host checker.
+    """
+
+    def setUp(self):
+        from swrm.tests._load import load
+        self.swrm = load()
+        self.tmp = tempfile.TemporaryDirectory(prefix="codex-gitdir-", dir=tempfile.gettempdir())
+        self.addCleanup(self.tmp.cleanup)
+        self.root = pathlib.Path(self.tmp.name)
+        self.repo = self.root / "repo"
+        self.repo.mkdir()
+        self.git(self.repo, "init", "-q")
+        self.git(self.repo, "config", "user.name", "Sandbox Test")
+        self.git(self.repo, "config", "user.email", "sandbox@example.invalid")
+        self.git(self.repo, "commit", "--allow-empty", "-qm", "base")
+        self.worktrees = [self.root / "lanes" / name / "wt" for name in ("CX5", "CX10")]
+        for wt in self.worktrees:
+            self.git(self.repo, "worktree", "add", "-qb", wt.parent.name, str(wt), "HEAD")
+        self.policy = {"codex": {"sandbox": "workspace-write"}}
+        patch = mock.patch.object(self.swrm, "load_policy", return_value=self.policy)
+        patch.start()
+        self.addCleanup(patch.stop)
+
+    def git(self, cwd, *args):
+        return subprocess.run(["git", "-C", str(cwd), *args], check=True,
+                              capture_output=True, text=True).stdout.strip()
+
+    def test_policy_modes_and_network_restrictions(self):
+        class RecordingChild:
+            def send(self, request):
+                self.request = request
+
+            def wait_response(self, request_id, timeout, event_file):
+                return {"thread": {"id": "thread"}, "turn": {"id": "turn"}}
+
+        for mode, kind in (("read-only", "readOnly"), ("danger-full-access", "dangerFullAccess"),
+                           ("workspace-write", "workspaceWrite")):
+            for network in ({}, {"network_access": False}, {"networkAccess": False},
+                            {"network_access": True}, {"networkAccess": True},
+                            {"network_access": False, "networkAccess": True}):
+                with self.subTest(mode=mode, network=network):
+                    self.policy["codex"] = dict(network, sandbox=mode)
+                    child = RecordingChild()
+                    self.swrm.lane_begin_turn(
+                        {"backend": "codex", "model": "test", "effort": "high"}, child,
+                        "test", str(self.worktrees[0]), None, {})
+                    policy = child.request["params"]["sandboxPolicy"]
+                    self.assertIsInstance(policy, dict)
+                    self.assertEqual(policy["type"], kind)
+                    if mode != "danger-full-access":
+                        self.assertEqual(policy["networkAccess"],
+                                         network.get("network_access", network.get("networkAccess", False)))
+                    if mode == "workspace-write":
+                        self.assertEqual(policy["writableRoots"], [
+                            self.git(self.worktrees[0], "rev-parse", "--absolute-git-dir"),
+                            str(self.repo / ".git")])
+                    else:
+                        self.assertNotIn("writableRoots", policy)
+
+    @unittest.skipUnless(shutil.which("codex"), "real Codex binary required")
+    def test_real_codex_sandbox_two_lanes_commit(self):
+        """Execute git inside real app-server command/exec sandboxes, without inference.
+
+        A negative control proves the common gitdir is protected without the fix;
+        each positive run uses the same policy builder as lane_begin_turn.
+        Namespace/mount failures are failures, never converted into successful skips.
+        """
+        codex_home = self.root / "codex-home"
+        codex_home.mkdir()
+        with mock.patch.dict(os.environ, {"CODEX_HOME": str(codex_home)}):
+            for wt in self.worktrees:
+                lane = {"name": wt.parent.name, "backend": "codex", "binary": shutil.which("codex")}
+                child = self.swrm.LaneChild(lane, str(wt), self.policy)
+                try:
+                    def execute(command, policy, request_id):
+                        child.send({"jsonrpc": "2.0", "id": request_id, "method": "command/exec",
+                                    "params": {"cwd": str(wt), "command": command,
+                                               "sandboxPolicy": policy, "timeoutMs": 10000}})
+                        try:
+                            reply = child.wait_response(request_id, 15)
+                        except RuntimeError as error:
+                            warnings = [event.get("params", {}).get("summary", "")
+                                        for event in child.backlog if event.get("method") == "configWarning"]
+                            self.fail(f"real Codex sandbox RPC failed: {error}; {'; '.join(warnings)}")
+                        self.assertNotIn("error", reply, reply)
+                        return reply
+
+                    gitdir = self.git(wt, "rev-parse", "--absolute-git-dir")
+                    denied = execute(["touch", str(pathlib.Path(gitdir) / "sandbox-probe")],
+                                     {"type": "workspaceWrite", "networkAccess": False}, "negative")
+                    self.assertNotEqual(denied["exitCode"], 0, denied)
+                    self.assertFalse((pathlib.Path(gitdir) / "sandbox-probe").exists())
+                    before = self.git(wt, "rev-parse", "HEAD")
+                    # File creation, index, shared objects/refs and commit all occur in the sandbox.
+                    result = execute(["sh", "-c", "printf 'sandbox commit\\n' > result.txt && "
+                                      "git add result.txt && git commit -qm sandbox-commit"],
+                                     self.swrm.lane_codex_sandbox_policy(str(wt)), "commit")
+                    self.assertEqual(result["exitCode"], 0, result)
+                    self.assertNotEqual(self.git(wt, "rev-parse", "HEAD"), before)
+                    self.assertEqual(self.git(wt, "show", "HEAD:result.txt"), "sandbox commit")
+                finally:
+                    child.close()
+
+    def test_host_checker_uses_actual_lane_paths(self):
+        data = self.root
+        (data / "lanes.json").write_text(json.dumps({"lanes": [
+            {"name": wt.parent.name, "backend": "codex", "model": "test", "effort": "high",
+             "repo": str(self.repo)} for wt in self.worktrees]}))
+        checker = ROOT.parent / "tools" / "check-codex-sandbox-gitdir.py"
+        result = subprocess.run([sys.executable, str(checker)], capture_output=True, text=True,
+                                env=dict(os.environ, OPENSWARM_HOME=str(data)), timeout=15)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        report = json.loads(result.stdout)
+        self.assertTrue(report["inventory_only"])
+        self.assertEqual(len(report["lanes"]), 2)
+        for wt, lane in zip(self.worktrees, report["lanes"]):
+            self.assertEqual(lane["worktree"], str(wt))
+            self.assertIn(self.git(wt, "rev-parse", "--absolute-git-dir"),
+                          lane["sandboxPolicy"]["writableRoots"])
+            self.assertFalse(lane["verified_commits"])
 
 
 @unittest.skipUnless(hasattr(socket, "AF_UNIX"),
@@ -348,6 +475,45 @@ class LaneTests(unittest.TestCase):
         self.assertTrue(result["commit"])
         self.assertEqual(result["branch"], f"swrm/{run_id}")
         self.assertEqual(self.git("show", f"swrm/{run_id}:lane_result.txt"), "completed")
+
+    def test_codex_two_lanes_allow_writes_to_each_worktree_gitdir(self):
+        """#1832: same-named lane worktrees must grant each actual gitdir to Codex."""
+        worktrees = [self.root / "lanes" / lane / "wt" for lane in ("L1", "L2")]
+        for worktree in worktrees:
+            subprocess.run(["git", "-C", str(self.repo), "worktree", "add", "--detach", "-q",
+                            str(worktree), "HEAD"], check=True, capture_output=True, text=True)
+
+        class RecordingChild:
+            def __init__(self):
+                self.requests = []
+
+            def send(self, request):
+                self.requests.append(request)
+
+            def wait_response(self, request_id, timeout, event_file):
+                if request_id.startswith("thread-"):
+                    return {"thread": {"id": "fake-thread"}}
+                return {"turn": {"id": "fake-turn"}}
+
+        from swrm.tests._load import load
+        swrm = load()
+        pathlib.Path(swrm.DATA, "policy.local.json").write_text(json.dumps(
+            {"codex": {"network_access": False}}))
+        child = RecordingChild()
+        for worktree in worktrees:
+            swrm.lane_begin_turn({"backend": "codex", "model": "fake-model", "effort": "xhigh"},
+                                 child, "test", str(worktree), None, {})
+        turns = [request["params"] for request in child.requests if request.get("method") == "turn/start"]
+        gitdirs = {str(wt): subprocess.run(
+            ["git", "-C", str(wt), "rev-parse", "--absolute-git-dir"],
+            check=True, capture_output=True, text=True).stdout.strip() for wt in worktrees}
+        self.assertEqual(len(set(gitdirs.values())), 2)
+        for worktree, params in zip(worktrees, turns):
+            sandbox = params["sandboxPolicy"]
+            self.assertIsInstance(sandbox, dict)
+            self.assertEqual(sandbox["type"], "workspaceWrite")
+            self.assertIn(gitdirs[str(worktree)], sandbox["writableRoots"])
+            self.assertFalse(sandbox["networkAccess"])
 
     def test_pi_session_leak_is_excluded_even_when_staged(self):
         self.set_config("pi")
