@@ -9011,7 +9011,11 @@ def lane_do_run(lane, spec, child, server, current):
                     break
                 if allow_fallback and error_class == "exec_error" and MODEL_UNAVAILABLE_RE.search(error_tail or ""):
                     error_class = attempts[-1]["error_class"] = "model_unavailable"
-                # #1594: retry transient upstream stream failures with a separate budget.
+                # #1594: retry transient upstream stream failures with a separate budget.  The
+                # upstream stream broke before the answer was complete (a VM pause makes the broker
+                # answer 502).  Such a turn is transient: retry it instead of failing the whole
+                # run.  The stream retries are counted on their own and the run ends as exec_error
+                # once the budget is used up.
                 can_retry = (child.alive() and not spec.get("abort_requested")
                              and NOW() + pi_stream_retry_delay(stream_retries + 1) < deadline)
                 action, error_class, error_tail = pi_stream_retry_decision(
