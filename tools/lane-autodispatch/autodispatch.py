@@ -1447,12 +1447,9 @@ def status_snapshot(lanes, state, res, ready, blocked, records=None):
     status["_stale"] = sum(1 for L in lanes if state.get(L) and "stale_since" in state[L])
     status["_ready"] = ready
     status["_blocked"] = blocked
-<<<<<<< HEAD
     status["_queue_failures"] = int(state.get("_queue_failures", 0) or 0)
     status["_minted"] = int(state.get("_minted", 0) or 0)
-=======
     status["_pauses"] = pause_reasons(lanes, records)  # which switch holds every paused lane (Refs #1592)
->>>>>>> e10376015100591e0fc16b53c94009676407945a
     status["_stale_stripped_n"] = STALE_STRIPPED_N
     status["_stale_search_skips"] = STALE_STRIPPED_N
     status["_stale_lane_failed_skips"] = STALE_LANE_FAILED_N
