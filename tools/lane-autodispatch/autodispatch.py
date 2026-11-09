@@ -1286,10 +1286,15 @@ def review_target_pr(card):
     if not number: number = re.fullmatch(r"[ \t]*([0-9]+)[ \t]*", target[1])
     return number[1] if number else "unknown"
 
-def idle_lane_names(lanes, state, res, scopes):
-    """The lanes that can take a card right now (healthy, not paused and idle)."""
+def idle_lane_names(lanes, state, res, scopes, freed=None):
+    """The lanes that can take a card right now (healthy, not paused and idle).
+
+    A lane that was freed by a finished run in this tick is available even if the remote
+    snapshot still calls it busy (Refs #1688)."""
+    freed = freed or ()
     return [name for name, c in lanes.items() if not state.get(name) and "error" not in res[name]
-            and res[name].get("lane") == "idle" and host_ok(c["host"]) and not lane_paused(name, c, scopes)]
+            and (name in freed or res[name].get("lane") == "idle")
+            and host_ok(c["host"]) and not lane_paused(name, c, scopes)]
 def rank(backend, item):  # own pin first, then unpinned, then cross-pinned; within each by priority, work before verify, number
     return (0 if item["backend"] == backend else 1 if item["backend"] is None else 2, item["prio"], bool(item.get("verify")), item["n"])
 
@@ -1580,11 +1585,8 @@ def status_snapshot(lanes, state, res, ready, blocked, records=None):
     status["_stale"] = sum(1 for L in lanes if state.get(L) and "stale_since" in state[L])
     status["_ready"] = ready
     status["_blocked"] = blocked
-<<<<<<< HEAD
     status["_review_backlog"] = review_backlog(review_lanes(lanes), state)
-=======
     status["_pauses"] = pause_reasons(lanes, records)  # which switch holds every paused lane (Refs #1592)
->>>>>>> 2d6690586c7922c633ca702fab3f67728e9b68fb
     status["_stale_stripped_n"] = STALE_STRIPPED_N
     status["_stale_search_skips"] = STALE_STRIPPED_N
     status["_stale_lane_failed_skips"] = STALE_LANE_FAILED_N
@@ -2259,19 +2261,12 @@ def tick(lanes, state, last_warn):
     queue_failed = False
     queue_error = ""
     base = None
-<<<<<<< HEAD
-    # Choose at admission time: a work dispatch must not strand a review on an
-    # obsolete plan. Waiting cards are counted separately from admitted runs.
-    review_ids = review_lanes(lanes)
-    remaining = list(lanes)
-    while remaining:
-        L = remaining.pop(0)
-        cfg = lanes[L]
-        r = res[L]
-        if "error" in r or not host_ok(cfg["host"]) or state.get(L) or r.get("lane") != "idle" or lane_paused(L, cfg, scopes): continue
-=======
     outcomes = {}
     freed_lanes = set()
+    # The review lanes (CX2/CX4/CX5) take the review cards by their backlog (Refs #1701).
+    # The review is chosen at admission time: a work dispatch must not strand a review
+    # on an obsolete plan. Waiting cards are counted separately from admitted runs.
+    review_ids = review_lanes(lanes)
 
     def tick_queue():
         """Load the shared queue on the first dispatch attempt, after that lane's harvest.
@@ -2316,20 +2311,15 @@ def tick(lanes, state, last_warn):
         if lane_paused(L, cfg, scopes): return "paused"
         if remote_idle and res[L].get("lane") != "idle": return "no-capacity"
         if not tick_queue(): return "no-card"
->>>>>>> 2d6690586c7922c633ca702fab3f67728e9b68fb
+        asked = L  # the lane that was asked for a card (it may hand it to another lane)
         pick = None
         candidates = [i for i in q if i.get("deps_ok", True) and can_take(cfg["backend"], i, L)]
         candidates.sort(key=lambda i: rank(cfg["backend"], i))
+        # A harvested lane is available in this tick even if the remote snapshot still
+        # calls it busy. Keep the same pause/host/cap checks. The list is read in every
+        # tick: the review balancing below needs the lanes that can take a card.
+        idle = idle_lane_names(lanes, state, res, scopes, freed_lanes)
         if AD_VERIFY_SHARE_ENABLED:
-<<<<<<< HEAD
-            idle = idle_lane_names(lanes, state, res, scopes)
-=======
-            # A harvested lane is available in this tick even if the remote
-            # snapshot still calls it busy. Keep the same pause/host/cap checks.
-            idle = [name for name, c in lanes.items() if not state.get(name) and "error" not in res[name]
-                    and (name in freed_lanes or res[name].get("lane") == "idle")
-                    and host_ok(c["host"]) and not lane_paused(name, c, scopes)]
->>>>>>> 2d6690586c7922c633ca702fab3f67728e9b68fb
             verify_slots, work_slots = queue_class_limits(lanes, state, idle)
             metrics = verify_metrics(state)
             metrics["deficit"] = verify_slots
@@ -2358,13 +2348,14 @@ def tick(lanes, state, last_warn):
             # the authoritative read failed: keep the row (it may still be dispatchable),
             # never count it as a stale skip and never dispatch on unverified labels
             log_unverified(c["n"], status, detail, "kept in queue (not dispatched this tick)")
-<<<<<<< HEAD
-        if not pick: continue
+        if not pick: return "no-card"
         if pick.get("verify"):
+            # The review card goes to the review lane with the smallest review backlog:
+            # equal backlogs rotate over the review lanes and a lane that is at its
+            # in-flight cap is skipped - the review waits for a free lane (Refs #1701).
             running = review_running(review_ids, state)
             waiting = [i for i in q if i is not pick and i.get("deps_ok", True) and i.get("verify")]
-            eligible = [lane for lane in [L, *remaining] if lane in review_ids
-                        and lane in idle_lane_names(lanes, state, res, scopes)
+            eligible = [lane for lane in idle if lane in review_ids
                         and can_take(lanes[lane]["backend"], pick, lane)]
             queued = review_waiting_counts(review_ids, waiting, running, head_eligible=eligible)
             # Rank and log the running + waiting forecast, but cap only admitted runs.
@@ -2375,29 +2366,16 @@ def tick(lanes, state, last_warn):
                                              in_flight=running,
                                              pr=review_target_pr(pick),
                                              log=lambda row: log(row, brain=False))
-            if chosen is None: continue
+            if chosen is None: return "no-capacity"
             if chosen != L:
-                remaining.remove(chosen)
-                remaining.insert(0, L)
+                # The review belongs to another review lane: it takes the card, the lane
+                # that was asked keeps its slot free (the next tick tries again).
+                outcomes[chosen] = "dispatched"
                 L, cfg = chosen, lanes[chosen]
-        if base is None:
-            _, out, _ = sh(["git", "ls-remote", BASE_REPO_URL, f"refs/heads/{BASE_BRANCH}"]); base = out.split()[0]
-=======
-        if not pick: return "no-card"
         commit = base_commit()
->>>>>>> 2d6690586c7922c633ca702fab3f67728e9b68fb
         gh(["issue", "edit", str(pick["n"]), "--add-label", "in-progress"])
         try: run, ver = dispatch(L, cfg, pick, commit)
         except Exception as e:
-<<<<<<< HEAD
-            dispatch_failed(L, cfg, pick, e); continue
-        q.remove(pick); state[L] = {"issue": pick["n"], "run": run, "host": cfg["host"], "base": base, "at": time.strftime("%F %T"), "verify": ver, "class": "verify" if pick.get("verify") else "work"}
-        if pick.get("verify"):
-            # the review decision goes to the log with the backlog snapshot of that moment
-            # (the PR, the chosen lane and the load of every review lane) (Refs #1701)
-            backlog = ", ".join(f"{lane}={snapshot[lane]}" for lane in review_ids)
-            log(f"review assignment: PR #{review_target_pr(pick)} → lane {L} (backlog: {backlog})")
-=======
             dispatch_failed(L, cfg, pick, e, busy=bool(LANE_BUSY_RE.search(str(e))))
             return "no-capacity"
         q.remove(pick); state[L] = {"issue": pick["n"], "run": run, "host": cfg["host"], "base": commit, "at": time.strftime("%F %T"), "verify": ver, "class": "verify" if pick.get("verify") else "work"}
@@ -2408,6 +2386,10 @@ def tick(lanes, state, last_warn):
         if pick.get("verify"):
             metrics["dispatches"]["verify"] += 1
             record_verify_time(state, pick["n"], "dispatched", time.time())
+            # the review decision goes to the log with the backlog snapshot of that moment
+            # (the PR, the chosen lane and the load of every review lane) (Refs #1701)
+            backlog = ", ".join(f"{lane}={snapshot[lane]}" for lane in review_ids)
+            log(f"review assignment: PR #{review_target_pr(pick)} → lane {L} (backlog: {backlog})")
         # Stop this lane's gap at its own successful dispatch. Later lanes may take
         # minutes to assign; their work cannot extend an already occupied lane's gap.
         closed = idle_close(state, L, time.time(), last_alive, tick_started_at=now)
@@ -2415,10 +2397,10 @@ def tick(lanes, state, last_warn):
             idle_s, reason = closed
             if idle_s > IDLE_LOG_MIN_S:
                 log(f"{L} idle {idle_s:.0f}s before dispatch (reason: {reason})", brain=True)
->>>>>>> 2d6690586c7922c633ca702fab3f67728e9b68fb
         if AD_VERIFY_SHARE_ENABLED: log(f"queue share: dispatched {state[L]['class']} #{pick['n']} on {L}", brain=False)
         save_state(state); log(f"dispatched #{pick['n']} → {L} ({cfg['host']}) run {run} base {commit[:8]}")
-        return "dispatched"
+        # the lane that was asked keeps its slot free when the card went to another lane
+        return "dispatched" if L == asked else "no-capacity"
 
     # 1) Re-dispatch each freed lane before harvesting the next one (Refs #1688).
     #    Another lane's slow fetch/push/PR creation must not hold up this lane.
