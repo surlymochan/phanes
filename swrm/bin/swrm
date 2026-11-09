@@ -10578,9 +10578,10 @@ def fleet_health_probe(host, hosts, command):
     if rc:
         detail = err.decode("utf-8", errors="replace").strip().splitlines()
         message = f"{command}: command failed (rc={rc})" + (f": {detail[-1]}" if detail else "")
-        # SSH uses 255 for transport errors; host_run uses 124 for transport deadlines.
+        # SSH uses 255 for transport errors; host_run uses 124 for deadlines
+        # and 127 when SSH is unavailable.
         # A local utility timeout does not establish an SSH connection failure.
-        if entry["kind"] != "local" and rc in (124, 255):
+        if entry["kind"] != "local" and rc in (124, 127, 255):
             raise OSError(message)
         raise ValueError(message)
     return out.decode("utf-8", errors="replace")

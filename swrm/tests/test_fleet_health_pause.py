@@ -340,6 +340,19 @@ class FleetHealthPauseTests(unittest.TestCase):
         self.assertTrue(self.scheduler_pauses_host(),
                         "the scheduler would dispatch a lane to the unreachable host")
 
+    def test_missing_ssh_continues_failure_streak_and_pauses(self):
+        self.write_fake(ssh_rc=255)
+        for expected in (1, 2):
+            report = self.health("--apply")
+            self.assertEqual(self.row(report)["metrics"]["ssh_fail_streak"], expected, report)
+        self.write_fake(ssh_rc=127)
+        report = self.health("--apply")
+        row = self.row(report)
+        self.assertEqual(row["metrics"]["ssh_fail_streak"], 3, report)
+        self.assertEqual(row["decision"], "pause", report)
+        self.assertTrue(row["paused"], report)
+        self.assertTrue(self.scheduler_pauses_host())
+
     def test_a_later_transport_failure_preserves_measured_disk_fault(self):
         """A memory SSH failure must not discard the successful disk measurement."""
         self.write_fake(disk_pct=99, mem_rc=255)
