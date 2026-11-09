@@ -213,6 +213,24 @@ class AuditTests(unittest.TestCase):
         self.assertEqual(alert["detail"]["reason"], "write_back")
         self.assertEqual(alert["detail"]["shared"], "commit")
 
+    def test_failed_retry_with_same_commit_is_not_write_back(self):
+        for state in ("failed", "error", "cancelled", "canceled", "timeout", "aborted",
+                      "dead", "unroutable", "dry-run", "dry_run", "budget_rejected", "stopped"):
+            with self.subTest(state=state):
+                result = audit_module.audit([], [
+                    run("run-a", 1795, state="finished", commit="abc123"),
+                    run("run-b", 1795, state=state, commit="abc123"),
+                ], NOW)
+                self.assertEqual(result["alerts"], [])
+
+    def test_duplicate_records_do_not_hide_failed_state(self):
+        records = [run("run-a", 1795, state="finished", commit="abc123"),
+                   run("run-b", 1795, state="finished", commit="abc123"),
+                   run("run-b", 1795, state="failed")]
+        for rows in (records, list(reversed(records))):
+            with self.subTest(rows=rows):
+                self.assertEqual(audit_module.audit([], rows, NOW)["alerts"], [])
+
     def test_the_same_run_holding_two_leases_is_a_renewal_not_a_double_claim(self):
         result = audit_module.audit(
             [lease(1795, "run-a", NOW - 100, lane="M1"),
@@ -378,6 +396,16 @@ class HealthNumberTests(unittest.TestCase):
 
 class DedupeTests(unittest.TestCase):
     """The same anomaly must not be reported twice."""
+
+    def test_reappearing_anomaly_is_a_new_event(self):
+        found = audit_module.audit([lease(1800, "run-c", NOW - 5000)], [], NOW)
+        gone = audit_module.audit([], [], NOW + 1)
+        state = audit_module.apply_round({}, found, NOW)
+        state = audit_module.apply_round(state, gone, NOW + 1)
+        state = audit_module.apply_round(state, found, NOW + 2)
+        self.assertEqual(len(state["new_alerts"]), 1)
+        self.assertEqual(audit_module.window_metrics(state, NOW + 2)["ghost_leases"], 2)
+        self.assertEqual(audit_module.window_metrics(state, NOW + 86401)["ghost_leases"], 1)
 
     def test_the_same_anomaly_is_new_only_once(self):
         leases = [lease(1800, "run-c", NOW - 5000, ttl_s=600.0)]

@@ -112,6 +112,8 @@ TERMINAL_STATES = frozenset({
     "aborted", "dead", "merged",
 })
 
+SUCCESS_STATES = frozenset({"finished", "done", "merged"})
+
 # The keys a lease record may carry for the moment the card asked for the lease.
 REQUEST_KEYS = ("requested_at", "queued_at", "waited_since", "submitted_at")
 
@@ -466,6 +468,9 @@ def audit(leases: Any, runs: Any, now: Any, grace_s: Any = 0.0) -> Dict[str, Any
         for key, value in row.items():
             if merged.get(key) is None or merged.get(key) == "":
                 merged[key] = value
+        if row["state"] in TERMINAL_STATES and (merged["state"] not in TERMINAL_STATES
+                                                  or row["state"] not in SUCCESS_STATES):
+            merged["state"] = row["state"]
         merged["active"] = active
         merged["alive"] = alive
     run_rows = list(by_id.values())
@@ -640,7 +645,7 @@ def _detect_dual_execution(lease_rows: List[Dict[str, Any]], run_rows: List[Dict
     # same lane twice in a row carries the same branch and that is normal.
     by_issue: Dict[str, List[Dict[str, Any]]] = {}
     for row in run_rows:
-        if row["issue"] and row["run_id"] and not row["active"]:
+        if row["issue"] and row["run_id"] and row["state"] in SUCCESS_STATES:
             by_issue.setdefault(row["issue"], []).append(row)
     for issue in sorted(by_issue):
         rows = by_issue[issue]
@@ -767,8 +772,8 @@ def apply_round(state: Any, result: Any, now: Any,
     bad it was at its worst).
 
     A finding that is in the ledger is not new: the caller reports it once.
-    The ledger keeps the findings that are still there, and forgets the ones
-    that are gone once they fell out of the window.
+    Resolved findings remain in the ledger for the rolling window. A finding
+    that reappears is a new event.
     """
     moment = _number(now)
     limit = _number(window_s) or WINDOW_S
@@ -792,6 +797,12 @@ def apply_round(state: Any, result: Any, now: Any,
         entry = ledger.get(fingerprint)
         if isinstance(entry, dict):
             entry = dict(entry)
+            if entry.get("resolved"):
+                entry["events"] = entry.get("events", [entry.get("first_seen")]) + [moment]
+                entry["first_seen"] = moment
+                entry["count"] = 0
+                new_alerts.append(alert)
+            entry["resolved"] = False
             entry["last_seen"] = moment
             entry["count"] = int(entry.get("count") or 0) + 1
             entry["severity"] = alert.get("severity", entry.get("severity"))
@@ -805,6 +816,8 @@ def apply_round(state: Any, result: Any, now: Any,
                 "first_seen": moment,
                 "last_seen": moment,
                 "count": 1,
+                "events": [moment],
+                "resolved": False,
             }
             new_alerts.append(alert)
         ledger[fingerprint] = entry
@@ -816,9 +829,18 @@ def apply_round(state: Any, result: Any, now: Any,
         if fingerprint in seen:
             continue
         entry = ledger.get(fingerprint) or {}
-        first_seen = _number(entry.get("first_seen"))
-        if start is not None and first_seen is not None and first_seen < start:
+        entry = dict(entry)
+        entry["resolved"] = True
+        ledger[fingerprint] = entry
+        last_seen = _number(entry.get("last_seen"))
+        if start is not None and last_seen is not None and last_seen < start:
             ledger.pop(fingerprint, None)
+
+    if start is not None:
+        for entry in ledger.values():
+            if isinstance(entry, dict) and "events" in entry:
+                entry["events"] = [event for event in entry["events"]
+                                   if _number(event) is None or _number(event) >= start]
 
     if moment is not None:
         rounds.append({
@@ -873,8 +895,9 @@ def window_metrics(state: Any, now: Any, window_s: Any = WINDOW_S) -> Dict[str, 
     rounds = [row for row in (state.get("rounds") or []) if isinstance(row, dict)]
     rounds = [row for row in rounds if start is None or (_number(row.get("at")) or 0) >= start]
     ledger = state.get("alerts") if isinstance(state.get("alerts"), dict) else {}
-    fresh = [entry for entry in ledger.values()
-             if isinstance(entry, dict) and (start is None or (_number(entry.get("first_seen")) or 0) >= start)]
+    fresh = [(entry, event) for entry in ledger.values() if isinstance(entry, dict)
+             for event in entry.get("events", [entry.get("first_seen")])
+             if start is None or (_number(event) or 0) >= start]
     waits = [row for row in (state.get("waits") or []) if isinstance(row, dict)]
     waits = [row for row in waits if start is None or (_number(row.get("granted_at")) or 0) >= start]
 
@@ -882,7 +905,7 @@ def window_metrics(state: Any, now: Any, window_s: Any = WINDOW_S) -> Dict[str, 
                if isinstance(row.get("wait_s"), (int, float)) and not isinstance(row.get("wait_s"), bool)]
 
     def count(kind: str) -> int:
-        return sum(1 for entry in fresh if entry.get("kind") == kind)
+        return sum(1 for entry, _ in fresh if entry.get("kind") == kind)
 
     def worst(field: str) -> int:
         values = [int(row.get(field) or 0) for row in rounds]
