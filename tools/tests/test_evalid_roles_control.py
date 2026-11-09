@@ -3,6 +3,7 @@ import importlib.util
 import inspect
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -12,7 +13,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from tools.evalid_roles_control import (LocalEvidence, MockSwrm, NativeEvidence, Rejected, RoleController,
-                                        _tree_snapshot_digest, digest)
+                                        RECORDED_REJECTIONS, UNRECORDED_REJECTIONS, _tree_snapshot_digest, digest)
 
 
 ROOT = Path(__file__).resolve().parent
@@ -349,6 +350,27 @@ class TestEvalidRolesControl(unittest.TestCase):
                 "proof_digest": digest("green proof"), "snapshot_digest": digest("unbound snapshot"),
                 "test_manifest": self.test_manifest})
 
+    def test_every_stage_rejection_is_recorded_in_the_attempt_history(self):
+        # Not one code at a time: any refusal of the awaited stage lands in the history.
+        self._accept_through_red()
+        self._git("checkout", "-q", "--detach", self.green_head)
+        with self.assertRaisesRegex(Rejected, "snapshot_mismatch"):
+            self.controller.accept("offline-demo", "green", {
+                "head_commit": self.green_head, "status": "PASS",
+                "command": [sys.executable, "-m", "unittest", "discover", "-s", "tests"],
+                "proof_digest": digest("green proof"), "snapshot_digest": digest("unbound snapshot"),
+                "test_manifest": self.test_manifest})
+        item = self.controller._attempt_history("offline-demo")[0]
+        self.assertEqual(item["stages"][-1], "green")
+        self.assertEqual((item["terminal"], item["rejection_reason"]), ("REJECTED", "GREEN_REJECTED"))
+        self.controller._validate_attempt_history("offline-demo", [item])
+
+    def test_every_rejection_code_is_classified_as_recorded_or_not(self):
+        source = inspect.getsource(sys.modules[Rejected.__module__])
+        raised = set(re.findall(r'Rejected\("([a-z_]+)"\)', source))
+        self.assertFalse(RECORDED_REJECTIONS & UNRECORDED_REJECTIONS)
+        self.assertEqual(raised, RECORDED_REJECTIONS | UNRECORDED_REJECTIONS)
+
     def test_delivery_rejects_caller_supplied_short_commit_chain(self):
         controller = self._controller(self.root / "control-short-chain")
         controller.freeze_intake("offline-short-chain", issue_ref="issue:demo", base_commit=self.base,
@@ -556,6 +578,248 @@ class TestEvalidRolesControl(unittest.TestCase):
         self.assertNotIn(leak, json.dumps(recovered.accept("offline-demo", "review", review)))
 
 
+class ReviewerHistoryTests(unittest.TestCase):
+    """Canaries for the public, bounded attempt summary supplied to Review."""
+
+    def setUp(self):
+        self.fixture = TestEvalidRolesControl()
+        self.fixture.setUp()
+
+    def tearDown(self):
+        self.fixture.tearDown()
+
+    def _deliver_repair(self, controller):
+        fixture = self.fixture
+        controller.freeze_intake("offline-demo", attempt=1, issue_ref="repair", base_commit=fixture.base,
+            policy_digest=POLICY, public_scope={"allowed_files": ["app.py", "tests/**"]},
+            holdout_required=False)
+        fixture._git("checkout", "-q", "--detach", fixture.red_head)
+        controller.accept("offline-demo", "spec", {"status": "PASS", "spec_digest": digest({"spec": 1})}, attempt=1)
+        controller.accept("offline-demo", "spec-check", {"verdict": "PASS", "blockers": []}, attempt=1)
+        command = [sys.executable, "-m", "unittest", "discover", "-s", "tests"]
+        controller.accept("offline-demo", "red", {"head_commit": fixture.red_head, "command": command,
+            "snapshot_digest": _tree_snapshot_digest(fixture.project, fixture.red_head),
+            "test_manifest": fixture.test_manifest}, attempt=1)
+        fixture._git("checkout", "-q", "--detach", fixture.green_head)
+        controller.accept("offline-demo", "green", {"head_commit": fixture.green_head, "status": "PASS",
+            "command": command, "proof_digest": digest("green proof"),
+            "snapshot_digest": _tree_snapshot_digest(fixture.project, fixture.green_head),
+            "test_manifest": fixture.test_manifest}, attempt=1)
+        receipt = controller.run_holdout("offline-demo", attempt=1)
+        state = controller.state("offline-demo", 1)
+        review = {"reviewed_base": fixture.base, "reviewed_head": fixture.green_head,
+            "commits": fixture._git("rev-list", "--reverse", f"{fixture.base}..{fixture.green_head}").splitlines(),
+            "verdict": "PASS", "findings": [], "holdout_receipt": receipt["digest"],
+            "spec_digest": state["receipts"]["spec"]["spec_digest"],
+            "tdd_digest": state["receipts"]["green"]["evidence_digest"]}
+        controller.accept("offline-demo", "review", review, attempt=1)
+        controller.deliver("offline-demo", review, attempt=1)
+        return controller._review_run.calls[-1]["attempt_history"]
+
+    def test_rejected_spec_survives_restart_in_repair_history(self):
+        fixture = self.fixture
+        controller = fixture.controller
+        with self.assertRaisesRegex(Rejected, "spec_not_accepted"):
+            controller.accept("offline-demo", "spec", {"status": "FAIL", "detail": "secret detail"})
+        controller = fixture._controller(controller.control_dir)
+        history = self._deliver_repair(controller)
+        self.assertEqual((history[0]["terminal"], history[0]["rejection_reason"]),
+                         ("REJECTED", "SPEC_REJECTED"))
+        self.assertNotIn("secret detail", json.dumps(history))
+
+    def test_rejected_specs_preserve_public_stage_and_run_ids_after_restart(self):
+        fixture = self.fixture
+        controller = fixture.controller
+        run_ids = ["failed-spec-run-a", "failed-spec-run-b"]
+        for index, run_id in enumerate(run_ids):
+            controller._swrm.responses["spec"]["run_id"] = run_id
+            with self.subTest(run_id=run_id), self.assertRaisesRegex(Rejected, "spec_not_accepted"):
+                controller.accept("offline-demo", "spec", {
+                    "status": "FAIL", "spec_digest": digest(f"failed spec {index}")})
+
+        recovered = fixture._controller(controller.control_dir)
+        history = self._deliver_repair(recovered)
+        first = history[0]
+        self.assertEqual(first["stages"], ["intake", "spec"])
+        self.assertEqual(first["run_id"], digest(run_ids))
+        self.assertEqual((first["terminal"], first["rejection_reason"]),
+                         ("REJECTED", "SPEC_REJECTED"))
+        public_history = json.dumps(history)
+        for run_id in run_ids:
+            self.assertNotIn(run_id, public_history)
+
+    def test_failed_green_replay_is_preserved_in_repair_history(self):
+        fixture = self.fixture
+        controller = fixture.controller
+        fixture._accept_through_red(controller)
+
+        # This commit is a valid green candidate in scope and descends from
+        # red, but the actual public test suite fails on its snapshot.
+        fixture._git("checkout", "-q", "--detach", fixture.green_head)
+        (fixture.project / "app.py").write_text("def value():\n    return 2\n")
+        fixture._git("add", "app.py")
+        fixture._git("commit", "-qm", "broken implementation")
+        failed_green_head = fixture._git("rev-parse", "HEAD")
+        controller._swrm.responses["green"]["run_id"] = "failed-green-run"
+        command = [sys.executable, "-m", "unittest", "discover", "-s", "tests"]
+        with self.assertRaisesRegex(Rejected, "evidence_replay_failed"):
+            controller.accept("offline-demo", "green", {
+                "head_commit": failed_green_head, "status": "PASS", "command": command,
+                "proof_digest": digest("green proof"),
+                "snapshot_digest": _tree_snapshot_digest(fixture.project, failed_green_head),
+                "test_manifest": fixture.test_manifest})
+
+        recovered = fixture._controller(controller.control_dir)
+        history = self._deliver_repair(recovered)
+        first = history[0]
+        self.assertEqual(first["stages"], ["intake", "spec", "spec-check", "red", "green"])
+        self.assertEqual(first["run_id"], digest([
+            fixture.controller._swrm.responses[stage]["run_id"]
+            for stage in ("spec", "spec-check", "red")
+        ] + ["failed-green-run"]))
+        self.assertEqual((first["terminal"], first["rejection_reason"]),
+                         ("REJECTED", "GREEN_REJECTED"))
+        self.assertNotIn("failed-green-run", json.dumps(history))
+
+    def test_rejected_green_remains_auditable_after_same_attempt_repair_and_restart(self):
+        fixture = self.fixture
+        controller = fixture.controller
+        fixture._accept_through_red(controller)
+
+        # Record an actual failed green replay, then retry the valid green
+        # candidate after controller recovery in the same attempt.
+        fixture._git("checkout", "-q", "--detach", fixture.green_head)
+        (fixture.project / "app.py").write_text("def value():\n    return 2\n")
+        fixture._git("add", "app.py")
+        fixture._git("commit", "-qm", "broken implementation")
+        failed_green_head = fixture._git("rev-parse", "HEAD")
+        controller._swrm.responses["green"]["run_id"] = "failed-green-run"
+        command = [sys.executable, "-m", "unittest", "discover", "-s", "tests"]
+        with self.assertRaisesRegex(Rejected, "evidence_replay_failed"):
+            controller.accept("offline-demo", "green", {
+                "head_commit": failed_green_head, "status": "PASS", "command": command,
+                "proof_digest": digest("green proof"),
+                "snapshot_digest": _tree_snapshot_digest(fixture.project, failed_green_head),
+                "test_manifest": fixture.test_manifest})
+
+        recovered = fixture._controller(controller.control_dir)
+        fixture._git("checkout", "-q", "--detach", fixture.green_head)
+        recovered.accept("offline-demo", "green", {
+            "head_commit": fixture.green_head, "status": "PASS", "command": command,
+            "proof_digest": digest("green proof"),
+            "snapshot_digest": _tree_snapshot_digest(fixture.project, fixture.green_head),
+            "test_manifest": fixture.test_manifest})
+        with patch.object(recovered._evidence, "holdout", return_value={
+                "status": "PASS", "isolation": "verified"}):
+            receipt = recovered.run_holdout("offline-demo")
+        review = fixture._make_review(recovered, receipt)
+        recovered.accept("offline-demo", "review", review)
+        recovered.deliver("offline-demo", review)
+
+        history = recovered._review_run.calls[-1]["attempt_history"]
+        self.assertEqual([(item["attempt"], item["terminal"], item["rejection_reason"])
+                          for item in history], [(0, "PASS", "GREEN_REJECTED")])
+        self.assertNotIn("failed-green-run", json.dumps(history))
+
+    def test_semantic_rejection_survives_restart(self):
+        fixture = self.fixture
+        controller = fixture.controller
+        fixture._accept_through_green()
+        with patch.object(controller._evidence, "holdout", return_value={"status": "PASS", "isolation": "verified"}):
+            _, review = fixture._holdout_and_review()
+        with patch.object(controller._review_run, "review", return_value="FAIL"):
+            with self.assertRaisesRegex(Rejected, "review_run_rejected"):
+                controller.deliver("offline-demo", review)
+        recovered = fixture._controller(controller.control_dir)
+        history = self._deliver_repair(recovered)
+        self.assertEqual((history[0]["terminal"], history[0]["rejection_reason"]),
+                         ("REJECTED", "REVIEW_REJECTED"))
+
+    def test_pass_review_does_not_override_failed_holdout(self):
+        fixture = self.fixture
+        controller = fixture.controller
+        fixture._accept_through_green()
+        with patch.object(controller._evidence, "holdout", return_value={"status": "FAIL", "isolation": "verified"}):
+            _, review = fixture._holdout_and_review()
+        history = self._deliver_repair(controller)
+        self.assertEqual((history[0]["terminal"], history[0]["rejection_reason"]),
+                         ("FAIL", "HOLDOUT_REJECTED"))
+
+    def _assert_holdout_rejection_survives_review(self, status, isolation, delivery_error):
+        fixture = self.fixture
+        controller = fixture.controller
+        fixture._accept_through_green()
+        with patch.object(controller._evidence, "holdout", return_value={
+                "status": status, "isolation": isolation}):
+            _, review = fixture._holdout_and_review()
+        with self.assertRaisesRegex(Rejected, delivery_error):
+            controller.deliver("offline-demo", review)
+
+        recovered = fixture._controller(controller.control_dir)
+        history = self._deliver_repair(recovered)
+        self.assertEqual((history[0]["terminal"], history[0]["rejection_reason"]),
+                         ("FAIL", "HOLDOUT_REJECTED"))
+
+    def test_infra_holdout_rejection_survives_pass_review_and_restart(self):
+        self._assert_holdout_rejection_survives_review("INFRA", "verified", "holdout_failed")
+
+    def test_unisolated_pass_holdout_rejection_survives_pass_review_and_restart(self):
+        self._assert_holdout_rejection_survives_review("PASS", "unisolated", "holdout_isolation")
+
+    def test_reviewer_receives_bounded_ordered_public_attempt_history(self):
+        fixture = self.fixture
+        controller = fixture.controller
+        fixture._accept_through_green()
+        with patch.object(controller._evidence, "holdout", return_value={
+                "status": "PASS", "isolation": "verified"}):
+            _, review = fixture._holdout_and_review()
+        controller.deliver("offline-demo", review)
+
+        context = controller._review_run.calls[-1]
+        history = context["attempt_history"]
+        self.assertLessEqual(len(history), 8)
+        self.assertEqual([item["attempt"] for item in history], sorted(
+            item["attempt"] for item in history))
+        self.assertEqual(history[0]["attempt"], 0)
+        self.assertEqual(history[0]["parent_attempt"], None)
+        self.assertEqual(history[0]["terminal"], "PASS")
+        self.assertIn("run_id", history[0])
+        self.assertIn("rejection_reason", history[0])
+        allowed = {"attempt", "stages", "run_id", "terminal", "parent_attempt", "rejection_reason"}
+        self.assertTrue(all(set(item) <= allowed for item in history))
+        public_text = json.dumps(history)
+        for private in ("PRIVATE_HOLDOUT_CANARY_7f2c9", "test_reserved_boundary_case",
+                        str(fixture.root), "hidden-runner"):
+            self.assertNotIn(private, public_text)
+
+    def test_reviewer_history_rejects_broken_parent_chain(self):
+        # A repair attempt must identify the immediately preceding attempt;
+        # reviewers must not receive a plausible summary of a disconnected chain.
+        controller = self.fixture.controller
+        broken = [{"attempt": 0, "stages": ["intake", "spec"], "run_id": digest("r0"),
+                   "terminal": "REJECTED", "parent_attempt": None,
+                   "rejection_reason": "SPEC_REJECTED"},
+                  {"attempt": 2, "stages": ["intake", "spec"], "run_id": digest("r2"),
+                   "terminal": "PASS", "parent_attempt": 1,
+                   "rejection_reason": None}]
+        with self.assertRaisesRegex(Rejected, "attempt_history_chain"):
+            controller._validate_attempt_history("offline-demo", broken)
+
+    def test_reviewer_history_is_stable_for_same_attempt_log(self):
+        fixture = self.fixture
+        controller = fixture.controller
+        fixture._accept_through_green()
+        with patch.object(controller._evidence, "holdout", return_value={
+                "status": "PASS", "isolation": "verified"}):
+            _, review = fixture._holdout_and_review()
+        controller.deliver("offline-demo", review)
+        first = controller._review_run.calls[-1]["attempt_history"]
+        recovered = fixture._controller(controller.control_dir)
+        context = recovered._review_context("offline-demo", review)
+        self.assertEqual(context["attempt_history"], first)
+
+
+
 class SpecRevisionTests(TestEvalidRolesControl):
     def test_unversioned_initial_spec_cannot_bypass_revision_bindings(self):
         self._spec(declare=False)
@@ -646,6 +910,14 @@ class SpecRevisionTests(TestEvalidRolesControl):
         self.assertEqual(state["receipts"]["spec"]["versioned"], True)
         self.assertEqual(state["receipts"]["spec-check"]["verdict"], "FAIL")
         self.assertEqual(state["next"], "spec")
+
+    def test_recorded_spec_check_fail_is_a_public_rejection(self):
+        self._spec()
+        self._check(verdict="FAIL")
+        history = self.controller._attempt_history("offline-demo")
+        self.assertEqual(history[0]["terminal"], "REJECTED")
+        self.assertEqual(history[0]["rejection_reason"], "SPEC_CHECK_REJECTED")
+        self.controller._validate_attempt_history("offline-demo", history)
 
     def _spec(self, controller=None, version=1, spec_digest=None, parent="auto", declare=True):
         """Submit a Spec receipt, binding the rejection it answers by default."""
