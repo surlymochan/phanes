@@ -1,19 +1,18 @@
-<<<<<<< HEAD
-"""Edge cases for reading swrm result receipts from mixed stdout."""
-=======
-"""CLI edge cases for swrm_finish."""
->>>>>>> 336ded62e7e6d817a75de4d0c4a95e35df0bb4c9
+"""CLI and result receipt edge cases for swrm_finish."""
 
 from __future__ import annotations
 
 import json
-<<<<<<< HEAD
+import subprocess
 import sys
+import tempfile
+import unittest
 from pathlib import Path
 
 import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
+FINISH = ROOT / "harness" / "swrm_finish.py"
 sys.path.insert(0, str(ROOT))
 
 from harness.swrm_finish import extract_result_object  # noqa: E402
@@ -140,15 +139,6 @@ def test_receipt_returns_last_run_result(status):
     stdout = json.dumps({**receipt, "id": "previous-run"}) + "\n" + json.dumps(receipt)
 
     assert extract_result_object(stdout) == receipt
-=======
-import subprocess
-import sys
-import tempfile
-import unittest
-from pathlib import Path
-
-ROOT = Path(__file__).resolve().parents[1]
-FINISH = ROOT / "harness" / "swrm_finish.py"
 
 
 class SwrmFinishEdgeTests(unittest.TestCase):
@@ -201,4 +191,3 @@ class SwrmFinishEdgeTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
->>>>>>> 336ded62e7e6d817a75de4d0c4a95e35df0bb4c9
