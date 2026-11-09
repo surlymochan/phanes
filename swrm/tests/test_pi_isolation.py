@@ -116,7 +116,16 @@ class PiIsolationTests(unittest.TestCase):
                 self.assertIn('Read-only file system', payload['add_error'])
                 self.assertEqual(payload['update_ref'], 128, payload)
                 self.assertIn('refs/swrm-test', payload['ref_error'])
-                self.assertIn('Read-only file system', payload['ref_error'])
+                # Git words the refusal differently across versions and across the two
+                # ways a new ref can be written ("Read-only file system", "unable to
+                # create lock file ...", "unable to create directory for ..."): the
+                # shared Git metadata must stay unwritable in every wording.
+                self.assertTrue(any(word in payload['ref_error'] for word in
+                                    ('Read-only file system', 'read-only', 'unable to create', 'cannot lock')), payload)
+                self.assertEqual(subprocess.run(['git', '-C', str(work), 'show-ref', '--verify',
+                                                 'refs/swrm-test/pi-isolated-probe'],
+                                                capture_output=True, text=True).stdout.strip(), '',
+                                 'the shared Git metadata must not hold the new ref')
             finally:
                 sock.close()
 

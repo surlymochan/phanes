@@ -1199,12 +1199,18 @@ def release_recovered_budget_holds(state, lanes):
     save_state(state)
 
 def budget_failure(info):
-    """Recognize an executor budget death without classifying quota or real failures."""
-    error_class = (info.get("error_class") or "").lower()
+    """Recognize an executor budget death without classifying quota or real failures.
+
+    An explicit `error_class` is authoritative: a run the executor classified as a
+    real failure (or as a quota problem) keeps the ordinary failure flow, whatever
+    its status or its summary text says.  Only a run without an error class is
+    judged by the status and the summary.
+    """
+    error_class = str(info.get("error_class") or "").strip().lower()
     if error_class: return error_class == "budget_exceeded"
-    if (info.get("status") or "").lower() == "budget_exceeded": return True
+    if str(info.get("status") or "").strip().lower() == "budget_exceeded": return True
     return bool(re.search(r"\b(?:budget_exceeded|token plan.{0,40}(?:limit|quota)|budget window exhausted)\b",
-                          info.get("summary") or "", re.I))
+                          str(info.get("summary") or ""), re.I))
 
 def terminal_budget_failure(n, lane, cfg, st, info, state, tries):
     """Schedule the terminal label on the next tick; retain the durable count meanwhile."""
