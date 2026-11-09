@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import locale
 import os
 import platform
 import shutil
@@ -121,29 +122,31 @@ def copy_repo(src: Path, dest: Path) -> None:
 
 def run_shell(command: str, cwd: Path, timeout: int) -> dict:
     started = time.monotonic()
+    proc = subprocess.Popen(
+        command,
+        cwd=cwd,
+        shell=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        stdin=subprocess.DEVNULL,
+        start_new_session=True,
+    )
     try:
-        proc = subprocess.run(
-            command,
-            cwd=cwd,
-            shell=True,
-            text=True,
-            capture_output=True,
-            timeout=timeout,
-            stdin=subprocess.DEVNULL,
-        )
+        stdout, stderr = proc.communicate(timeout=timeout)
         timed_out = False
         code = proc.returncode
-        stdout = proc.stdout
-        stderr = proc.stderr
-    except subprocess.TimeoutExpired as exc:
+    except subprocess.TimeoutExpired:
         timed_out = True
         code = 124
-        stdout = exc.stdout or ""
-        stderr = exc.stderr or ""
-        if isinstance(stdout, bytes):
-            stdout = stdout.decode("utf-8", "replace")
-        if isinstance(stderr, bytes):
-            stderr = stderr.decode("utf-8", "replace")
+        kill_process_group(proc.pid)
+        stdout, stderr = proc.communicate()
+    if timed_out:
+        stdout = stdout.decode("utf-8", "replace")
+        stderr = stderr.decode("utf-8", "replace")
+    else:
+        encoding = locale.getpreferredencoding(False)
+        stdout = stdout.decode(encoding).replace("\r\n", "\n").replace("\r", "\n")
+        stderr = stderr.decode(encoding).replace("\r\n", "\n").replace("\r", "\n")
     return {
         "command": command,
         "exit_code": code,
