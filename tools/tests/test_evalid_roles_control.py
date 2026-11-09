@@ -556,5 +556,336 @@ class TestEvalidRolesControl(unittest.TestCase):
         self.assertNotIn(leak, json.dumps(recovered.accept("offline-demo", "review", review)))
 
 
+class SpecRevisionTests(TestEvalidRolesControl):
+    def test_unversioned_initial_spec_cannot_bypass_revision_bindings(self):
+        self._spec(declare=False)
+        rejected = self._check(verdict="FAIL", bind=False)
+        with self.assertRaises(Rejected):
+            self._spec(version=2, declare=False, parent=None)
+        with self.assertRaises(Rejected):
+            self._spec(version=2, parent=None)
+        self._spec(version=2, parent=rejected["evidence_digest"])
+        with self.assertRaises(Rejected):
+            self._check(bind=False)
+
+    def test_concurrent_stale_check_cannot_advance_new_spec(self):
+        self._spec(version=1)
+        other = self._controller()
+        append = self.controller._append
+
+        def race(event):
+            self._check(other, verdict="FAIL")
+            self._spec(other, version=2)
+            return append(event)
+
+        with patch.object(self.controller, "_append", side_effect=race):
+            with self.assertRaises(Rejected):
+                self._check(verdict="PASS")
+        state = self._controller().state("offline-demo")
+        self.assertEqual(state["spec_version"], 2)
+        self.assertEqual(state["next"], "spec-check")
+        self.assertEqual(state["receipts"]["spec-check"]["verdict"], "FAIL")
+
+    def test_replayed_check_from_earlier_version_is_rejected_after_digest_repeats(self):
+        first_digest = digest({"spec": "shared"})
+        second_digest = digest({"spec": "revised"})
+        self._spec(version=1, spec_digest=first_digest)
+        first_check = {"verdict": "FAIL", "blockers": ["first rejection"],
+                       "spec_digest": first_digest, "spec_version": 1}
+        self.controller.accept("offline-demo", "spec-check", first_check)
+
+        self._spec(version=2, spec_digest=second_digest)
+        self._check(verdict="FAIL", blockers=["second rejection"])
+        self._spec(version=3, spec_digest=first_digest)
+
+        with self.assertRaises(Rejected):
+            self.controller.accept("offline-demo", "spec-check", first_check)
+
+        state = self.controller.state("offline-demo")
+        self.assertEqual(state["spec_version"], 3)
+        self.assertEqual(state["receipts"]["spec"]["spec_digest"], first_digest)
+        self.assertEqual(state["next"], "spec-check")
+        self.assertEqual(len(state["rejections"]), 2)
+
+    def test_concurrent_stale_versioned_initial_spec_is_rejected(self):
+        other = self._controller()
+        spec_digest = digest({"spec": "shared"})
+        append = self.controller._append
+
+        def race(event):
+            self._spec(other, spec_digest=spec_digest, declare=False)
+            self._check(other, verdict="FAIL", bind=False)
+            return append(event)
+
+        with patch.object(self.controller, "_append", side_effect=race):
+            with self.assertRaises(Rejected):
+                self._spec(version=1, spec_digest=spec_digest)
+
+        state = self._controller().state("offline-demo")
+        self.assertEqual(state["spec_version"], 1)
+        self.assertEqual(state["receipts"]["spec"]["versioned"], False)
+        self.assertEqual(state["receipts"]["spec-check"]["verdict"], "FAIL")
+        self.assertEqual(state["next"], "spec")
+
+    def test_concurrent_stale_unversioned_initial_spec_is_rejected(self):
+        other = self._controller()
+        spec_digest = digest({"spec": "shared"})
+        append = self.controller._append
+
+        def race(event):
+            self._spec(other, version=1, spec_digest=spec_digest)
+            self._check(other, verdict="FAIL")
+            return append(event)
+
+        with patch.object(self.controller, "_append", side_effect=race):
+            with self.assertRaises(Rejected):
+                self._spec(declare=False, spec_digest=spec_digest)
+
+        state = self._controller().state("offline-demo")
+        self.assertEqual(state["spec_version"], 1)
+        self.assertEqual(state["receipts"]["spec"]["versioned"], True)
+        self.assertEqual(state["receipts"]["spec-check"]["verdict"], "FAIL")
+        self.assertEqual(state["next"], "spec")
+
+    def _spec(self, controller=None, version=1, spec_digest=None, parent="auto", declare=True):
+        """Submit a Spec receipt, binding the rejection it answers by default."""
+        controller = controller or self.controller
+        state = controller.state("offline-demo")
+        evidence = {"status": "PASS", "spec_digest": spec_digest or digest({"spec": version})}
+        if declare:
+            evidence["spec_version"] = version
+        if parent == "auto":
+            rejections = state.get("rejections") or []
+            if rejections:
+                evidence["parent_receipt"] = rejections[-1]["receipt_digest"]
+        elif parent is not None:
+            evidence["parent_receipt"] = parent
+        return controller.accept("offline-demo", "spec", evidence)
+
+    def _check(self, controller=None, verdict="PASS", blockers=None, spec_digest=None,
+               spec_version=None, bind=True):
+        """Submit a spec-check receipt bound to the current Spec revision."""
+        controller = controller or self.controller
+        state = controller.state("offline-demo")
+        evidence = {"verdict": verdict, "blockers": blockers or []}
+        if bind and state["receipts"].get("spec", {}).get("versioned"):
+            evidence["spec_digest"] = spec_digest or state["receipts"]["spec"]["spec_digest"]
+            evidence["spec_version"] = (spec_version if spec_version is not None
+                                         else state["spec_version"])
+        return controller.accept("offline-demo", "spec-check", evidence)
+
+    def test_failed_spec_check_is_preserved_and_allows_revision(self):
+        first_spec = {"status": "PASS", "spec_digest": digest({"spec": 1})}
+        self.controller.accept("offline-demo", "spec", first_spec)
+
+        rejected_spec = {"verdict": "FAIL", "blockers": []}
+        failed_receipt = self.controller.accept("offline-demo", "spec-check", rejected_spec)
+        state = self.controller.state("offline-demo")
+        self.assertEqual(failed_receipt["verdict"], "FAIL")
+        self.assertEqual(state["next"], "spec")
+        self.assertEqual(state["receipts"]["spec-check"]["verdict"], "FAIL")
+
+        revised_spec = {"status": "PASS", "spec_digest": digest({"spec": 2}),
+                        "spec_version": 2, "parent_receipt": failed_receipt["evidence_digest"]}
+        self.controller.accept("offline-demo", "spec", revised_spec)
+        self.controller.accept("offline-demo", "spec-check", {"verdict": "PASS", "blockers": [],
+            "spec_digest": revised_spec["spec_digest"], "spec_version": 2})
+        state = self.controller.state("offline-demo")
+        self.assertEqual(state["receipts"]["spec"]["spec_digest"], revised_spec["spec_digest"])
+        self.assertEqual(state["receipts"]["spec-check"]["verdict"], "PASS")
+        self.assertEqual([event["data"]["verdict"] for event in self.controller._events
+                          if event["stage"] == "spec-check"], ["FAIL", "PASS"])
+
+    def test_two_bounded_revisions_advance_to_red(self):
+        self._spec(version=1)
+        self._check(verdict="FAIL", blockers=["exit code missing"])
+        self._spec(version=2)
+        self._check(verdict="FAIL", blockers=["acceptance command absent"])
+        self._spec(version=3)
+        self._check(verdict="PASS")
+        state = self.controller.state("offline-demo")
+        self.assertEqual(state["next"], "red")
+        self.assertEqual((state["spec_version"], state["spec_revisions"]), (3, 2))
+        self.assertEqual(state["receipts"]["spec"]["spec_version"], 3)
+        self.assertEqual(state["receipts"]["spec-check"]["verdict"], "PASS")
+        self.assertEqual([item["verdict"] for item in state["rejections"]], ["FAIL", "FAIL"])
+        self.assertEqual([item["spec_version"] for item in state["rejections"]], [1, 2])
+
+    def test_revised_spec_still_reaches_delivery(self):
+        self._spec(version=1)
+        self._check(verdict="FAIL", blockers=["exit code missing"])
+        revised = self._spec(version=2)
+        self._check(verdict="PASS")
+        self._git("checkout", "-q", "--detach", self.red_head)
+        self.controller.accept("offline-demo", "red", {
+            "head_commit": self.red_head,
+            "command": [sys.executable, "-m", "unittest", "discover", "-s", "tests"],
+            "snapshot_digest": _tree_snapshot_digest(self.project, self.red_head),
+            "test_manifest": self.test_manifest})
+        self._git("checkout", "-q", "--detach", self.green_head)
+        self.controller.accept("offline-demo", "green", {
+            "head_commit": self.green_head, "status": "PASS",
+            "command": [sys.executable, "-m", "unittest", "discover", "-s", "tests"],
+            "proof_digest": digest("green proof"),
+            "snapshot_digest": _tree_snapshot_digest(self.project, self.green_head),
+            "test_manifest": self.test_manifest})
+        receipt = self.controller.run_holdout("offline-demo")
+        review = self._make_review(self.controller, receipt)
+        self.controller.accept("offline-demo", "review", review)
+        state = self.controller.state("offline-demo")
+        self.assertEqual(state["receipts"]["spec"]["spec_digest"], revised["spec_digest"])
+        self.assertEqual(state["receipts"]["review"]["spec_digest"], revised["spec_digest"])
+        self.assertEqual(len(state["rejections"]), 1)
+        # The offline seam cannot prove isolation, so delivery stays refused.
+        with self.assertRaisesRegex(Rejected, "holdout_isolation"):
+            self.controller.deliver("offline-demo", review)
+
+    def test_third_failure_enters_needs_boss_without_touching_the_spec(self):
+        self._spec(version=1)
+        self._check(verdict="FAIL", blockers=["exit code missing"])
+        self._spec(version=2)
+        self._check(verdict="FAIL", blockers=["acceptance command absent"])
+        self._spec(version=3)
+        self._check(verdict="FAIL", blockers=["scenario not executable"])
+        state = self.controller.state("offline-demo")
+        self.assertEqual(state["status"], "NEEDS-BOSS")
+        self.assertEqual(state["next"], "needs-boss")
+        self.assertEqual(state["receipts"]["spec"]["spec_version"], 3)
+        self.assertEqual(state["receipts"]["spec-check"]["verdict"], "FAIL")
+        self.assertEqual(len(state["rejections"]), 3)
+        with self.assertRaisesRegex(Rejected, "spec_revision_limit"):
+            self._spec(version=4)
+        with self.assertRaisesRegex(Rejected, "spec_revision_limit"):
+            self._check(verdict="PASS")
+        with self.assertRaisesRegex(Rejected, "controller_order"):
+            self.controller.accept("offline-demo", "red", {"head_commit": self.red_head})
+        state = self.controller.state("offline-demo")
+        self.assertEqual(state["next"], "needs-boss")
+        self.assertEqual(state["receipts"]["spec"]["spec_version"], 3)
+
+    def test_revision_must_change_version_and_digest(self):
+        self._spec(version=1)
+        self._check(verdict="FAIL", blockers=["exit code missing"])
+        current = self.controller.state("offline-demo")["receipts"]["spec"]["spec_digest"]
+        with self.assertRaisesRegex(Rejected, "spec_not_revised"):
+            self._spec(version=2, spec_digest=current)
+        with self.assertRaisesRegex(Rejected, "spec_version_mismatch"):
+            self._spec(version=1)
+        with self.assertRaisesRegex(Rejected, "spec_version_missing"):
+            self._spec(version=2, declare=False)
+        with self.assertRaisesRegex(Rejected, "spec_version_invalid"):
+            self._spec(version="two")
+        state = self.controller.state("offline-demo")
+        self.assertEqual(state["receipts"]["spec"]["spec_digest"], current)
+        self.assertEqual(state["next"], "spec")
+
+    def test_legacy_revision_must_change_the_digest(self):
+        self._spec(version=1, declare=False)
+        self._check(verdict="FAIL", blockers=["exit code missing"], bind=False)
+        current = self.controller.state("offline-demo")["receipts"]["spec"]["spec_digest"]
+        with self.assertRaisesRegex(Rejected, "spec_not_revised"):
+            self._spec(version=2, spec_digest=current)
+        state = self.controller.state("offline-demo")
+        self.assertEqual(state["receipts"]["spec"]["spec_digest"], current)
+        self.assertEqual(state["next"], "spec")
+
+    def test_revision_must_bind_the_rejected_receipt(self):
+        self._spec(version=1)
+        rejected = self._check(verdict="FAIL", blockers=["exit code missing"])
+        with self.assertRaisesRegex(Rejected, "missing_parent_receipt"):
+            self._spec(version=2, parent=None)
+        with self.assertRaisesRegex(Rejected, "parent_receipt_mismatch"):
+            self._spec(version=2, parent=digest({"foreign": True}))
+        accepted = self._spec(version=2, parent=rejected["evidence_digest"])
+        self.assertEqual(accepted["parent_receipt"], rejected["evidence_digest"])
+        self.assertEqual(self.controller.state("offline-demo")["next"], "spec-check")
+
+    def test_stale_spec_check_receipt_cannot_advance_the_revision(self):
+        first = self._spec(version=1)
+        self._check(verdict="FAIL", blockers=["exit code missing"])
+        self._spec(version=2)
+        with self.assertRaisesRegex(Rejected, "spec_check_parent_mismatch"):
+            self._check(verdict="PASS", spec_digest=first["spec_digest"], spec_version=1)
+        with self.assertRaisesRegex(Rejected, "spec_check_parent_mismatch"):
+            self._check(verdict="PASS", spec_version=1)
+        with self.assertRaisesRegex(Rejected, "spec_check_parent_missing"):
+            self._check(verdict="PASS", bind=False)
+        state = self.controller.state("offline-demo")
+        self.assertEqual(state["next"], "spec-check")
+        self.assertEqual(state["receipts"]["spec-check"]["verdict"], "FAIL")
+
+    def test_replayed_rejection_from_an_earlier_round_is_rejected(self):
+        self._spec(version=1, declare=False)
+        self._check(verdict="FAIL", blockers=["exit code missing"], bind=False)
+        events = [json.loads(line) for line in self.controller._log.read_text().splitlines()]
+        check_event = next(event for event in events if event["stage"] == "spec-check")
+        check_event["data"].pop("parent_spec_digest", None)
+        check_event["data"].pop("spec_version", None)
+        self.controller._log.write_text("".join(
+            json.dumps(event, sort_keys=True, separators=(",", ":")) + "\n"
+            for event in events))
+        self._spec(version=2)
+        with self.assertRaisesRegex(Rejected, "stale_spec_check_receipt"):
+            self._check(verdict="FAIL", blockers=["exit code missing"], bind=False)
+        state = self.controller.state("offline-demo")
+        self.assertEqual(len(state["rejections"]), 1)
+        self.assertEqual(state["next"], "spec-check")
+
+    def test_replayed_rejection_receipt_is_idempotent(self):
+        self._spec(version=1)
+        rejected = self._check(verdict="FAIL", blockers=["exit code missing"])
+        again = self._check(verdict="FAIL", blockers=["exit code missing"])
+        state = self.controller.state("offline-demo")
+        self.assertEqual(rejected, again)
+        self.assertEqual(len(state["rejections"]), 1)
+        self.assertEqual(len([event for event in self.controller._events
+                              if event["stage"] == "spec-check"]), 1)
+        self.assertEqual(state["next"], "spec")
+
+    def test_legacy_spec_check_receipt_remains_idempotent_after_upgrade(self):
+        self._spec(version=1, declare=False)
+        evidence = {"verdict": "PASS", "blockers": []}
+        self._check(verdict="PASS", bind=False)
+
+        # Baseline receipts did not store revision metadata on Spec checks.
+        events = [json.loads(line) for line in self.controller._log.read_text().splitlines()]
+        spec_event = next(event for event in events if event["stage"] == "spec")
+        check_event = next(event for event in events if event["stage"] == "spec-check")
+        spec_event["data"].pop("spec_version", None)
+        spec_event["data"].pop("versioned", None)
+        check_event["data"].pop("parent_spec_digest", None)
+        check_event["data"].pop("spec_version", None)
+        self.controller._log.write_text("".join(
+            json.dumps(event, sort_keys=True, separators=(",", ":")) + "\n"
+            for event in events))
+
+        recovered = self._controller()
+        event_count = len(recovered._events)
+        retried = recovered.accept("offline-demo", "spec-check", evidence)
+        self.assertEqual(retried["verdict"], "PASS")
+        self.assertEqual(retried["evidence_digest"], check_event["data"]["evidence_digest"])
+        self.assertEqual(recovered.state("offline-demo")["next"], "red")
+        self.assertEqual(len(recovered._events), event_count)
+
+    def test_rejected_evidence_survives_recovery(self):
+        self._spec(version=1)
+        rejected = self._check(verdict="FAIL", blockers=["exit code missing"])
+        recovered = self._controller()
+        state = recovered.state("offline-demo")
+        self.assertEqual(state["next"], "spec")
+        self.assertEqual(len(state["rejections"]), 1)
+        self.assertEqual(state["rejections"][0]["receipt_digest"], rejected["evidence_digest"])
+        self.assertEqual(state["rejections"][0]["spec_version"], 1)
+        public = recovered.public_state("offline-demo")
+        self.assertEqual(public["rejections"][0]["verdict"], "FAIL")
+        self.assertEqual(public["rejections"][0]["blocker_count"], 1)
+        self.assertNotIn("exit code missing", json.dumps(public))
+        # The recovered controller still accepts the bounded revision.
+        recovered.accept("offline-demo", "spec", {"status": "PASS",
+            "spec_digest": digest({"spec": 2}), "spec_version": 2,
+            "parent_receipt": rejected["evidence_digest"]})
+        self.assertEqual(recovered.state("offline-demo")["next"], "spec-check")
+
+
 if __name__ == "__main__":
     unittest.main()

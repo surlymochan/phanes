@@ -1,5 +1,7 @@
 import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
-import { resolve } from 'node:path';
+import { dirname, isAbsolute, resolve } from 'node:path';
+
+const PHASE_SEPARATOR = /[\\/]/;
 
 function nowIso() {
   return new Date().toISOString();
@@ -7,6 +9,16 @@ function nowIso() {
 
 export function resolvePendingGatesDir(projectRoot = process.cwd()) {
   return resolve(projectRoot, '.as-xflow', 'pending-gates');
+}
+
+export function assertSafePhase(phase) {
+  if (typeof phase !== 'string' || phase.trim() === '') {
+    throw new Error('Pending gate phase must be a non-empty string');
+  }
+  if (phase.includes('\0') || phase === '.' || phase === '..' || PHASE_SEPARATOR.test(phase) || isAbsolute(phase)) {
+    throw new Error(`Invalid pending gate phase: ${JSON.stringify(phase)}`);
+  }
+  return phase;
 }
 
 function readGateFile(filePath) {
@@ -35,7 +47,12 @@ export function listPendingGates(projectRoot = process.cwd()) {
 }
 
 export function ackPendingGate(projectRoot = process.cwd(), phase, options = {}) {
-  const gateFile = resolve(resolvePendingGatesDir(projectRoot), `${phase}.json`);
+  const gatesDir = resolvePendingGatesDir(projectRoot);
+  assertSafePhase(phase);
+  const gateFile = resolve(gatesDir, `${phase}.json`);
+  if (dirname(gateFile) !== gatesDir) {
+    throw new Error(`Invalid pending gate phase: ${JSON.stringify(phase)}`);
+  }
   if (!existsSync(gateFile)) {
     throw new Error(`Pending gate not found: ${gateFile}`);
   }

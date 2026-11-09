@@ -162,6 +162,7 @@ def main(argv: list[str]) -> int:
         print("usage: swrm_finish.py <stdout> <events-dir> <workdir>", file=sys.stderr)
         return 2
     stdout_path, events, workdir = Path(argv[1]), Path(argv[2]), Path(argv[3])
+    events.mkdir(parents=True, exist_ok=True)
     text = stdout_path.read_text(encoding="utf-8", errors="replace") if stdout_path.is_file() else ""
     result = extract_result_object(text)
     if result is None:
