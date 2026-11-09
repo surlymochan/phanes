@@ -231,8 +231,8 @@ def run_once(options):
     state = decide(used_pct, options.block_pct, options.recover_pct,
                    was_blocked=bool(previous.get("blocked")))
     if state in ("recovered", "warn"):
-        released = release_marker(marker) if state == "recovered" else False
         write_state(state_file, host, state, False, usage)
+        released = release_marker(marker) if state == "recovered" else False
         if previous.get("state") != state or released:
             brain_row(options.brain_log, host=host, state=state,
                       used_pct=used_pct, used_bytes=usage["used_bytes"],
