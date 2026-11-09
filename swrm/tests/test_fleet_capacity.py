@@ -21,7 +21,7 @@ xs = _load.load()
 
 class FleetCapacityTests(unittest.TestCase):
     def setUp(self):
-        self.temp = tempfile.TemporaryDirectory()
+        self.temp = tempfile.TemporaryDirectory(dir=HERE)
         self.addCleanup(self.temp.cleanup)
         self.env = dict(os.environ, OPENSWARM_FLEET_CAPACITY_DIR=self.temp.name)
         # Model coordinator-owned, authenticated kernel reads separately from
@@ -38,6 +38,12 @@ class FleetCapacityTests(unittest.TestCase):
         self.probe_config.write_text(json.dumps(probes))
 
     def call(self, authenticated_host, **payload):
+        if payload.get('op') == 'status':
+            deadline = time.monotonic() + 5
+            while list(pathlib.Path(self.temp.name).glob('runs/*/fleet-release-pending.json')):
+                if time.monotonic() >= deadline:
+                    self.fail('release worker did not drain its queue')
+                time.sleep(0.02)
         if payload.get('op') == 'acquire':
             payload.setdefault('boot_id', BOOT)
         argv = [str(BIN), authenticated_host]
@@ -79,8 +85,9 @@ class FleetCapacityTests(unittest.TestCase):
         os.environ['OPENSWARM_FLEET_GUARD_CONFIG'] = str(config)
         try:
             rdir = pathlib.Path(self.temp.name, 'runs', 'blocked')
-            ok = xs.reserve_provider_slot(str(rdir), 'codex', None, {'concurrency': {'total': 1}},
-                                          keep_waiting=lambda: False)
+            with mock.patch.object(xs, 'start_fleet_release_worker'):
+                ok = xs.reserve_provider_slot(str(rdir), 'codex', None, {'concurrency': {'total': 1}},
+                                              keep_waiting=lambda: False)
             self.assertFalse(ok)
             status = json.loads((rdir / 'status.json').read_text())
             self.assertEqual(status['state'], 'queued')
@@ -88,6 +95,29 @@ class FleetCapacityTests(unittest.TestCase):
         finally:
             if old is None: os.environ.pop('OPENSWARM_FLEET_GUARD_CONFIG', None)
             else: os.environ['OPENSWARM_FLEET_GUARD_CONFIG'] = old
+
+    def test_acquire_gives_up_after_three_slow_coordinator_responses(self):
+        rdir = pathlib.Path(self.temp.name, 'runs', 'slow-coordinator')
+
+        def bounded_backoff(_seconds):
+            if bounded_backoff.calls >= 2:
+                raise AssertionError('acquire kept retrying after three coordinator failures')
+            bounded_backoff.calls += 1
+
+        bounded_backoff.calls = 0
+        with mock.patch.object(xs, 'fleet_guard_command', return_value=['guard']), \
+                mock.patch.object(xs, 'fleet_guard_call', side_effect=RuntimeError('coordinator timeout')) as call, \
+                mock.patch.object(xs.time, 'sleep', side_effect=bounded_backoff):
+            admitted = xs.reserve_provider_slot(str(rdir), 'codex', None, {'concurrency': {'total': 1}},
+                                                keep_waiting=lambda: True)
+
+        self.assertFalse(admitted)
+        self.assertEqual(call.call_count, 3)
+        status = json.loads((rdir / 'status.json').read_text())
+        self.assertEqual(status['state'], 'queued')
+        self.assertEqual(status['queue_reason'], 'capacity-unreachable')
+        self.assertTrue(status['capacity_unreachable'])
+        self.assertIn('coordinator timeout', status['fleet_reservation_error'])
 
     def test_required_missing_configuration_fails_closed(self):
         with mock.patch.dict(os.environ, {'OPENSWARM_FLEET_GUARD_REQUIRED': '1',
@@ -98,22 +128,28 @@ class FleetCapacityTests(unittest.TestCase):
     def test_release_retries_transient_connection_failure(self):
         rdir = os.path.realpath(os.path.join(self.temp.name, 'run'))
         xs._FLEET_RESERVATIONS[rdir] = (['guard'], {'run_id': 'run', 'token': 'a' * 32})
-        self.addCleanup(xs._FLEET_RESERVATIONS.pop, rdir, None)
         with mock.patch.object(xs, 'fleet_guard_call', side_effect=[RuntimeError('unavailable'), {'ok': True}]) as call, \
-                mock.patch.object(xs.time, 'sleep'):
-            self.assertTrue(xs.release_fleet_slot(rdir))
+                mock.patch.object(xs, 'start_fleet_release_worker') as worker:
+            self.assertFalse(xs.release_fleet_slot(rdir))
+            call.assert_not_called()
+            worker.assert_called_once_with(rdir)
+            self.assertFalse(xs.retry_fleet_release(rdir))
+            self.assertTrue(xs.retry_fleet_release(rdir))
         self.assertEqual(call.call_count, 2)
         self.assertNotIn(rdir, xs._FLEET_RESERVATIONS)
+        self.assertFalse(pathlib.Path(rdir, 'fleet-release-pending.json').exists())
 
     def test_release_retains_reservation_after_repeated_failure(self):
         rdir = os.path.realpath(os.path.join(self.temp.name, 'run'))
         xs._FLEET_RESERVATIONS[rdir] = (['guard'], {'run_id': 'run', 'token': 'a' * 32})
-        self.addCleanup(xs._FLEET_RESERVATIONS.pop, rdir, None)
         with mock.patch.object(xs, 'fleet_guard_call', side_effect=RuntimeError('unavailable')) as call, \
-                mock.patch.object(xs.time, 'sleep'), mock.patch.object(xs, 'set_status'):
+                mock.patch.object(xs, 'start_fleet_release_worker'):
             self.assertFalse(xs.release_fleet_slot(rdir))
+            for _ in range(3):
+                self.assertFalse(xs.retry_fleet_release(rdir))
         self.assertEqual(call.call_count, 3)
-        self.assertIn(rdir, xs._FLEET_RESERVATIONS)
+        pending = pathlib.Path(rdir, 'fleet-release-pending.json')
+        self.assertEqual(json.loads(pending.read_text())['payload']['token'], 'a' * 32)
 
     def test_supervisor_renews_owned_fleet_lease(self):
         stop = mock.Mock()
@@ -524,9 +560,11 @@ class FleetCapacityTests(unittest.TestCase):
     def test_cancel_during_admission_releases_without_starting(self):
         rdir = os.path.join(self.temp.name, 'runs', 'cancelled')
         with mock.patch.object(xs, 'fleet_guard_command', return_value=['guard']), \
+             mock.patch.object(xs, 'start_fleet_release_worker'), \
              mock.patch.object(xs, 'fleet_guard_call', side_effect=[{'admitted': True}, {'released': True}]) as call:
             self.assertFalse(xs.reserve_provider_slot(rdir, 'codex', None, {'concurrency': {'total': 2}},
                                                       keep_waiting=lambda: False))
+            self.assertTrue(xs.retry_fleet_release(rdir))
             self.assertEqual([c.args[1]['op'] for c in call.call_args_list], ['acquire', 'release'])
             self.assertNotIn(os.path.realpath(rdir), xs._FLEET_RESERVATIONS)
 
