@@ -172,6 +172,21 @@ class DispatchPriorityTest(unittest.TestCase):
             returned = AUTODISPATCH.queue(state)
         self.assertEqual(returned[0]["pool_entered_at"], self.NOW + 7200)
 
+    def test_dependency_block_resets_pool_clock(self):
+        issue = {"number": 1, "title": "small", "body": "Depends on: #2\n预算：30", "labels": ["lane-ready"]}
+        state = {"_pool_entered_at": {"1": self.NOW - 7200}}
+        with patch.object(AUTODISPATCH, "gh", return_value=(0, json.dumps([issue]), "")), \
+                patch.object(AUTODISPATCH, "deps_met", return_value=False), \
+                patch.object(AUTODISPATCH.time, "time", return_value=self.NOW):
+            blocked = AUTODISPATCH.queue(state)
+        self.assertFalse(blocked[0]["deps_ok"])
+        self.assertEqual(state["_pool_entered_at"], {})
+        with patch.object(AUTODISPATCH, "gh", return_value=(0, json.dumps([issue]), "")), \
+                patch.object(AUTODISPATCH, "deps_met", return_value=True), \
+                patch.object(AUTODISPATCH.time, "time", return_value=self.NOW + 7200):
+            ready = AUTODISPATCH.queue(state)
+        self.assertEqual(ready[0]["pool_entered_at"], self.NOW + 7200)
+
     def test_full_pool_read_keeps_waiting_cards_beyond_first_page(self):
         large = {"number": 1705, "title": "waiting large", "body": "预算：90",
                  "labels": ["lane-ready"]}

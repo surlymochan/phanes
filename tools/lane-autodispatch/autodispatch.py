@@ -1158,7 +1158,6 @@ def queue(state=None):
         limit *= 2
     state = {} if state is None else state
     entered_at = state.get("_pool_entered_at", {})
-    now = time.time()
     items = []
     for i in issues:
         labels = label_names(i)
@@ -1176,13 +1175,16 @@ def queue(state=None):
             valid, missing = verify_requirements(body)
             if not valid:
                 log_verify_rejected(i["number"], missing); continue
-        entered = timestamp(entered_at.get(str(i["number"])))
-        if entered is None: entered = now
         match = re.search(r"(?im)(?:budget(?:[_ -]minutes)?|预算)\s*[:：]\s*(\d+(?:\.\d+)?)", body)
         budget = float(match.group(1)) if match else float(BUDGET)
-        items.append({"n": i["number"], "title": i["title"], "body": body, "labels": sorted(labels), "prio": pr, "backend": be, "strict": "strict-backend" in labels, "verify": verify,
-                      "queued": to_epoch(i.get("createdAt")), "created_at": i.get("createdAt"), "pool_entered_at": entered, "budget_minutes": budget})
-    state["_pool_entered_at"] = {str(item["n"]): item["pool_entered_at"] for item in items}
+        item = {"n": i["number"], "title": i["title"], "body": body, "labels": sorted(labels), "prio": pr, "backend": be, "strict": "strict-backend" in labels, "verify": verify,
+                "queued": to_epoch(i.get("createdAt")), "created_at": i.get("createdAt"), "budget_minutes": budget}
+        item["deps_ok"] = deps_met(item)
+        if item["deps_ok"]:
+            entered = timestamp(entered_at.get(str(i["number"])))
+            item["pool_entered_at"] = time.time() if entered is None else entered
+        items.append(item)
+    state["_pool_entered_at"] = {str(item["n"]): item["pool_entered_at"] for item in items if item["deps_ok"]}
     return sorted(items, key=lambda x: (x["prio"], x["n"]))
 
 VERIFY_HEADING_RE = re.compile(r"(?mi)^##[^\S\r\n]*Verify[^\S\r\n]*Intent[^\S\r\n]*$")
@@ -2205,7 +2207,8 @@ def tick(lanes, state, last_warn):
             log(f"queue error: {e}", brain=False)
             return False
         save_state(state)  # admission clocks survive --once and failures later in the tick
-        for i in q: i["deps_ok"] = deps_met(i)
+        for i in q:
+            if "deps_ok" not in i: i["deps_ok"] = deps_met(i)
         metrics = verify_metrics(state)
         for item in q:
             if item.get("verify"):
@@ -2348,7 +2351,7 @@ def tick(lanes, state, last_warn):
         idle_account(state, L, window, now, outcomes.get(L, "no-capacity"), last_alive)
     # stale search rows are not dispatchable: drop them (and log the skip) before counting
     q = freshen_queue(q, state)
-    state["_pool_entered_at"] = {str(item["n"]): item["pool_entered_at"] for item in q}
+    state["_pool_entered_at"] = {str(item["n"]): item["pool_entered_at"] for item in q if item.get("deps_ok", True) and "pool_entered_at" in item}
     blocked = sum(not i["deps_ok"] for i in q)
     ready = len(q) - blocked
     # refill when the queue is short, or when some backend's lanes could not all be fed (counting cross-pin fallback)
