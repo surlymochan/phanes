@@ -921,6 +921,59 @@ def acceptance_evidence(verify_rc, report, summary, tests):
     if reported and reported.lower() not in ("none", "null"): return f"lane reported tests: `{reported[:200]}`"
     return ""
 
+def review_evidence_errors(evidence):
+    """Validate the versioned raw package, never deriving facts from lane opinions."""
+    if not isinstance(evidence, dict): return ["review evidence package missing or not an object"]
+    if type(evidence.get("version")) is not int or evidence["version"] != 1:
+        return ["unsupported review evidence version"]
+    errors = []
+    for section, fields in (("ci", ("conclusion", "workflow", "url")), ("tests", ("summary",))):
+        value = evidence.get(section)
+        if not isinstance(value, dict):
+            errors.append(f"review evidence missing {section}")
+            continue
+        for field in fields:
+            if not isinstance(value.get(field), str) or not value[field].strip():
+                errors.append(f"review evidence missing {section}.{field}")
+    diff = evidence.get("diff")
+    if not isinstance(diff, dict): errors.append("review evidence missing diff")
+    else:
+        for field in ("files", "insertions", "deletions"):
+            if type(diff.get(field)) is not int or diff[field] < 0:
+                errors.append(f"review evidence invalid diff.{field}")
+    acceptance = evidence.get("acceptance")
+    if not isinstance(acceptance, list) or not acceptance:
+        errors.append("review evidence missing acceptance checklist")
+    else:
+        for item in acceptance:
+            if (not isinstance(item, dict) or not isinstance(item.get("text"), str)
+                    or not item["text"].strip() or type(item.get("ok")) is not bool):
+                errors.append("review evidence invalid acceptance item")
+    return errors
+
+
+def review_evidence_body(evidence, summary):
+    """Keep raw fields in fixed sections and the opinion in a separate quoted block.
+
+    JSON escaping preserves multiline raw values without letting them create new
+    Markdown headings. Words in logs and check results remain raw evidence; only
+    the executor summary belongs to the lane opinion block.
+    """
+    def raw(value):
+        return json.dumps(value, ensure_ascii=False).replace("<", "\\u003c").replace("`", "\\u0060")
+
+    parts = ["## CI\n" + raw(evidence["ci"]),
+             "## 测试日志摘要\n" + raw(evidence["tests"]),
+             "## diff 统计\n" + raw(evidence["diff"]),
+             "验收：原始核查清单\n" + "\n".join(
+                 f"- [{'x' if item['ok'] else ' '}] {raw(item['text'])}"
+                 for item in evidence["acceptance"])]
+    if summary:
+        parts.append("## Lane 意见（参考、不算判定）\n" + "\n".join(
+            "> " + line for line in str(summary).splitlines()))
+    return parts
+
+
 def lane_pr_content(issue, lane, cfg, st, info, subject, message, summary, tests, verify_rc):
     """Build the lane PR title and body from the lane's own artifacts.
 
@@ -933,8 +986,13 @@ def lane_pr_content(issue, lane, cfg, st, info, subject, message, summary, tests
     parts = []
     # the closing reference comes from the lane's own text only: the title carries the issue
     # number by rule, and a number in the title is not a closing instruction (Refs #1704)
-    closing = closing_reference(issue, f"{report}\n{summary or ''}")
+    closing = closing_reference(issue, report if st.get("class") == "verify" else f"{report}\n{summary or ''}")
     if closing: parts.append(closing)
+    if st.get("class") == "verify":
+        package = info.get("evidence")
+        if not review_evidence_errors(package):
+            parts.extend(review_evidence_body(package, summary))
+        return title, "\n\n".join(parts)
     evidence = acceptance_evidence(verify_rc, report, summary, tests)
     if evidence: parts.append(f"验收：{evidence}")
     verify_note = f", host verify rc `{verify_rc}`" if verify_rc is not None else ""
@@ -1063,6 +1121,7 @@ if R:
       "backend":r.get("backend"),"model":r.get("model"),"error_class":r.get("error_class"),"summary":(str(res.get("summary") or "") if isinstance(res,dict) else str(res or ""))[:1200],
       "tests":(str(res.get("tests") or "") if isinstance(res,dict) else "")[:400],
       "verify_rc":(r.get("verify") or {}).get("rc") if isinstance(r.get("verify"),dict) else None,
+      "evidence":r.get("evidence"),
       "ended_at":ended}
   else:
     out["run"]="running"
@@ -1082,6 +1141,7 @@ def remote(lane, cfg, run=""):
     try: return json.loads(out.strip().splitlines()[-1])
     except Exception: return {"error": out[-200:]}
 
+<<<<<<< HEAD
 def queue(state=None):
     """Track admission clocks in tick's persisted state, keyed by JSON issue numbers.
 
@@ -1100,6 +1160,11 @@ def queue(state=None):
     state = {} if state is None else state
     entered_at = state.get("_pool_entered_at", {})
     now = time.time()
+=======
+def queue():
+    rc, out, err = gh(["issue", "list", "--state", "open", "--label", "lane-ready", "--limit", "100", "--json", "number,title,labels,body,createdAt"])
+    if rc: raise RuntimeError(err)
+>>>>>>> e10376015100591e0fc16b53c94009676407945a
     items = []
     for i in issues:
         labels = label_names(i)
@@ -1117,6 +1182,7 @@ def queue(state=None):
             valid, missing = verify_requirements(body)
             if not valid:
                 log_verify_rejected(i["number"], missing); continue
+<<<<<<< HEAD
         entered = timestamp(entered_at.get(str(i["number"])))
         if entered is None: entered = now
         match = re.search(r"(?im)(?:budget(?:[_ -]minutes)?|预算)\s*[:：]\s*(\d+(?:\.\d+)?)", body)
@@ -1124,6 +1190,9 @@ def queue(state=None):
         items.append({"n": i["number"], "title": i["title"], "body": body, "labels": sorted(labels), "prio": pr, "backend": be, "strict": "strict-backend" in labels, "verify": verify,
                       "created_at": i.get("createdAt"), "pool_entered_at": entered, "budget_minutes": budget})
     state["_pool_entered_at"] = {str(item["n"]): item["pool_entered_at"] for item in items}
+=======
+        items.append({"n": i["number"], "title": i["title"], "body": body, "labels": sorted(labels), "prio": pr, "backend": be, "strict": "strict-backend" in labels, "verify": verify, "queued": to_epoch(i.get("createdAt"))})
+>>>>>>> e10376015100591e0fc16b53c94009676407945a
     return sorted(items, key=lambda x: (x["prio"], x["n"]))
 
 VERIFY_HEADING_RE = re.compile(r"(?mi)^##[^\S\r\n]*Verify[^\S\r\n]*Intent[^\S\r\n]*$")
@@ -1176,6 +1245,58 @@ def queue_class_limits(lanes, state, idle):
     verify_busy = sum(1 for L in active if (state.get(L) or {}).get("class") == "verify")
     work_busy = sum(1 for L in active if state.get(L) and (state[L].get("class") != "verify"))
     return max(0, reserve - verify_busy), max(0, total - reserve - work_busy)
+
+VERIFY_METRICS_KEY = "_verify_metrics"
+VERIFY_HISTOGRAM_BUCKETS = (60, 300, 900, 1800, 3600)
+
+def verify_metrics(state):
+    """Persistent measurements for verify cards and their dispatch-share window."""
+    metrics = state.setdefault(VERIFY_METRICS_KEY, {"cards": {}, "dispatches": {"verify": 0, "all": 0},
+                                                     "work_cap_hits": 0})
+    metrics.setdefault("cards", {})
+    metrics.setdefault("dispatches", {}).setdefault("verify", 0)
+    metrics.setdefault("dispatches", {}).setdefault("all", 0)
+    metrics.setdefault("work_cap_hits", 0)
+    return metrics
+
+def verify_record(state, issue):
+    return verify_metrics(state)["cards"].get(str(issue))
+
+def record_verify_time(state, issue, point, at=None):
+    record = verify_record(state, issue)
+    if record is not None:
+        record.setdefault(point, time.time() if at is None else at)
+
+def verify_histogram(state, point):
+    """Histogram durations from queued to dispatched or verdict."""
+    counts = {}
+    edges = (0,) + VERIFY_HISTOGRAM_BUCKETS
+    for low, high in zip(edges, edges[1:]): counts[f"{low}-{high}"] = 0
+    counts[f"{VERIFY_HISTOGRAM_BUCKETS[-1]}+"] = 0
+    for record in verify_metrics(state)["cards"].values():
+        end = record.get(point)
+        start = record.get("queued")
+        if end is None or start is None: continue
+        duration = max(0.0, float(end) - float(start))
+        bucket = next((f"{low}-{high}" for low, high in zip(edges, edges[1:])
+                       if low <= duration < high), f"{VERIFY_HISTOGRAM_BUCKETS[-1]}+")
+        counts[bucket] += 1
+    return {key: value for key, value in counts.items() if value}
+
+def observe_verify_verdicts(state):
+    """Poll tracked cards, including harvested cards no longer represented by a lane."""
+    metrics = verify_metrics(state)
+    for issue, record in metrics["cards"].items():
+        if record.get("verdict") is not None: continue
+        try:
+            rc, output, _ = gh(["issue", "view", str(issue), "--json", "state,labels"])
+            if rc: continue
+            card = json.loads(output)
+            labels = label_names(card)
+            if card.get("state") == "CLOSED" or any(label == "verdict" or label.startswith("verdict:") for label in labels):
+                record["verdict"] = time.time()
+        except (OSError, ValueError, TypeError):
+            continue
 
 def age_s(st):
     try: return time.time() - time.mktime(time.strptime(st["at"], "%Y-%m-%d %H:%M:%S"))
@@ -1413,6 +1534,13 @@ def status_snapshot(lanes, state, res, ready, blocked, records=None):
     status["_idle_open_s"] = idle_open_s    # the gap the idle lanes are in right now
     status["_idle_worst_s"] = max(idle_open_s.values(), default=0.0)
     status["_at"] = time.strftime("%F %T")
+    metrics = verify_metrics(state)
+    status["_verify_wait_histogram"] = verify_histogram(state, "dispatched")
+    status["_verify_cycle_histogram"] = verify_histogram(state, "verdict")
+    status["_verify_deficit"] = metrics.get("deficit", 0)
+    dispatches = metrics["dispatches"]
+    status["_verify_share"] = (dispatches["verify"] / dispatches["all"] if dispatches["all"] else 0.0)
+    status["_work_cap_hits"] = metrics["work_cap_hits"]
     return status
 
 def classify_dispatch_fetch_error(error):
@@ -1804,6 +1932,10 @@ def finish(lane, cfg, st, info, state):
     "missing": [...]}. `done` means the lane slot is free again; `error` carries the
     explicit reason back to the caller (Refs #1704)."""
     n, run = st["issue"], st["run"]
+    if st.get("class") == "verify":
+        missing = review_evidence_errors(info.get("evidence"))
+        if missing:
+            return block_pr_validation(lane, cfg, st, info, state, "", "", missing)
     if info.get("branch") and info["branch"] != "None" and info.get("commit"):
         b = f"fleet/{lane}-issue{n}-{run}"
         fetch = git_fetch_command(ssh_opts(cfg["host"]), LOCAL, f"{cfg['host']}:{info['repo']}", info["branch"], lane)
@@ -1826,6 +1958,7 @@ def finish(lane, cfg, st, info, state):
         if rc: return {"done": False, "status": "push-failed", "error": f"push failed: {err.strip()[-200:]}", "missing": []}
         _, lj, _ = gh(["issue", "view", str(n), "--json", "labels"])
         if "lane-pr" in lj:
+            record_verify_time(state, n, "evidence_ready")
             gh(["issue", "comment", str(n), "--body", f"Lane {lane} also finished this issue (run `{run}`, duplicate dispatch); branch `{b}` pushed for comparison, no second PR opened."])
             log(f"{lane} finished #{n} (run {run}) duplicate → branch {b}, no PR"); mark_done(state, n)
             return {"done": True, "status": "duplicate", "error": None, "missing": []}
@@ -1833,6 +1966,11 @@ def finish(lane, cfg, st, info, state):
         _, msg, _ = sh(["git", "-C", LOCAL, "log", "-1", "--format=%B", head])
         title, body = lane_pr_content(n, lane, cfg, st, info, subj, msg, info.get("summary"), info.get("tests"), info.get("verify_rc"))
         missing = validate_lane_pr(n, title, body)
+        # A quoted opinion (or a raw log) may contain closing keywords, but it
+        # cannot supply the commit's missing issue linkage.
+        if st.get("class") == "verify" and not closing_reference(n, msg):
+            problem = f"PR 正文缺少 Closes/Fixes/Resolves #{n}"
+            if problem not in missing: missing.append(problem)
         mode = pr_validation_mode()
         if missing and mode == PR_VALIDATION_STRICT:
             return block_pr_validation(lane, cfg, st, info, state, title, body, missing)
@@ -1841,6 +1979,7 @@ def finish(lane, cfg, st, info, state):
         rc, out, err = gh(["pr", "create", "--base", "main", "--head", b, "--title", title, "--body", body])
         url = (out.strip().splitlines() or [""])[-1] if not rc else f"(pr create failed: {err.strip()[-160:]})"
         gh(["issue", "edit", str(n), "--remove-label", "in-progress", "--remove-label", "lane-ready", "--add-label", "lane-pr"])
+        record_verify_time(state, n, "evidence_ready")
         log(f"{lane} finished #{n} (run {run}, {info.get('status')}) → {url}"); mark_done(state, n)
         return {"done": True, "status": "pr-created", "error": None, "missing": []}
     else:
@@ -2077,8 +2216,19 @@ def tick(lanes, state, last_warn):
             return False
         save_state(state)  # admission clocks survive --once and failures later in the tick
         for i in q: i["deps_ok"] = deps_met(i)
+<<<<<<< HEAD
         # Dispatch reads labels in score order before freshen_queue uses the remaining
         # read budget. Prefetching by issue number can starve a high-scoring old card.
+=======
+        metrics = verify_metrics(state)
+        for item in q:
+            if item.get("verify"):
+                # Use the order time, including time spent waiting while AD was stopped.
+                queued = item.get("queued")
+                metrics["cards"].setdefault(str(item["n"]), {"issue": item["n"], "queued": now if queued is None else queued})
+        # one authoritative read per issue per tick, shared by all dispatches and the count
+        prefetch_labels([i["n"] for i in q])
+>>>>>>> e10376015100591e0fc16b53c94009676407945a
         return True
 
     def base_commit():
@@ -2110,12 +2260,15 @@ def tick(lanes, state, last_warn):
                     and (name in freed_lanes or res[name].get("lane") == "idle")
                     and host_ok(c["host"]) and not lane_paused(name, c, scopes)]
             verify_slots, work_slots = queue_class_limits(lanes, state, idle)
+            metrics = verify_metrics(state)
+            metrics["deficit"] = verify_slots
             # The work class may hold at most `total - reserve` lanes: with no work slot left it takes
             # no further lane, the work cards in flight keep the lanes they hold (Refs #1864). The cap
             # is a limit, not a preference: a waiting work card is not dispatched on any lane.
             if not work_slots:
                 waiting = [i for i in candidates if not i.get("verify")]
                 if waiting:
+                    metrics["work_cap_hits"] += 1
                     log(f"queue share: {L} work class at its cap (work slots=0, verify deficit={verify_slots}); "
                         f"{len(waiting)} work card(s) wait", brain=False)
                 candidates = [i for i in candidates if i.get("verify")]
@@ -2142,7 +2295,17 @@ def tick(lanes, state, last_warn):
             dispatch_failed(L, cfg, pick, e, busy=bool(LANE_BUSY_RE.search(str(e))))
             return "no-capacity"
         q.remove(pick); state[L] = {"issue": pick["n"], "run": run, "host": cfg["host"], "base": commit, "at": time.strftime("%F %T"), "verify": ver, "class": "verify" if pick.get("verify") else "work"}
+<<<<<<< HEAD
         state["_pool_entered_at"].pop(str(pick["n"]), None)
+=======
+        metrics = verify_metrics(state)
+        # The snapshot and saved state must reflect the slot just occupied.
+        if AD_VERIFY_SHARE_ENABLED: metrics["deficit"] = queue_class_limits(lanes, state, idle)[0]
+        metrics["dispatches"]["all"] += 1
+        if pick.get("verify"):
+            metrics["dispatches"]["verify"] += 1
+            record_verify_time(state, pick["n"], "dispatched", time.time())
+>>>>>>> e10376015100591e0fc16b53c94009676407945a
         # Stop this lane's gap at its own successful dispatch. Later lanes may take
         # minutes to assign; their work cannot extend an already occupied lane's gap.
         closed = idle_close(state, L, time.time(), last_alive, tick_started_at=now)
@@ -2221,6 +2384,7 @@ def tick(lanes, state, last_warn):
             elif time.time() - last_warn > 600:
                 log(f"WARNING queue low: {ready} dispatchable lane-ready issue(s) left (+{blocked} waiting on 依赖), backlog/ empty (threshold {LOW})"); last_warn = time.time()
     state["_tick_at"] = now
+    observe_verify_verdicts(state)
     save_state(state)
     st = status_snapshot(lanes, state, res, ready, blocked, records)
     with open(f"{D}/lanes-status.json", "w") as stream:

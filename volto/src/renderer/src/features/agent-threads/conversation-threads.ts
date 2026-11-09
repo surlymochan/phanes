@@ -57,6 +57,8 @@ export function conversationThreads(input: ConversationThreadsInput): Conversati
       onDelete: editable ? (id) => void tabs.remove(agentId, id) : undefined,
     },
     open,
+    /** Every goal of the agent: the open ones first, then the newest closed ones. */
+    goals: list,
     limit: snapshot?.limit ?? 1,
     running: list.filter(isAgentTaskActive).length,
     conversation: open ? tasks.conversation(open.id) : undefined,

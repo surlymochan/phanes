@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import math
 from typing import Iterable, Iterator
 
 
@@ -118,6 +119,8 @@ def sum_calls(calls: Iterable[dict]) -> dict:
 
 
 def quantile(values: list[float], p: float) -> float | None:
+    if not math.isfinite(p) or p < 0 or p > 1:
+        raise ValueError("p must be a finite probability between 0 and 1")
     if not values:
         return None
     ordered = sorted(values)
