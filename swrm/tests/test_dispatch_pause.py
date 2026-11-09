@@ -47,6 +47,13 @@ class PauseStoreTests(unittest.TestCase):
         self.store.resume("host:worker@health")
         self.assertFalse(self.store.is_paused(host="worker", now=100000))
 
+    def test_is_paused_defaults_now_to_current_time(self):
+        with mock.patch.object(pause.time, "time", return_value=1000):
+            self.store.pause("host:worker", ttl_s=30, now=990)
+            self.assertTrue(self.store.is_paused(host="worker"))
+        with mock.patch.object(pause.time, "time", return_value=1021):
+            self.assertFalse(self.store.is_paused(host="worker"))
+
     def test_mint_does_not_pause_dispatch_but_all_does(self):
         self.store.pause("mint", now=10)
         self.assertFalse(self.store.is_paused(host="worker", now=10))

@@ -9,6 +9,7 @@ import math
 import os
 import re
 import tempfile
+import time
 from pathlib import Path
 from urllib.parse import quote
 
@@ -118,6 +119,8 @@ class PauseStore:
 
     def is_paused(self, lane=None, host=None, backend=None, now=None):
         """Whether an active exact or independently owned scope holds this target."""
+        if now is None:
+            now = time.time()
         scopes = {record["scope"] for record in self.active(now)}
         if "all" in scopes:
             return True
