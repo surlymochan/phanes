@@ -1,10 +1,10 @@
-"""Offline regression tests for the govpn2 disk watermark guard (Refs #1666).
+"""Offline regression tests for the <host> disk watermark guard (Refs #1666).
 
-#1666 asks for a disk usage probe and a watermark guard around the govpn2 lane
+#1666 asks for a disk usage probe and a watermark guard around the <host> lane
 host; the reviews added four further requirements:
 
-* the guard measures the *remote* govpn2 filesystem, not the filesystem of the
-  control plane box (the box and govpn2 have very different watermarks);
+* the guard measures the *remote* <host> filesystem, not the filesystem of the
+  control plane box (the box and <host> have very different watermarks);
 * a failed probe is handled and is never reported as a healthy host;
 * the dispatch gate stays closed from the block threshold until the recovery
   threshold is reached, the guard restores its own marker when another sweep
@@ -43,7 +43,7 @@ START_EXAMPLE = TOOLS / "lane-autodispatch" / "start-control-plane.example"
 CTL_BOOT = ROOT / "docs" / "ctl-boot.md"
 AUTODISPATCH = TOOLS / "lane-autodispatch" / "autodispatch.py"
 
-HOST = "govpn2"
+HOST = "<host>"
 # The guard owns a separate namespace; health/operator markers remain shared.
 PAUSE_MARKER = f".disk-watermark/PAUSE-HOST-{HOST}"
 
@@ -282,7 +282,7 @@ class DiskUsageProbeTests(unittest.TestCase):
 
 
 class GuardRemoteMeasurementTests(unittest.TestCase):
-    """The guard measures the remote govpn2 filesystem, not the control plane."""
+    """The guard measures the remote <host> filesystem, not the control plane."""
 
     def test_guard_measures_the_remote_host_and_pauses_it(self):
         with scratch() as tmp:
@@ -302,7 +302,7 @@ class GuardRemoteMeasurementTests(unittest.TestCase):
                             f"stdout={done.stdout!r} stderr={done.stderr!r}")
 
     def test_a_healthy_remote_host_is_not_paused(self):
-        # The control plane box and govpn2 have different watermarks: the remote
+        # The control plane box and <host> have different watermarks: the remote
         # host reports 50% while the box may be nearly full, and the guard must
         # follow the remote number.
         with scratch() as tmp:
@@ -432,7 +432,7 @@ class GuardHysteresisTests(unittest.TestCase):
 
 
 class DispatchGateTests(unittest.TestCase):
-    """The dispatcher must not hand out govpn2 while the guard blocks it."""
+    """The dispatcher must not hand out <host> while the guard blocks it."""
 
     def test_the_dispatcher_holds_govpn2_while_the_guard_blocks_it(self):
         with scratch() as tmp, control_plane_home(tmp):
@@ -450,9 +450,9 @@ class DispatchGateTests(unittest.TestCase):
             self.assertEqual(done.returncode, 0, done.stderr)
             dispatcher = load_autodispatch()
             self.assertIn(f"host:{HOST}", dispatcher.paused_scopes(),
-                          "the dispatcher must see the pause of govpn2")
+                          "the dispatcher must see the pause of <host>")
             self.assertTrue(dispatcher.lane_paused("CX2", {"host": HOST}),
-                            "the dispatcher must hold govpn2 while the disk watermark guard "
+                            "the dispatcher must hold <host> while the disk watermark guard "
                             f"blocks it (stdout={done.stdout!r})")
 
             fake.set_df(DF_RECOVERED)

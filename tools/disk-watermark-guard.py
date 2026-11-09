@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-"""govpn2 disk watermark guard: measure the remote lane host and pause it (Refs #1666).
+"""<host> disk watermark guard: measure the remote lane host and pause it (Refs #1666).
 
-The lane host `govpn2` runs the CX2/CX4 review lanes; when its disk fills up
+The lane host `<host>` runs the CX2/CX4 review lanes; when its disk fills up
 the reviews stall.  The guard is the resident loop of the box control plane:
 
 * it measures the **remote** filesystem of the lane host over ssh (the box and
-  govpn2 have very different disks, so the local disk says nothing about the
+  <host> have very different disks, so the local disk says nothing about the
   lane host);
 * above the block threshold it pauses the host through its independent state
   gate and writes an alert row into the brain log;
@@ -25,8 +25,8 @@ pair must always be installed together (`tools/install-disk-watermark-guard.sh`)
 Usage:
 
     python3 tools/disk-watermark-guard.py --pause-dir ~/phanes-ctl/autodispatch \
-        --brain-log /workspace/phanes/brain/log.md --host govpn2
-    python3 tools/disk-watermark-guard.py --loop --host govpn2
+        --brain-log /workspace/phanes/brain/log.md --host <host>
+    python3 tools/disk-watermark-guard.py --loop --host <host>
 """
 
 from __future__ import annotations
@@ -43,7 +43,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 GUARD_VERSION = 2
-DEFAULT_HOST = "govpn2"
+DEFAULT_HOST = "<host>"
 BLOCK_PCT = 95          # at or above this usage the lane host is paused
 RECOVER_PCT = 87        # at or below this usage the guard releases its own pause
 INTERVAL = 300          # seconds between two measurements of the resident loop

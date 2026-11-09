@@ -108,7 +108,7 @@ The `start-control-plane` suite manages the five core resident loops (五件套:
    - **Status / alert snapshot**: `~/phanes-ctl/autodispatch/health.json`, `health.alert`
 
 6. **`disk-watermark`** (remote lane host disk watermark guard, Refs #1666):
-   - **Startup command**: `~/phanes-ctl/bin/disk-watermark-guard.py --loop --pause-dir ~/phanes-ctl/autodispatch --brain-log /workspace/phanes/brain/log.md --host govpn2`
+   - **Startup command**: `~/phanes-ctl/bin/disk-watermark-guard.py --loop --pause-dir ~/phanes-ctl/autodispatch --brain-log /workspace/phanes/brain/log.md --host <host>`
      (installed by `bash tools/install-disk-watermark-guard.sh`)
    - **Heartbeat path**: none; the guard writes its state into `~/phanes-ctl/autodispatch/disk-watermark-<host>.json`
    - **Status / alert snapshot**: `~/phanes-ctl/autodispatch/disk-watermark-<host>.json`, `/workspace/phanes/brain/log.md`
@@ -612,9 +612,9 @@ python3 tools/check-health-hosts-ok-pause.py
 
 ## Lane host disk watermark guard (Refs #1666)
 
-`govpn2` runs the CX2/CX4 review lanes; a full disk there stalls the reviews.  The
+`<host>` runs the CX2/CX4 review lanes; a full disk there stalls the reviews.  The
 guard is a resident loop of the box control plane that measures the **remote**
-filesystem of the lane host over ssh (the box and `govpn2` have very different
+filesystem of the lane host over ssh (the box and `<host>` have very different
 disks, so the local disk says nothing about the lane host) and holds the lanes of
 that host while the disk is too full.
 
@@ -690,7 +690,7 @@ Review fixes and evidence:
   heartbeat, an unknown restart entry preserving the old process, and a start
   script that fails to restart the dispatcher returning an installation error.
 - B1: blocked state has no TTL; the real dispatch tick test removes the marker
-  and ages the state past 30 minutes, then verifies that govpn2 gets no run.
+  and ages the state past 30 minutes, then verifies that <host> gets no run.
 - B2: the probe scans all depths by default; a deep 1 MiB payload must be counted
   and rank above a shallow 64 KiB directory.
 - B3: the installer, startup example and guard default use the dispatcher brain
@@ -700,7 +700,7 @@ Manual one-shots:
 
 ```bash
 python3 ~/phanes-ctl/bin/disk-watermark-guard.py --pause-dir ~/phanes-ctl/autodispatch \
-    --brain-log /workspace/phanes/brain/log.md --host govpn2      # measure once and apply the policy
+    --brain-log /workspace/phanes/brain/log.md --host <host>      # measure once and apply the policy
 python3 ~/phanes-ctl/bin/disk-usage-probe.py --path / --top 10   # the usage probe of a host
 ```
 
@@ -768,7 +768,7 @@ summary keeps the temporary file's default `0600` permissions.
 
 Rules of the probe:
 
-- a host without systemd (the macOS box `gocc`) is **skipped** - not degraded, and it is
+- a host without systemd (the macOS box `<host>`) is **skipped** - not degraded, and it is
   not sampled at all;
 - a failed sample (ssh error, missing `systemctl show`) is recorded as **not collected**
   (`"level": "uncollected"`) and never alerts;
@@ -794,13 +794,13 @@ health loop is not rewritten by the probe:
 ```json
 {
   "at": "2026-11-03 19:15:00",
-  "hosts": {"gores1.example.invalid": "degraded"},
+  "hosts": {"<host>.example.invalid": "degraded"},
   "hosts_ok": ["m9.example.invalid"],
-  "hosts_degraded": ["gores1.example.invalid"],
+  "hosts_degraded": ["<host>.example.invalid"],
   "executor_tasks": {
-    "gores1.example.invalid": {
+    "<host>.example.invalid": {
       "status": "collected",
-      "host": "gores1.example.invalid",
+      "host": "<host>.example.invalid",
       "at": "2026-11-03 19:15:00",
       "services": [
         {
@@ -823,7 +823,7 @@ health loop is not rewritten by the probe:
         "run_ids": ["20261103-214705-b66c3f"],
         "groups": [
           {
-            "command": "/usr/bin/fleet-capacity --sweep-loop gocc",
+            "command": "/usr/bin/fleet-capacity --sweep-loop <host>",
             "count": 3,
             "limit": 2,
             "pids": [627900, 627901, 627902],
@@ -840,7 +840,7 @@ health loop is not rewritten by the probe:
 The matching alert line (appended to `health.alert`, one line per alerting service):
 
 ```
-2026-11-03 19:15:00 level=hard source=executor-tasks host=gores1.example.invalid service=openswarm-executor-M19.service zombies=844 tasks=869/1552 ratio=0.56 parents=1210977 snapshot=/home/phanes-ctl/autodispatch/executor-task-snapshots/executor-tasks-gores1.example.invalid-20261103-191500-000000.ps
+2026-11-03 19:15:00 level=hard source=executor-tasks host=<host>.example.invalid service=openswarm-executor-M19.service zombies=844 tasks=869/1552 ratio=0.56 parents=1210977 snapshot=/home/phanes-ctl/autodispatch/executor-task-snapshots/executor-tasks-gores1.example.invalid-20261103-191500-000000.ps
 ```
 
 Offline proof (a fake fleet host answers the ssh commands of the probe; no network, no
@@ -1128,7 +1128,7 @@ setsid nohup ~/phanes-ctl/bin/bus-worker-loop >/dev/null 2>&1 &
 setsid nohup ~/phanes-ctl/bin/lane-merge >/dev/null 2>&1 &
 setsid nohup ~/phanes-ctl/bin/ctl-loop >/dev/null 2>&1 &
 setsid nohup ~/phanes-ctl/bin/health-loop >/dev/null 2>&1 &
-setsid nohup ~/phanes-ctl/bin/disk-watermark-guard.py --loop --pause-dir ~/phanes-ctl/autodispatch --brain-log /workspace/phanes/brain/log.md --host govpn2 >/dev/null 2>&1 &
+setsid nohup ~/phanes-ctl/bin/disk-watermark-guard.py --loop --pause-dir ~/phanes-ctl/autodispatch --brain-log /workspace/phanes/brain/log.md --host <host> >/dev/null 2>&1 &
 ~/phanes-ctl/bin/ib-refresh                  # manual certificate refresh preflight
 ```
 

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Offline contract of the govpn2 disk watermark guard (Refs #1666).
+"""Offline contract of the <host> disk watermark guard (Refs #1666).
 
 The check drives the real guard with a fake ``ssh`` on ``PATH`` (the fake
 answers the remote ``df`` probe), a scratch pause directory and a scratch brain
@@ -38,7 +38,7 @@ TOOLS = Path(__file__).resolve().parent
 GUARD = TOOLS / "disk-watermark-guard.py"
 PROBE = TOOLS / "disk-usage-probe.py"
 AUTODISPATCH = TOOLS / "lane-autodispatch" / "autodispatch.py"
-HOST = "govpn2"
+HOST = "<host>"
 MARKER = f".disk-watermark/PAUSE-HOST-{HOST}"
 
 DF_HEADER = "Filesystem 1024-blocks Used Available Capacity Mounted on\n"
@@ -318,7 +318,7 @@ def check_dispatch_gate(base):
         assert not dispatcher.lane_paused("CX2", {"host": HOST}), \
             "the old guard marker must not strand a recovered host after upgrade"
         for body in ("manual: operator pause\n", "auto:other-guard\n",
-                     "auto:disk-watermark-other host=govpn2\n",
+                     "auto:disk-watermark-other host=<host>\n",
                      "auto:disk-watermark host=other-host state=block\n"):
             shared.write_text(body)
             done = run_guard(base, pause_dir, brain_log, env)

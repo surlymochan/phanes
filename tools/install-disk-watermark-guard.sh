@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Deploy the govpn2 disk watermark guard into the control plane (Refs #1666).
+# Deploy the <host> disk watermark guard into the control plane (Refs #1666).
 #
 # The installer does what the documentation of #1666 promises:
 #   1. it deploys the guard *and* its probe dependency into the same directory
