@@ -26,8 +26,10 @@ def classify(
 ):
     """Return a fail-closed decision and explanation for the evidence review depth.
 
-    Sampling is derived from SHA-256(seed, PR number), so repeated classification
-    of a PR with the same configuration produces the same result.
+    `sample_rate` is the share of the routine cards that the stable sample picks
+    for a full read (0 = every routine card is sampled, 1 = every routine card is
+    read in full). The pick is derived from SHA-256(seed, PR number), so repeated
+    classification of a PR with the same configuration produces the same result.
     """
     if not isinstance(diff_stats, dict):
         return {"decision": "full_read", "reason": "diff statistics missing or malformed"}

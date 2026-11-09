@@ -91,6 +91,37 @@ export AD_VERIFY_SHARE_ENABLED=1        # 可选：export AD_VERIFY_SHARE=0.2 AD
 
 离线验证：`python3 tools/lane-autodispatch/test_can_take.py`（含工作洪峰 / 验证洪峰 / 工作类上限三个场景）。
 
+## 证据审查风险分级（Refs #1988）
+
+验证类卡派发前，AD 用纯函数分类器（`tester_risk.py`）判定这张卡的证据要读多深，输出
+`full_read`（全读）或 `sampled`（按固定种子抽检），并把决策与理由写进卡状态：
+
+- 输入：目标 PR 的 diff 统计（改动文件数、增删行数）、历史 `needs-human` 标记（含已摘掉的
+  标签）、可配置的抽检散列（seed + 抽检率）；
+- 规则：大 diff（≥ 20 个文件或 ≥ 1000 行变更）或任一 `needs-human` 前科 → 恒为 `full_read`；
+  常规卡按 `SHA-256(seed, PR 号)` 稳定抽检（同一 PR 每次结果相同），被抽中的那部分按全读处理；
+  数据缺失或畸形 → 保守 `full_read`；
+- 写入：决策与理由进派发卡正文（车道读到的卡）、车道状态 `state[lane]["tester_risk"]`，以及
+  按卡保留的 `state["_tester_risk_cards"][<issue>]`（车道释放后仍可查）。
+
+### 配置项
+
+| 环境变量 | 默认 | 含义 |
+| --- | --- | --- |
+| `AD_TESTER_RISK_SAMPLE_RATE` | `0.2` | 常规卡中被稳定抽中（按全读处理）的比例（0 = 常规卡一律抽检，1 = 常规卡一律全读） |
+| `AD_TESTER_RISK_SEED` | `risk-v1` | 抽检散列种子，同一 seed 下同一 PR 的结果稳定 |
+
+### 部署
+
+分类器与调度器同目录，部署时一起复制；缺少分类器不会中断派单，只是所有卡都按全读处理：
+
+```bash
+cp /workspace/phanes-repo/tools/lane-autodispatch/autodispatch.py ~/phanes-ctl/bin/autodispatch.py
+cp /workspace/phanes-repo/tools/lane-autodispatch/tester_risk.py ~/phanes-ctl/bin/tester_risk.py
+```
+
+离线验证：`python3 -m pytest -q tools/lane-autodispatch/test_tester_risk.py`。
+
 ## PR 提交前校验（Refs #1704）
 
 收割完成、真正要提 PR 时，AD 用 lane 自己的产物（commit 标题、commit 正文、执行器
