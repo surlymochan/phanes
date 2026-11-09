@@ -1,25 +1,16 @@
-<<<<<<< HEAD
-"""Regression tests for malformed usage data in agent event streams."""
+"""Edge cases for the benchmark metrics helpers."""
 
 from __future__ import annotations
 
 import json
 import sys
-=======
-"""Edge cases for the benchmark metrics helpers."""
-
-from __future__ import annotations
-
-import sys
 import unittest
->>>>>>> e10376015100591e0fc16b53c94009676407945a
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-<<<<<<< HEAD
-from harness.metrics import looks_like_usage, parse_agent_stream  # noqa: E402
+from harness.metrics import looks_like_usage, parse_agent_stream, quantile  # noqa: E402
 from harness.swrm_finish import executor_calls  # noqa: E402
 
 
@@ -88,8 +79,6 @@ def test_malformed_counter_types_are_missing_without_losing_valid_usage():
         call = parse_agent_stream(_result(usage), "valid.jsonl")
         assert call["missing_usage"] is False
         assert call["usage"]["inputTokens"] == int(value)
-=======
-from harness.metrics import quantile  # noqa: E402
 
 
 class QuantileEdgeTests(unittest.TestCase):
@@ -124,4 +113,3 @@ class QuantileEdgeTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
->>>>>>> e10376015100591e0fc16b53c94009676407945a
