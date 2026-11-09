@@ -201,6 +201,53 @@ class BrokerLogSummaryTests(unittest.TestCase):
         self.assertEqual(summary["failed"], 3)
         self.assertEqual(summary["windows"][0]["from"], "2026-11-02T07:31:44+08:00")
 
+    def test_invalid_durations_are_missing_in_slow_reports(self):
+        pauses = bls.parse_pause_lines([json.dumps(PAUSE_RECORD)])
+        for ms in (float("nan"), float("inf"), -1, 1e100, 1e14):
+            with self.subTest(ms=ms):
+                records = [bls.parse_line(slow_line("2026-11-01T23:40:00Z", status, lane, ms))
+                           for status, lane in ((502, "failed"), (200, "healthy"))]
+                report = bls.build_report(records, 0, bls.timezone.utc, "minute", 10.0,
+                                          60000, pauses)
+                self.assertEqual(report["records"], 2)
+                self.assertEqual([row["lane"] for row in report["slow"]], ["failed"])
+                row = report["slow"][0]
+                self.assertIsNone(row["ms"])
+                self.assertEqual(row["start"], row["end"])
+                self.assertIsNone(row["during_pause"])
+                self.assertEqual(report["pause_overlaps"]["requests"], 0)
+                self.assertEqual(report["pause_overlaps"]["failed"], 0)
+
+    def test_invalid_durations_do_not_break_pause_only_reports(self):
+        pauses = bls.parse_pause_lines([json.dumps(PAUSE_RECORD)])
+        for ms in (float("nan"), float("-inf"), -1, 1e100, 1e14):
+            with self.subTest(ms=ms):
+                record = bls.parse_line(slow_line("2026-11-01T23:40:00Z", 502, "M1", ms))
+                report = bls.build_report([record], 0, bls.timezone.utc, "minute", 10.0,
+                                          pauses=pauses)
+                self.assertEqual(report["records"], 1)
+                self.assertEqual(report["pause_overlaps"]["requests"], 0)
+                self.assertEqual(report["pause_overlaps"]["failed"], 0)
+
+    def test_cli_json_tolerates_invalid_durations(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            log = Path(tmp) / "broker4-requests.jsonl"
+            log.write_text("\n".join([
+                slow_line("2026-11-01T23:40:00Z", 502, "M1", float("nan")),
+                slow_line("2026-11-01T23:41:00Z", 200, "M2", -5),
+                slow_line("2026-11-01T23:42:00Z", 200, "M3", 1e100),
+            ]) + "\n", encoding="utf-8")
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                code = bls.main([str(log), "--json", "--slow", "60000"])
+        self.assertEqual(code, 0)
+        data = json.loads(out.getvalue())
+        self.assertEqual(data["records"], 3)
+        self.assertEqual(data["bad_lines"], 0)
+        self.assertEqual([row["lane"] for row in data["slow"]], ["M1"])
+        self.assertIsNone(data["slow"][0]["ms"])
+        self.assertEqual(data["slow"][0]["start"], data["slow"][0]["end"])
+
     def test_pause_timezone_defaults_to_utc_plus_8(self):
         default = bls.parse_pause_lines([json.dumps(
             {"from": PAUSE_RECORD["from"], "to": PAUSE_RECORD["to"]})])[0]

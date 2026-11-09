@@ -24,6 +24,10 @@ A pause stamp that no platform can represent (a non-finite number or an epoch
 outside the datetime range) makes its record unusable: it is skipped, and the
 other windows of the log are kept.
 
+A duration that is not a finite, non-negative number (NaN, an infinity, a
+negative value or a value too large to compute a span with) is a missing
+value: the request keeps its timestamp and is reported without a duration.
+
 The JSON report keeps the old fields and adds "slow_ms", "slow" (the listed
 slow requests) and "pause_overlaps" ({"pauses", "requests", "failed",
 "windows"}); the text report only grows the new sections when the new flags
@@ -79,6 +83,33 @@ def classify(status, err):
     return "other"
 
 
+def valid_duration(ms, end=None):
+    """Return True when ``ms`` is a usable request duration.
+
+    A duration must be a finite, non-negative number that still fits in a
+    timedelta and, when an end timestamp is supplied, can be subtracted from
+    it. NaN, infinities, negative and out-of-range values are missing values.
+    """
+    if isinstance(ms, bool) or not isinstance(ms, (int, float)):
+        return False
+    if isinstance(ms, float) and not math.isfinite(ms):
+        return False
+    if ms < 0:
+        return False
+    try:
+        duration = timedelta(milliseconds=ms)
+        if end is not None:
+            end - duration
+    except (OverflowError, ValueError):
+        return False
+    return True
+
+
+def duration_or_none(ms, end=None):
+    """Return the duration of a request, or None when it is not usable."""
+    return ms if valid_duration(ms, end) else None
+
+
 def parse_line(line):
     try:
         obj = json.loads(line)
@@ -96,9 +127,7 @@ def parse_line(line):
     lane = obj.get("lane") if isinstance(obj.get("lane"), str) else "-"
     rid = obj.get("id") if isinstance(obj.get("id"), str) else None
     err = obj.get("err") if isinstance(obj.get("err"), str) else ""
-    ms = obj.get("ms")
-    if isinstance(ms, bool) or not isinstance(ms, (int, float)):
-        ms = None
+    ms = duration_or_none(obj.get("ms"), when)
     return {"ts": when, "lane": lane, "status": status, "cls": classify(status, err),
             "id": rid, "ms": ms, "err": err}
 
@@ -253,9 +282,12 @@ def fmt_ms(ms):
 
 
 def request_span(record):
-    """Return the (start, end) instants of a request; the start is ts - ms."""
+    """Return the (start, end) instants of a request; the start is ts - ms.
+
+    A request without a usable duration spans the instant of its timestamp.
+    """
     end = record["ts"]
-    ms = record.get("ms")
+    ms = duration_or_none(record.get("ms"), end)
     return (end - timedelta(milliseconds=ms) if ms else end), end
 
 
@@ -263,7 +295,7 @@ def slow_requests(records, threshold_ms):
     """Return the requests that took at least ``threshold_ms`` or answered non-200."""
     picked = []
     for record in records:
-        ms = record.get("ms")
+        ms = duration_or_none(record.get("ms"), record["ts"])
         if (ms is not None and ms >= threshold_ms) or record["status"] != 200:
             picked.append(record)
     return sorted(picked, key=lambda record: record["ts"])
@@ -310,7 +342,7 @@ def slow_entries(records, threshold_ms, pauses, tz):
             "status": record["status"],
             "err": err[:ERR_CHARS],
             "err_truncated": len(err) > ERR_CHARS,
-            "ms": record.get("ms"),
+            "ms": duration_or_none(record.get("ms"), record["ts"]),
             "during_pause": pause_window_text(pause) if pause else None,
         })
     return rows
@@ -523,6 +555,17 @@ def run_self_test():
     # --slow picks the three long 502s and the fast 429, but not the 200.
     slow = slow_requests(records, 60000)
     assert [rec["lane"] for rec in slow] == ["M6", "M7", "M13", "M2"], slow
+
+    # An invalid duration is a missing value: no crash, no reversed span.
+    for bad in (float("nan"), float("inf"), float("-inf"), -1, 1e100):
+        rec = parse_line(json.dumps({"ts": "2026-11-01T23:40:00Z", "id": "rX",
+                                     "lane": "MX", "status": 502, "err": "", "ms": bad}))
+        assert rec["ms"] is None, (bad, rec)
+        start, end = request_span(rec)
+        assert start == end, (bad, start, end)
+        assert slow_requests([rec], 0) == [rec], (bad, rec)
+    assert parse_line(json.dumps({"ts": "2026-11-01T23:40:00Z", "id": "rY",
+                                  "lane": "MY", "status": 200, "err": "", "ms": 1200}))["ms"] == 1200
 
     pauses = parse_pause_lines([json.dumps(SELF_TEST_PAUSE)])
     assert len(pauses) == 1, pauses
