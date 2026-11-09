@@ -1151,6 +1151,49 @@ def can_take(backend, item, lane=None, verify_gate=True):
     if item.get("strict"): return False
     if backend == "codex" and SOCKET_RE.search(item["title"] + "\n" + item["body"]): return False
     return True
+
+DEFAULT_CODEX_MIN_MEMORY_MB = 400
+
+def available_memory_mb(host):
+    """Read available memory on a Linux or macOS executor through the normal SSH shim."""
+    # vm_stat reports pages, with the host's page size in its header (4K or 16K).
+    # Count free/reclaimable pages without adding purgeable pages a second time.
+    # Both platform branches emit KiB; a missing/incomplete probe stays unavailable.
+    command = """case "$(uname -s)" in
+Linux)
+    awk '/^MemAvailable:/ {print $2; found=1} END {if (!found) exit 1}' /proc/meminfo ;;
+Darwin)
+    vm_stat | awk '
+        /^Mach Virtual Memory Statistics:/ {
+            for (i=1; i<NF; i++) if ($i == "of") pagesize=$(i+1)
+        }
+        /^(Pages free|Pages inactive|Pages speculative):/ {
+            sub(/\\.$/, "", $NF)
+            if ($NF !~ /^[0-9]+$/) exit 1
+            pages+=$NF; found++
+        }
+        END {if (pagesize > 0 && found == 3) printf "%.0f\\n", pages*pagesize/1024; else exit 1}' ;;
+*) exit 1 ;;
+esac"""
+    # SSH joins remote arguments with spaces; keep the entire script as one -c argument.
+    try: rc, out, _ = sh(ssh_argv(ssh_opts(host), host, "sh", "-lc", shlex.quote(command)), timeout=30)
+    except (OSError, subprocess.TimeoutExpired): return None
+    if rc: return None
+    try: return int(out.strip().splitlines()[-1]) // 1024
+    except (ValueError, IndexError): return None
+
+def memory_preflight(lane, cfg, item, cache):
+    """Return the codex host's memory rejection detail, or None when it can run."""
+    if cfg.get("backend") != "codex": return None
+    threshold = cfg.get("min_available_memory_mb", DEFAULT_CODEX_MIN_MEMORY_MB)
+    try: threshold = max(0, int(threshold))
+    except (TypeError, ValueError): threshold = DEFAULT_CODEX_MIN_MEMORY_MB
+    host = cfg["host"]
+    if host not in cache: cache[host] = available_memory_mb(host)
+    available = cache[host]
+    if available is not None and available >= threshold: return None
+    return {"host": host, "available_mb": available, "threshold_mb": threshold, "reason": "blocked-by-host-memory"}
+
 def is_review_lane(lane):
     """The review lanes a verify card may be dispatched to (CX2/CX4/CX5)."""
     return bool(re.fullmatch(r"CX(?:2|4|5)(?:[-_].*)?", str(lane), re.I))
@@ -2266,6 +2309,8 @@ def tick(lanes, state, last_warn):
     base = None
     outcomes = {}
     freed_lanes = set()
+    memory_rejections = {}
+    dispatch_eligible_lanes = set()
 
     def tick_queue():
         """Load the shared queue on the first dispatch attempt, after that lane's harvest.
@@ -2338,7 +2383,22 @@ def tick(lanes, state, last_warn):
             if preferred and any(bool(i.get("verify")) == preferred for i in candidates):
                 candidates.sort(key=lambda i: bool(i.get("verify")) != preferred)
                 log(f"queue share: {L} prefers verify (verify deficit={verify_slots}, work slots={work_slots}); other class yields", brain=False)
+        if candidates: dispatch_eligible_lanes.add(L)
+        # Share a probe across this lane's candidates only. Another lane on the
+        # same host must recheck after a session starts or memory recovers.
+        memory_cache = {}
+        eligible = []
+        for candidate in candidates:
+            rejection = memory_preflight(L, cfg, candidate, memory_cache)
+            if rejection:
+                memory_rejections.setdefault(candidate["n"], {})[L] = rejection
+                detail = rejection["available_mb"]
+                shown = "unavailable" if detail is None else f"{detail}MB"
+                log(f"{L} #{candidate['n']} skipped: blocked-by-host-memory host={rejection['host']} available={shown} threshold={rejection['threshold_mb']}MB", brain=False)
+                continue
+            eligible.append(candidate)
         for c in candidates:
+            if c not in eligible: continue
             status, detail = label_state(c["n"])
             if status == "fresh": pick = c; break
             if status == "stale":
@@ -2421,6 +2481,17 @@ def tick(lanes, state, last_warn):
     # stale search rows are not dispatchable: drop them (and log the skip) before counting
     q = freshen_queue(q, state)
     blocked = sum(not i["deps_ok"] for i in q)
+    memory_blocks = {}
+    for item in q:
+        # A lane that took a card (or failed dispatch) no longer offers capacity
+        # to the remaining queue, even though it was eligible earlier this tick.
+        candidates = [L for L in dispatch_eligible_lanes
+                      if outcomes.get(L) == "no-card" and not state.get(L)
+                      and can_take(lanes[L]["backend"], item, L) and item.get("deps_ok", True)]
+        rejections = memory_rejections.get(item["n"], {})
+        if candidates and all(L in rejections for L in candidates):
+            memory_blocks[item["n"]] = list(rejections.values())
+    blocked += len(memory_blocks)
     ready = len(q) - blocked
     # refill when the queue is short, or when some backend's lanes could not all be fed (counting cross-pin fallback)
     short = {b: sum(c["backend"] == b for c in lanes.values()) - sum(1 for i in q if i.get("deps_ok", True) and can_take(b, i, verify_gate=False))
@@ -2441,6 +2512,7 @@ def tick(lanes, state, last_warn):
     save_state(state)
     refresh_minimax_burn()  # the burn watchdog refreshes the reading the status shows (Refs #1671)
     st = status_snapshot(lanes, state, res, ready, blocked, records)
+    st["_memory_blocks"] = memory_blocks
     with open(f"{D}/lanes-status.json", "w") as stream:
         json.dump(st, stream, ensure_ascii=False, indent=1)
     return last_warn

@@ -454,6 +454,8 @@ class VerifyMetricsTest(unittest.TestCase):
         module.sh = self.fleet.sh
         module.remote = self.fleet.remote
         module.replenish = lambda k, state: []
+        # the host memory preflight is not under test here: every host has enough memory
+        module.available_memory_mb = lambda host: 4096
         module.BACKOFF.clear()
         module.time = self.clock
         if pause_view_is_broken(module):
