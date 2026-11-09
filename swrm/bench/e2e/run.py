@@ -156,15 +156,18 @@ def run_shell(command: str, cwd: Path, timeout: int) -> dict:
 
 
 def diff_against(repo: Path, baseline: str) -> tuple[list[str], str]:
-    names = git_cmd(repo, "diff", "--name-only", baseline)
+    # NUL records avoid Git quoting and preserve whitespace/newlines in names.
+    # Decode using the filesystem codec so non-UTF-8 names also round-trip.
+    files = []
+    seen = set()
+    for args in (("diff", "--name-only", "-z", baseline, "--"),
+                 ("ls-files", "--others", "--exclude-standard", "-z")):
+        result = subprocess.run(["git", *args], cwd=repo, capture_output=True, check=False)
+        for record in result.stdout.split(b"\0"):
+            if record and record not in seen:
+                seen.add(record)
+                files.append(os.fsdecode(record))
     stat = git_cmd(repo, "diff", "--stat", baseline)
-    status = git_cmd(repo, "status", "--porcelain")
-    files = [line for line in (names.stdout or "").splitlines() if line]
-    for line in (status.stdout or "").splitlines():
-        if line.startswith("??"):
-            path = line[3:].strip()
-            if path and path not in files:
-                files.append(path)
     stat_text = stat.stdout or ""
     if len(stat_text) > 8000:
         stat_text = stat_text[:8000] + "\n…\n"
