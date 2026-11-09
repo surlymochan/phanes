@@ -59,8 +59,11 @@ export function validateTeamPolicy(policy = {}) {
     errors.push('coding.min_changed_line_coverage must be a number between 0 and 100');
   }
   const reviewers = policy?.review?.min_reviewers;
-  if (reviewers !== undefined && (!Number.isFinite(Number(reviewers)) || Number(reviewers) < 0)) {
-    errors.push('review.min_reviewers must be a non-negative number');
+  const reviewerCount = typeof reviewers === 'string' && reviewers.trim() !== ''
+    ? Number(reviewers)
+    : reviewers;
+  if (reviewers !== undefined && (!Number.isInteger(reviewerCount) || reviewerCount < 0)) {
+    errors.push('review.min_reviewers must be a non-negative integer');
   }
   const smoke = policy?.deploy?.required_smoke_pass_rate;
   if (smoke !== undefined && (!Number.isFinite(Number(smoke)) || Number(smoke) < 0 || Number(smoke) > 100)) {
