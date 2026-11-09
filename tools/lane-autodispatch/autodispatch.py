@@ -1189,8 +1189,9 @@ if any(a["ticks"]!=b["ticks"] or a["wchan"]!=b["wchan"] or a["threads"]!=b["thre
 # hide a working CPU/network thread. Exclude timers, socket/poll waits and unknown
 # kernel waits, even when their counters are stable. No ptrace-only syscall/IO
 # files are needed, and ordinary pipe/futex deadlocks need not be SIGSTOP'ed.
+# Newer kernels rename the futex wait symbol (futex_wait_queue -> futex_do_wait).
 local_waits={"do_wait","pipe_read","futex_wait_queue","futex_wait_queue_me",
-             "do_signal_stop","ptrace_stop"}
+             "futex_do_wait","futex_wait","do_signal_stop","ptrace_stop"}
 for row in second[1:]:
   if any(thread[1] not in ("S","T","t") or thread[5] not in local_waits
          for thread in row["threads"]):
