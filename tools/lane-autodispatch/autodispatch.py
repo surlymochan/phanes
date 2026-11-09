@@ -2358,12 +2358,8 @@ def tick(lanes, state, last_warn):
     state["_tick_at"] = now
     observe_verify_verdicts(state)
     save_state(state)
-<<<<<<< HEAD
-    st = status_snapshot(lanes, state, res, ready, blocked)
-    st["_memory_blocks"] = memory_blocks
-=======
     st = status_snapshot(lanes, state, res, ready, blocked, records)
->>>>>>> e10376015100591e0fc16b53c94009676407945a
+    st["_memory_blocks"] = memory_blocks
     with open(f"{D}/lanes-status.json", "w") as stream:
         json.dump(st, stream, ensure_ascii=False, indent=1)
     return last_warn
