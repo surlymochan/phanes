@@ -435,6 +435,40 @@ class GuardHysteresisTests(unittest.TestCase):
 class DispatchGateTests(unittest.TestCase):
     """The dispatcher must not hand out <host> while the guard blocks it."""
 
+    def test_state_write_failure_keeps_gate_closed(self):
+        with scratch() as tmp, control_plane_home(tmp):
+            home = Path(tmp)
+            pause_dir = home / "phanes-ctl" / "autodispatch"
+            spec = importlib.util.spec_from_file_location("guard_failure", GUARD)
+            guard = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(guard)
+            usage = {"used_pct": 95, "used_bytes": 95, "free_bytes": 5}
+            with mock.patch.object(guard, "measure_remote", return_value=usage), \
+                    mock.patch.object(guard, "write_state", side_effect=OSError("injected")):
+                with self.assertRaises(OSError):
+                    guard.main(["--host", HOST, "--pause-dir", str(pause_dir),
+                                "--brain-log", str(home / "brain.log")])
+            dispatcher = load_autodispatch()
+            self.assertTrue(dispatcher.lane_paused("CX2", {"host": HOST}))
+
+    def test_recovery_write_failure_preserves_marker(self):
+        with scratch() as tmp:
+            base = Path(tmp)
+            fake = FakeSsh(base)
+            pause_dir = base / "pause"
+            fake.set_df(DF_BLOCKED)
+            self.assertEqual(run_guard(pause_dir, base / "brain.log", fake.env).returncode, 0)
+            spec = importlib.util.spec_from_file_location("guard_recovery_failure", GUARD)
+            guard = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(guard)
+            usage = {"used_pct": 87, "used_bytes": 87, "free_bytes": 13}
+            with mock.patch.object(guard, "measure_remote", return_value=usage), \
+                    mock.patch.object(guard, "write_state", side_effect=OSError("injected")):
+                with self.assertRaises(OSError):
+                    guard.main(["--host", HOST, "--pause-dir", str(pause_dir),
+                                "--brain-log", str(base / "brain.log")])
+            self.assertTrue((pause_dir / PAUSE_MARKER).exists())
+
     def test_the_dispatcher_holds_lane_host_while_the_guard_blocks_it(self):
         with scratch() as tmp, control_plane_home(tmp):
             home = Path(tmp)

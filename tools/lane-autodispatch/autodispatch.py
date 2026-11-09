@@ -302,6 +302,14 @@ def pause_records(now=None, home=None):
             continue
         records.append({"scope": scope, "reason": marker_reason(name, body), "created_at": 0.0,
                         "expires_at": deadline, "source": "marker"})
+    # The private marker also gates dispatch if writing the state failed.
+    try: disk_markers = os.listdir(os.path.join(D, ".disk-watermark"))
+    except OSError: disk_markers = []
+    for name in disk_markers:
+        scope = marker_scope(name)
+        if scope and scope.startswith("host:"):
+            records.append({"scope": scope, "reason": "disk watermark marker",
+                            "created_at": 0.0, "expires_at": None, "source": "marker"})
     # The disk watermark gate (Refs #1666): a blocked lane host stays blocked even when the
     # health sweep removed its pause marker, as long as the guard reports the block.
     for host, record in disk_states.items():
