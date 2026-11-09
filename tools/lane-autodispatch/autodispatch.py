@@ -1531,11 +1531,17 @@ def status_snapshot(lanes, state, res, ready, blocked, records=None, phase=None,
     status["_idle_open_s"] = idle_open_s    # the gap the idle lanes are in right now
     status["_idle_worst_s"] = max(idle_open_s.values(), default=0.0)
     status["_at"] = time.strftime("%F %T")
-<<<<<<< HEAD
     # The phase and the tick start tell the reader how far the current tick got (Refs #1697):
     # a snapshot whose phase does not change while `_at` advances means a slow step is running.
     status["_phase"] = phase or "idle"
     status["_tick_at"] = tick_at or status["_at"]
+    metrics = verify_metrics(state)
+    status["_verify_wait_histogram"] = verify_histogram(state, "dispatched")
+    status["_verify_cycle_histogram"] = verify_histogram(state, "verdict")
+    status["_verify_deficit"] = metrics.get("deficit", 0)
+    dispatches = metrics["dispatches"]
+    status["_verify_share"] = (dispatches["verify"] / dispatches["all"] if dispatches["all"] else 0.0)
+    status["_work_cap_hits"] = metrics["work_cap_hits"]
     return status
 
 class StatusPublisher:
@@ -1644,15 +1650,6 @@ class StatusPublisher:
         self._stop.set()
         thread, self._thread = self._thread, None
         if thread is not None: thread.join(timeout=5)
-=======
-    metrics = verify_metrics(state)
-    status["_verify_wait_histogram"] = verify_histogram(state, "dispatched")
-    status["_verify_cycle_histogram"] = verify_histogram(state, "verdict")
-    status["_verify_deficit"] = metrics.get("deficit", 0)
-    dispatches = metrics["dispatches"]
-    status["_verify_share"] = (dispatches["verify"] / dispatches["all"] if dispatches["all"] else 0.0)
-    status["_work_cap_hits"] = metrics["work_cap_hits"]
-    return status
 
 def classify_dispatch_fetch_error(error):
     """Return a useful network failure category for dispatch fetch diagnostics."""
@@ -1722,7 +1719,6 @@ def git_network_operation(command, host, operation, policy, direct=False, transi
         if not retry: break
         time.sleep(policy["delay"] * attempt)
     return rc, out, err
->>>>>>> e10376015100591e0fc16b53c94009676407945a
 
 def deps_met(item):
     """Body line `依赖：#12 #34` (or `Depends on: #12`) gates dispatch until those issues are CLOSED."""
@@ -2290,11 +2286,6 @@ def run_tick(lanes, state, last_warn, publisher):
         h = lanes[L]["host"]
         if h in seen: continue
         errs = [res[x] for x in live if lanes[x]["host"] == h and "error" in res[x]]
-<<<<<<< HEAD
-        if errs: host_fail(h, errs[0]["error"]); seen.add(h)
-        else: host_good(h); seen.add(h)
-    publisher.publish(res=res, phase="harvest")  # the remote probe of every lane is done
-=======
         if errs:
             host_fail(h, errs[0]["error"]); seen.add(h)
             note_host_unreachable(state, h)  # the outage is recorded (Refs #1673)
@@ -2308,7 +2299,7 @@ def run_tick(lanes, state, last_warn, publisher):
         release_unreachable_pauses(h, host_pause_paths(h, lanes_of_host(lanes, h)))
         mark_recovery_runs(state, h, lanes)
         scopes = paused_scopes()  # the released pause opens the host again
->>>>>>> e10376015100591e0fc16b53c94009676407945a
+    publisher.publish(res=res, phase="harvest")  # the remote probe of every lane is done
     q = None
     queue_failed = False
     queue_error = ""
@@ -2408,19 +2399,18 @@ def run_tick(lanes, state, last_warn, publisher):
         except Exception as e:
             dispatch_failed(L, cfg, pick, e, busy=bool(LANE_BUSY_RE.search(str(e))))
             return "no-capacity"
-<<<<<<< HEAD
         q.remove(pick)
-        publisher.record_dispatch(L, {"issue": pick["n"], "run": run, "host": cfg["host"], "base": commit, "at": time.strftime("%F %T"), "verify": ver, "class": "verify" if pick.get("verify") else "work"})
-=======
-        q.remove(pick); state[L] = {"issue": pick["n"], "run": run, "host": cfg["host"], "base": commit, "at": time.strftime("%F %T"), "verify": ver, "class": "verify" if pick.get("verify") else "work"}
-        metrics = verify_metrics(state)
-        # The snapshot and saved state must reflect the slot just occupied.
-        if AD_VERIFY_SHARE_ENABLED: metrics["deficit"] = queue_class_limits(lanes, state, idle)[0]
-        metrics["dispatches"]["all"] += 1
-        if pick.get("verify"):
-            metrics["dispatches"]["verify"] += 1
-            record_verify_time(state, pick["n"], "dispatched", time.time())
->>>>>>> e10376015100591e0fc16b53c94009676407945a
+        record = {"issue": pick["n"], "run": run, "host": cfg["host"], "base": commit, "at": time.strftime("%F %T"), "verify": ver, "class": "verify" if pick.get("verify") else "work"}
+        with publisher._lock:
+            state[L] = record
+            metrics = verify_metrics(state)
+            # The snapshot and saved state must reflect the slot just occupied.
+            if AD_VERIFY_SHARE_ENABLED: metrics["deficit"] = queue_class_limits(lanes, state, idle)[0]
+            metrics["dispatches"]["all"] += 1
+            if pick.get("verify"):
+                metrics["dispatches"]["verify"] += 1
+                record_verify_time(state, pick["n"], "dispatched", time.time())
+            publisher.record_dispatch(L, record)
         # Stop this lane's gap at its own successful dispatch. Later lanes may take
         # minutes to assign; their work cannot extend an already occupied lane's gap.
         closed = idle_close(state, L, time.time(), last_alive, tick_started_at=now)
