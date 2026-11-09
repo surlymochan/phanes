@@ -2,11 +2,12 @@
 # A separate runtime for the executor candidate; it never changes the existing fleet home.
 set -eu
 root=$(python3 -c 'import os, sys; print(os.path.dirname(os.path.dirname(os.path.realpath(sys.argv[1]))))' "$0")
+export OPENSWARM_HOME="${OPENSWARM_HOME:-$HOME/.claude/swrm-executor-candidate}"
 if [ "${1:-}" = auto ]; then
   shift
+  export OPENSWARM_AUTO_CLI="${OPENSWARM_AUTO_CLI:-$root/bin/swrm-fleet}"
   exec "$root/bin/swrm-auto" "$@"
 fi
-export OPENSWARM_HOME="${OPENSWARM_HOME:-$HOME/.claude/swrm-executor-candidate}"
 export PATH="$HOME/.local/node-v24.14.1/bin:$HOME/tools/copilot-executor/node_modules/.bin:$HOME/tools/bun-runtime/node_modules/.bin:$HOME/.local/bin:/opt/homebrew/bin:$PATH"
 if [ -d "$HOME/Library/Application Support/swrm-copilot-secure" ]; then
   export COPILOT_HOME="${COPILOT_HOME:-$HOME/Library/Application Support/swrm-copilot-secure}"
