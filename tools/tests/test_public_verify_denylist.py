@@ -23,6 +23,10 @@ DOMAIN_TERM = "fixture-zone.invalid"
 BUS_TERM = "bus-fixture-77"
 ACCOUNT_TERM = "acct-fixture-42"
 HOLDOUT_TERM = "fixture-holdout-dir"
+# Two alternatives of one regular expression rule, the second one extends the
+# first one without a separator.
+ALTERNATION_SHORT = "gwfixture"
+ALTERNATION_LONG = "gwfixtureext"
 
 
 def _import_module():
@@ -198,6 +202,44 @@ class DenylistMatchTests(unittest.TestCase):
         matcher = self.matcher(rule("domain", "re:\\.invalid"))
         self.assertEqual(len(matcher.scan("node.fixture.invalid")), 1)
         self.assertEqual(matcher.scan("node.fixture.invalidx"), [])
+
+    def test_regular_expression_alternatives_report_the_longer_branch(self):
+        """A longer alternative of a rule must not be lost (Refs #2034)."""
+        matcher = self.matcher(rule("host", f"re:{ALTERNATION_SHORT}|{ALTERNATION_LONG}"))
+        hits = matcher.scan(ALTERNATION_LONG)
+        self.assertEqual(len(hits), 1)
+        self.assertEqual(hits[0].category, "host")
+        expected = hashlib.sha256(ALTERNATION_LONG.encode("utf-8")).hexdigest()[:8]
+        self.assertEqual(hits[0].hash8, expected)
+        self.assertEqual(hits[0].start, 0)
+        self.assertEqual(hits[0].end, len(ALTERNATION_LONG))
+
+    def test_regular_expression_alternatives_keep_the_word_boundary(self):
+        """The longer alternative of a rule still respects the word boundary."""
+        matcher = self.matcher(rule("host", f"re:{ALTERNATION_SHORT}|{ALTERNATION_LONG}"))
+        self.assertEqual(matcher.scan(ALTERNATION_LONG + "x"), [])
+        self.assertEqual(matcher.scan("x" + ALTERNATION_LONG), [])
+        self.assertEqual(len(matcher.scan(ALTERNATION_LONG + ".")), 1)
+
+    def test_regular_expression_alternations_bound_every_branch(self):
+        """Every branch of an alternation respects the word boundary."""
+        matcher = self.matcher(rule("host", f"re:{ALTERNATION_LONG}|{ALTERNATION_SHORT}"))
+        self.assertEqual(matcher.scan(ALTERNATION_LONG + "x"), [])
+        self.assertEqual(len(matcher.scan(ALTERNATION_LONG)), 1)
+
+    def test_grouped_regular_expression_alternatives_report_the_longer_branch(self):
+        matcher = self.matcher(rule("host", f"re:(?:{ALTERNATION_SHORT}|{ALTERNATION_LONG})"))
+        hits = matcher.scan(ALTERNATION_LONG)
+        self.assertEqual(len(hits), 1)
+        expected = hashlib.sha256(ALTERNATION_LONG.encode("utf-8")).hexdigest()[:8]
+        self.assertEqual(hits[0].hash8, expected)
+
+    def test_regular_expression_alternatives_match_the_short_branch(self):
+        matcher = self.matcher(rule("host", f"re:{ALTERNATION_SHORT}|{ALTERNATION_LONG}"))
+        hits = matcher.scan(ALTERNATION_SHORT)
+        self.assertEqual(len(hits), 1)
+        expected = hashlib.sha256(ALTERNATION_SHORT.encode("utf-8")).hexdigest()[:8]
+        self.assertEqual(hits[0].hash8, expected)
 
     def test_findings_carry_no_raw_text(self):
         matcher = self.matcher(rule("account", ACCOUNT_TERM))
