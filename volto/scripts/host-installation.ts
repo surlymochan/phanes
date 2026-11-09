@@ -28,5 +28,6 @@ export function hostExecutableRequirement(name: string): string {
 }
 
 export function hostFileMode(path: string) {
-  return path.endsWith(".plist") || path.endsWith(".json") ? 0o644 : 0o755;
+  const normalizedPath = path.toLowerCase();
+  return normalizedPath.endsWith(".plist") || normalizedPath.endsWith(".json") ? 0o644 : 0o755;
 }
