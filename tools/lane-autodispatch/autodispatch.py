@@ -3249,7 +3249,22 @@ def tick(lanes, state, last_warn):
         json.dump(st, stream, ensure_ascii=False, indent=1)
     return last_warn
 
+def preflight_card(text):
+    """Reject a card that the card lint refuses; a missing lint script also refuses the card (fail closed, Refs #1732)."""
+    script = next((p for p in (f"{LOCAL}/swrm/bin/swrm",
+                               os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "swrm", "bin", "swrm"))
+                   if os.path.isfile(p)), None)
+    if script is None:
+        log("card preflight unavailable: swrm/bin/swrm not found, card refused", brain=False)
+        raise RuntimeError("card preflight unavailable: swrm/bin/swrm not found")
+    result = subprocess.run([sys.executable, script, "card-lint", "-"],
+                            input=text, text=True, capture_output=True, timeout=120)
+    if result.returncode:
+        raise RuntimeError(f"card preflight rejected: {result.stdout.strip()} {result.stderr.strip()}")
+
+
 def file_issue(text, extra=()):
+    preflight_card(text)
     lines = text.splitlines()
     title = lines[0].lstrip("# ").strip(); labels = [l.strip() for l in lines[1].split(":", 1)[1].split(",") if l.strip()]
     body = "\n".join(lines[2:]).strip() + "\n"
@@ -3269,15 +3284,59 @@ labels: <p1 或 p2>,backend:<pi|codex|agy>
 <任务正文：要改的文件路径、具体改动、边界；不得依赖其它未完成任务>
 
 验收：`<一条在仓库根或 cd 子目录后可直接运行、只用 python3 标准库/现有脚本的命令>`
+
+## 失败模式清单
+对照 docs/defect-patterns.md 检查相关失败模式。
 ```
+
+工具类卡的 plan 段必须列「复刻的引擎数据形状清单」，验收含真实形状 fixture 门槛。
+派发/暂停/终态类卡的 design 段须逐项填写状态机边例矩阵的预期行为：单后端 / drain / 暂停 / 已派发后变化 / 合并后清理 / dry-run 无副作用。
+涉及派发行为的验收必须写明 tick/集成级测试，仅函数级单测不算关账。
+每条验收须有明确判定方法；逐卡运行 `swrm/bin/swrm card-lint`，通过后才可导入。
 
 要求：{k} 条里 backend:pi / backend:agy / backend:codex / 无 backend 标签 大约 2:1:2:1（至少 3 条无 backend 标签供饥饿兜底）；优先 #6 三 Bot 组织诊断 e2e（examples/org-health-local）的测试覆盖、文档、健壮性小修，其次 swrm 的纯单元测试（不需要 Unix socket 的可标 codex，需要的标 pi）；每条 15 分钟内可完成；不要写安全加固、不要改 CI 的 macOS 矩阵、不要碰签名；不要与下列已有 issue 重复：
 
 {open}
 
+生成前逐项完成以下检查，并把相关证据写入各卡正文：
+- 对照 main 确认目标文件确实存在。
+- 写明当前行为和期望行为之间的差异。
+- 给出能复现问题的输入与目标对象。
+- 明确本卡覆盖的功能范围。
+- 写清不在本卡范围内的工作。
+- 确认不依赖另一张未完成卡。
+- 检查已有 issue 中的同类问题。
+- 给出最小实现入口和调用者。
+- 标明输入字段的实际来源。
+- 给出输出结构及消费方。
+- 工具卡列出复刻的数据形状。
+- 工具卡引用真实 fixture 的来源。
+- fixture 必须覆盖真实嵌套字段。
+- 派发卡填写单后端的预期结果。
+- 派发卡填写 drain 的预期结果。
+- 派发卡填写暂停的预期结果。
+- 派发卡填写已派发后变化的预期结果。
+- 派发卡填写合并后清理的预期结果。
+- 派发卡填写 dry-run 的无副作用断言。
+- 派发卡指定 tick 或等价集成测试入口。
+- 验收命令应能从仓库根运行。
+- 验收写明返回码或可观察判定结果。
+- 每条验收对应一个明确的行为。
+- 保留失败路径和边界输入的测试要求。
+- 对照缺陷模式库说明相关风险。
+- 检查测试是否针对真正的目标对象。
+- 检查覆盖范围与结论范围是否一致。
+- 检查状态写入后是否按同一结构读回。
+- 检查冲突配置的优先级预期。
+- 检查清理后待办任务是否仍存在。
+- 对每张卡运行预审，逐条修正拒绝原因。
+
 只新增 `docs/backlog/next/` 下的文件，不改其它文件。
 
 验收：`ls docs/backlog/next/{tag}-*.md | wc -l | grep -qx {k}`
+
+## 失败模式清单
+对照 docs/defect-patterns.md；检查生成对象和全量卡数，拒绝薄卡及不可测条目。
 """
 
 def replenish(k, state):
@@ -3298,10 +3357,10 @@ def replenish(k, state):
         if len(out) >= k: break
         if path in imp: continue
         rc, text, _ = sh(G + ["show", f"origin/main:{path}"])
-        imp.append(path); save_state(state)
         try:
             if rc or not text.startswith("#") or not text.splitlines()[1].startswith("labels:"): raise RuntimeError("bad format")
             out.append(file_issue(text))
+            imp.append(path); save_state(state)
         except Exception as e: log(f"repo backlog {path}: {e}", brain=False)
     if len(out) < k:
         rc, o, _ = gh(["issue", "list", "--state", "open", "--label", "planner", "--json", "number"])
