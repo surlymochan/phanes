@@ -7891,6 +7891,12 @@ def lane_validate_socket_path(name):
     return path
 
 
+# pi's own thinking levels (pi --thinking <level>): pi-coding-agent README.md "Model Options",
+# dist/cli/args.js VALID_THINKING_LEVELS. The launch flag is the control pi reads at start-up;
+# the RPC also knows `set_thinking_level` (docs/rpc.md), but the flag is what `ps` shows.
+PI_THINKING_LEVELS = ("off", "minimal", "low", "medium", "high", "xhigh")
+
+
 def lane_config():
     path = envvar("LANES_FILE", os.path.join(DATA, "lanes.json"))
     try:
@@ -7913,6 +7919,9 @@ def lane_config():
         names.add(name)
         if backend not in ("codex", "cursor", "agy", "pi", "hermes", "copilot"):
             raise ValueError(f"invalid lane config {where}: unsupported backend")
+        thinking = lane.get("thinking")
+        if thinking is not None and (backend != "pi" or thinking not in PI_THINKING_LEVELS):
+            raise ValueError(f"invalid lane config {where}: thinking must be one of {', '.join(PI_THINKING_LEVELS)} for pi lanes")
         if backend == "pi" and (load_policy().get("pi") or {}).get("require_isolation", sys.platform != "darwin"):
             expected = os.path.join(os.path.dirname(os.path.realpath(__file__)), "pi-isolated")
             if lane.get("binary") and os.path.realpath(lane["binary"]) != os.path.realpath(expected):
@@ -8313,6 +8322,7 @@ def lane_prepare_workspace(lane, rid, base_rev=None, preserve=False, recovery_po
 class LaneChild:
     def __init__(self, lane, cwd, policy):
         self.lane, self.cwd = lane, cwd
+        self.thinking = lane.get("thinking")     # pi: the thinking level this child was launched with
         _tmpdir, self.env = configure_executor_environment(cwd)
         self.events = queue.Queue()
         self.backlog = []
@@ -8337,6 +8347,10 @@ class LaneChild:
             if lane.get("provider"):
                 cmd += ["--provider", lane["provider"]]
             cmd += ["--model", lane["model"]]
+            # The thinking level pi starts with (lanes.json "thinking", or the level the fix round
+            # asked for). pi reads it once, at start-up, from the command line (Refs #1847).
+            if self.thinking:
+                cmd += ["--thinking", self.thinking]
         elif backend == "hermes":
             binary = lane.get("binary") or hermes_bin(policy)
             if not binary:
@@ -8661,6 +8675,51 @@ def lane_child(lane, cwd, policy):
     return LaneChild(lane, cwd, policy)
 
 
+def lane_pi_thinking_child(lane, child, spec, policy):
+    """The pi child a run has to use, launched at the thinking level the run asked for.
+
+    pi reads its thinking level once, from `--thinking <level>` on the command line, so a run that
+    asks for another level needs its own pi process. That process belongs to the run alone: the
+    lane keeps its resident child (at the level of lanes.json), so a fix round never changes the
+    level of the review tasks that share the lane (Refs #1847).
+
+    The RPC command `set_thinking_level` is not the control: pi persists the level it is given as
+    the default of its agent directory (pi `setThinkingLevel` ->
+    `settingsManager.setDefaultThinkingLevel`), so every session that follows would inherit the
+    level of the fix round - the leak the issue forbids. The command line keeps the level in the
+    one process that belongs to the run, and `ps` shows it.
+    """
+    level = spec.get("thinking")
+    if level is None:
+        return child                    # a run without a level of its own uses the resident child
+    if level not in PI_THINKING_LEVELS:
+        # An unknown level never reaches pi or falls back to the level of the lane.
+        event_file = spec.get("_event_file") or os.path.join(RUNS, spec.get("run_id", ""),
+                                                            f"events.1.{lane['backend']}.jsonl")
+        lane_record_event(event_file, {"type": "pi_thinking_level_failed", "level": level,
+                                       "error": f"unknown thinking level, expected one of "
+                                               f"{', '.join(PI_THINKING_LEVELS)}"})
+        raise ValueError(f"unknown pi thinking level: {level!r}")
+    if child is not None and level == getattr(child, "thinking", None):
+        return child                    # the resident child already runs at that level
+    event_file = spec.get("_event_file") or os.path.join(RUNS, spec.get("run_id", ""),
+                                                        f"events.1.{lane['backend']}.jsonl")
+    active = dict(lanes_by_name([lane["name"]])[0])
+    active["thinking"] = level
+    wt = os.path.join(lane_root(lane["name"]), "wt")
+    try:
+        run_child = lane_child(active, wt, policy)
+    except Exception as error:
+        # Preserve the resident child for later runs, but fail this run at its requested level.
+        lane_record_event(event_file, {"type": "pi_thinking_level_failed", "level": level,
+                                       "error": short(error, 200)})
+        raise RuntimeError(f"pi thinking level {level} launch failed: {error}") from error
+    # The resident child is left alone: it keeps the level of lanes.json for the tasks that
+    # follow this run (the review tasks of the same lane).
+    lane_record_event(event_file, {"type": "pi_thinking_level", "level": level, "pid": run_child.pid})
+    return run_child
+
+
 def lane_refresh_codex_child_if_stale(lane, child, policy, event_file):
     if lane.get("backend") != "codex" or not child:
         return child, False
@@ -8743,7 +8802,8 @@ def lane_control_messages(server, lane, current, child, turn, pending):
                         with open(os.path.join(rdir, "task.md"), "w") as f:
                             f.write(task)
                         spec = {k: req.get(k) for k in ("title", "verify", "verify_baseline", "budget_minutes", "base",
-                                                        "card_type", "rework_of", "paths", "regress_label", "read_only", "scope")}
+                                                        "card_type", "rework_of", "paths", "regress_label", "read_only",
+                                                        "scope", "thinking")}
                         spec["scope"] = spec.get("scope") or "repo"
                         spec["budget_minutes"] = budget
                         if not spec.get("base"):
@@ -9675,6 +9735,7 @@ def lane_do_run(lane, spec, child, server, current):
     if lane["backend"] in ("cursor", "copilot"):
         lane_write_state(lane["name"], model=lane["model"], resolved_model=None)
     ws = None
+    resident_child = child
     turn, pending = {}, []
     try:
         ws = spec.pop("_capacity_workspace", None)
@@ -9706,6 +9767,8 @@ def lane_do_run(lane, spec, child, server, current):
             if rewritten != spec["verify"]:
                 spec["verify"] = rewritten
                 set_status(rdir, verify_note="verify paths rewritten from base repo to lane worktree")
+        if lane["backend"] == "pi":
+            child = lane_pi_thinking_child(lane, child, spec, load_policy())
         task = spec["task"]
         prompt = execution_prompt(ws["path"], task, spec.get("scope", "repo"))
         if spec.get("_recovered"):
@@ -9930,6 +9993,12 @@ def lane_do_run(lane, spec, child, server, current):
                        "seconds": round(NOW() - spec.get("started", NOW()), 3),
                        "error_class": error_class, "meta": {"usage": {}},
                        "events": evp, "error_tail": short(e, 500)}])
+    finally:
+        if child is not None and child is not resident_child:
+            try:
+                child.close()
+            except Exception:
+                pass
 
 
 def agy_quota_available(lane, child):
@@ -10276,6 +10345,9 @@ def cmd_lane_status():
 def cmd_lane_assign(args):
     validate_card_type(load_policy(), getattr(args, "card_type", None))
     lane = lanes_by_name([args.name])[0]
+    thinking = getattr(args, "thinking", None)
+    if thinking is not None and (lane["backend"] != "pi" or thinking not in PI_THINKING_LEVELS):
+        raise ValueError(f"thinking must be one of {', '.join(PI_THINKING_LEVELS)} for pi lanes")
     if args.prompt is not None:
         task = args.prompt
     else:
@@ -10302,6 +10374,7 @@ def cmd_lane_assign(args):
                                          "rework_of": getattr(args, "rework_of", None),
                                          "paths": getattr(args, "paths", None) or [],
                                          "read_only": getattr(args, "read_only", False),
+                                         "thinking": thinking,
                                          "evalid_role": role_info["role"] if role_info else None,
                                          "evalid_stage": args.evalid_stage if role_info else None,
                                          "evalid_assignment_index": args.evalid_assignment_index if role_info else None,
@@ -14679,6 +14752,8 @@ def main():
     add_dispatch_arguments(lp, "card-type", "rework-of", "paths", "read-only",
                            card_type_help="optional task card type from knowledge/card-types.yaml",
                            rework_of_help="run id this task is reworking")
+    lp.add_argument("--thinking", choices=PI_THINKING_LEVELS,
+                    help="Pi thinking level for this assignment")
     lp.add_argument("--evalid-stage", choices=("spec", "spec-check", "red", "green", "delivery"),
                     help=argparse.SUPPRESS)
     lp.add_argument("--evalid-assignment-index", type=int,

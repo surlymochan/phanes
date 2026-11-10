@@ -4,6 +4,7 @@ usage: swrm lane assign [-h] (--task-file TASK_FILE | --prompt PROMPT)
                         [--scope {repo,host}] [--card-type CARD_TYPE]
                         [--rework-of REWORK_OF] [--paths PATHS [PATHS ...]]
                         [--read-only]
+                        [--thinking {off,minimal,low,medium,high,xhigh}]
                         name
 
 positional arguments:
@@ -28,3 +29,5 @@ options:
                         path hints for matching applicable lessons
   --read-only           review task: allow status=done without repo changes or
                         commits
+  --thinking {off,minimal,low,medium,high,xhigh}
+                        Pi thinking level for this assignment
