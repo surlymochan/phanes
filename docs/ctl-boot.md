@@ -422,6 +422,74 @@ lane state):
 python3 tools/check-ad-harvest-backoff.py
 ```
 
+### Budget-window failures (Refs #1668)
+
+An executor run that ends without a commit with `error_class` set to
+`budget_exceeded` is held with `in-progress`, which frees its lane without treating
+the card as failed. An explicit non-budget `error_class` keeps the ordinary failure
+flow even if the status or summary mentions budget exhaustion. Only when the error
+class is absent does AD fall back to budget status or summary hints.
+The AD only removes that hold after it positively confirms that
+the backend window is open. By default AD reads the health-loop's `health.json`
+in its state directory (at most 900 seconds old and strictly newer than the held
+card's `at` timestamp). A snapshot taken before or at the budget failure cannot
+prove recovery; a missing or invalid hold timestamp also keeps the card held.
+For the MiniMax-consuming `pi`
+backend, `minimax.interval_pct` and `minimax.weekly_pct` are percentages remaining;
+both must be positive. An explicit `minimax.exhausted`/`remaining_pct` observation
+is also supported. Missing or unknown short-window data cannot be inferred from
+weekly headroom alone.
+The `minimax` entry must carry its own `observed_at` (epoch seconds, set by the
+health loop only when it actually queried MiniMax); the file's modification time is
+not used, so a refresh of other sources cannot revive an old quota reading. Without
+a fresh `observed_at` newer than the hold, the card stays held. Holds without
+confirmed recovery expire into `lane-failed` after `AD_BUDGET_HOLD_MAX_HOURS`
+(default 6 hours, minimum 1), requiring manual attention.
+
+`AD_BUDGET_PROBE_CMD` can override this source with a command that prints JSON
+quota state, for example `{"exhausted": false}` or
+`{"five_hour": {"used_percentage": 0}}`. A shared probe can return
+`{"backends": {"pi": {...}, "codex": {...}}}` or `{"lanes": {"M17": {...}}}`;
+AD selects the held card's lane/backend before inspecting windows. Flat output
+must describe the target; explicit `lane`/`backend` fields must match. Every
+advertised window must be known and open. Missing,
+invalid, failed, stale, or still-exhausted results keep the card held for a later tick;
+there is no fixed-delay requeue. The per-card consecutive failure count survives a
+requeue and the second budget death (`AD_BUDGET_REQUEUE_MAX`, default `2`) closes the
+card through the ordinary `lane-failed` flow. A later tick clears its terminal
+bookkeeping after the label update succeeds.
+
+**B1:** `result.json` has no required top-level reset timestamp, so AD checks the
+health snapshot or configured window probe before releasing a hold and keeps it held
+on unknown state. `test_default_health_source_releases_only_after_both_windows_recover`,
+`test_default_health_source_rejects_stale_or_unknown_windows`, and
+`test_probe_selects_the_target_lane_and_backend` cover default recovery and isolation.
+`test_default_health_source_requires_a_snapshot_after_the_hold` covers persisted
+holds across ticks: snapshots from 300 seconds before or at the hold retain the
+card, and a newer recovered snapshot permits re-dispatch.
+`test_the_card_stays_held_while_the_window_is_exhausted` and
+`test_the_card_returns_to_the_queue_when_the_window_recovered` exercise the real
+harvest-to-requeue ticks. **B2:** `_budget_failures` persists by issue across requeue;
+the terminal label update is retried if it fails, and the next tick removes the hold
+and count only after it succeeds. `test_the_budget_failure_count_survives_a_requeue`
+and `test_the_bookkeeping_of_a_card_is_cleaned_up_when_it_leaves_the_hold` cover that
+flow. `test_terminal_label_failure_is_retried_after_state_reload` covers two failed
+terminal writes, persisted holds/counts across ticks, and cleanup after recovery.
+`test_a_budget_failure_is_not_a_card_failure` also checks that the harvest
+returns the result structure expected by `tick()` and releases the lane; the real
+failure guard is `test_a_real_failure_keeps_the_lane_failed_flow`.
+`test_exec_error_overrides_budget_words_in_the_summary` checks that an explicit
+execution error remains failed across state reload and window recovery;
+`test_non_budget_class_overrides_conflicting_budget_status` covers quota errors
+with conflicting budget hints.
+
+The offline end-to-end regression drives real `tick()` harvesting, hold, window
+recovery, re-dispatch, and terminal cleanup against a fake fleet:
+
+```bash
+cd tools/lane-autodispatch && python3 -m unittest test_budget_requeue -v
+```
+
 ### AD queue share for verify cards (Refs #1794)
 
 The dispatch queue is split into two classes: **verify cards** (`verify-intent` label +
@@ -840,7 +908,7 @@ health loop is not rewritten by the probe:
 The matching alert line (appended to `health.alert`, one line per alerting service):
 
 ```
-2026-11-03 19:15:00 level=hard source=executor-tasks host=lane-host-a service=openswarm-executor-M19.service zombies=844 tasks=869/1552 ratio=0.56 parents=1210977 snapshot=/path/to/state/executor-tasks-snapshot.ps
+2026-11-03 19:15:00 level=hard source=executor-tasks host=<host>.example.invalid service=openswarm-executor-M19.service zombies=844 tasks=869/1552 ratio=0.56 parents=<pid> snapshot=<state-dir>/executor-task-snapshots/executor-tasks-<host>.example.invalid-20261103-191500-000000.ps
 ```
 
 Offline proof (a fake fleet host answers the ssh commands of the probe; no network, no
