@@ -1688,12 +1688,38 @@ def review_running(lanes, state):
 
     A lane runs one card at a time, so a lane runs at most one review (Refs #1701)."""
     state = state or {}
-    return {lane: 1 if (state.get(lane) or {}).get("class") == "verify" else 0 for lane in lanes}
+    return {lane: 1 if (state.get(lane) or {}).get("class") == "verify"
+            and not (state.get(lane) or {}).get("review_queued") else 0 for lane in lanes}
+
+def review_in_flight(lanes, state):
+    """Real admitted reviews: queued reservations plus reviews that have started."""
+    running = review_running(lanes, state)
+    queued = state.get("_review_queued") or {}
+    return {lane: running[lane] + int(lane in queued) + int(bool((state.get(lane) or {}).get("review_queued"))) for lane in lanes}
+
+def reconcile_review_queue(state, res):
+    """Release reservations on start, terminal result, or an idle interrupted dispatch."""
+    queued = state.get("_review_queued") or {}
+    assigned = {lane: card for lane, card in state.items()
+                if isinstance(card, dict) and card.get("review_queued")}
+    for lane, card in list(dict(assigned, **queued).items()):
+        remote = res.get(lane) or {}
+        if "error" in remote: continue
+        run = card.get("run")
+        if not run and lane in queued and remote.get("lane") == "idle" and not state.get(lane):
+            queued.pop(lane, None)
+            continue
+        if run and (isinstance(remote.get("run"), dict)
+                    or (remote.get("run") == "running"
+                        and remote.get("current_run") == run)):
+            queued.pop(lane, None)
+            if lane in assigned: assigned[lane].pop("review_queued", None)
+
 
 def review_backlog(lanes, state):
     """Running reviews plus the complete waiting queue from the latest tick."""
     state = state or {}
-    running = review_running(lanes, state)
+    running = review_in_flight(lanes, state)
     waiting = state.get("_review_waiting") or {}
     return {lane: running[lane] + int(waiting.get(lane, 0) or 0) for lane in lanes}
 
@@ -3567,6 +3593,7 @@ def run_tick(lanes, state, last_warn, publisher):
         res = dict(zip(live, ex.map(lambda L: remote(L, lanes[L], (state.get(L) or {}).get("run", "")), live)))
     for L in lanes:
         if L not in res: res[L] = {"error": "host in backoff", "skip": True}
+    reconcile_review_queue(state, res)
     seen = set()
     recovered_hosts = []
     for L in live:
@@ -3719,7 +3746,7 @@ def run_tick(lanes, state, last_warn, publisher):
             # The review card goes to the review lane with the smallest review backlog:
             # equal backlogs rotate over the review lanes and a lane that is at its
             # in-flight cap is skipped - the review waits for a free lane (Refs #1701).
-            running = review_running(review_ids, state)
+            running = review_in_flight(review_ids, state)
             waiting = [i for i in q if i is not pick and i.get("deps_ok", True) and i.get("verify")]
             # Memory admission applies to the lane that finally takes the review, not only to the
             # lane that was asked: a balanced-away review must not land on a host short of memory.
@@ -3734,7 +3761,7 @@ def run_tick(lanes, state, last_warn, publisher):
                     continue
                 eligible.append(lane)
             queued = review_waiting_counts(review_ids, waiting, running, head_eligible=eligible)
-            # Rank and log the running + waiting forecast, but cap only admitted runs.
+            # Rank the shared forecast; cap real queued and running reviews.
             # Shared waiting demand must not prevent an idle lane from draining it.
             loads = {lane: running[lane] + queued.get(lane, 0) for lane in review_ids}
             chosen, snapshot = pick_reviewer(review_ids, loads, eligible=eligible,
@@ -3754,8 +3781,14 @@ def run_tick(lanes, state, last_warn, publisher):
         publisher.publish(res=res, ready=len(q) - blocked, blocked=blocked, phase="dispatch")
         commit = base_commit()
         gh(["issue", "edit", str(pick["n"]), "--add-label", "in-progress"])
+        if pick.get("verify"):
+            state.setdefault("_review_queued", {})[L] = {"issue": pick["n"]}
+            save_state(state)
         try: run, ver = dispatch(L, cfg, pick, commit)
         except Exception as e:
+            if pick.get("verify"):
+                state["_review_queued"].pop(L, None)
+                save_state(state)
             dispatch_failed(L, cfg, pick, e, busy=bool(LANE_BUSY_RE.search(str(e))))
             return "no-capacity"
         if L != asked: outcomes[L] = "dispatched"
@@ -3763,6 +3796,9 @@ def run_tick(lanes, state, last_warn, publisher):
         record = {"issue": pick["n"], "run": run, "host": cfg["host"], "base": commit, "at": time.strftime("%F %T"), "verify": ver, "class": "verify" if pick.get("verify") else "work", "hot": hot_files(pick.get("body", ""))}
         with publisher._lock:
             state[L] = record
+            if pick.get("verify"):
+                state["_review_queued"].pop(L, None)
+                record["review_queued"] = True
             state.setdefault("_pool_entered_at", {}).pop(str(pick["n"]), None)
             metrics = verify_metrics(state)
             # The snapshot and saved state must reflect the slot just occupied.
@@ -3812,13 +3848,13 @@ def run_tick(lanes, state, last_warn, publisher):
             scopes = paused_scopes()
             if result.get("done"):
                 recovery_runs(state).pop(L, None)
-                state.pop(L); save_state(state); freed = True
+                state.pop(L); state.get("_review_queued", {}).pop(L, None); save_state(state); freed = True
             if result.get("error"): log(f"{L} #{st['issue']} run {st['run']}: {result['error']}", brain=False)
         elif reconcile(L, lanes[L], st, r, state):
             recovery_runs(state).pop(L, None)
-            state.pop(L); save_state(state); freed = True
+            state.pop(L); state.get("_review_queued", {}).pop(L, None); save_state(state); freed = True
         elif verify_recovered_run(L, lanes[L], st, r, state):
-            state.pop(L); save_state(state); freed = True
+            state.pop(L); state.get("_review_queued", {}).pop(L, None); save_state(state); freed = True
         if freed:
             freed_lanes.add(L)
             outcomes[L] = give_card(L, lanes[L], remote_idle=False)
@@ -3857,7 +3893,7 @@ def run_tick(lanes, state, last_warn, publisher):
     state["_pool_entered_at"] = {str(item["n"]): item["pool_entered_at"] for item in q if item.get("deps_ok", True) and "pool_entered_at" in item}
     # Publish the complete remaining queue, including overflow beyond the admission cap.
     if review_ids:
-        running = review_running(review_ids, state)
+        running = review_in_flight(review_ids, state)
         waiting_reviews = [i for i in q if i.get("deps_ok", True) and i.get("verify")]
         state["_review_waiting"] = review_waiting_counts(review_ids, waiting_reviews, running, REVIEW_MAX_IN_FLIGHT)
         if waiting_reviews:
