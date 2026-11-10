@@ -442,7 +442,9 @@ weekly headroom alone.
 The `minimax` entry must carry its own `observed_at` (epoch seconds, set by the
 health loop only when it actually queried MiniMax); the file's modification time is
 not used, so a refresh of other sources cannot revive an old quota reading. Without
-a fresh `observed_at` newer than the hold, the card stays held.
+a fresh `observed_at` newer than the hold, the card stays held. Holds without
+confirmed recovery expire into `lane-failed` after `AD_BUDGET_HOLD_MAX_HOURS`
+(default 6 hours, minimum 1), requiring manual attention.
 
 `AD_BUDGET_PROBE_CMD` can override this source with a command that prints JSON
 quota state, for example `{"exhausted": false}` or

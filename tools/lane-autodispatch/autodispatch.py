@@ -2096,6 +2096,26 @@ def release_recovered_budget_holds(state, lanes):
     holds, _ = budget_holds(state)
     for issue, hold in list(holds.items()):
         if not isinstance(hold, dict): continue
+        lane = hold.get("lane")
+        cfg = lanes.get(lane, {})
+        if not hold.get("terminal_pending"):
+            recovered = budget_window_open(lane, cfg, hold)
+            held_at = hold.get("at")
+            if (not isinstance(held_at, (int, float)) or isinstance(held_at, bool)
+                    or not math.isfinite(held_at) or held_at > time.time()):
+                held_at = hold["at"] = time.time()
+            try:
+                max_hours = max(1, int(os.environ.get("AD_BUDGET_HOLD_MAX_HOURS", "6")))
+            except ValueError:
+                max_hours = 6
+            elapsed = time.time() - held_at
+            if not recovered and elapsed > max_hours * 3600:
+                hold["terminal_pending"] = True
+                hold["terminal_reason"] = "hold_expired"
+                hold["hold_hours"] = elapsed / 3600
+                save_state(state)
+            elif not recovered:
+                continue
         if hold.get("terminal_pending"):
             lane = hold.get("lane", "lane")
             host = (lanes.get(lane) or {}).get("host", "unknown")
@@ -2107,14 +2127,15 @@ def release_recovered_budget_holds(state, lanes):
             if rc:
                 log(f"budget failure #{issue}: terminal label write failed ({err.strip()[-120:]}); retaining hold", brain=False)
                 continue
+            if hold.get("terminal_reason") == "hold_expired":
+                body = (f"Budget hold expired after {hold['hold_hours']:.2f} hours without confirmed recovery "
+                        f"(hold_expired). Label `lane-failed`; re-add `lane-ready` to retry.")
+                log(f"budget hold #{issue}: {hold['hold_hours']:.2f} hours reason=hold_expired", brain=False)
             gh(["issue", "comment", str(issue), "--body", body])
             _, counts = budget_holds(state)
             holds.pop(issue, None); counts.pop(str(issue), None)
             mark_done(state, int(issue))
             continue
-        lane = hold.get("lane")
-        cfg = lanes.get(lane, {})
-        if not budget_window_open(lane, cfg, hold): continue
         rc, _, err = gh(["issue", "edit", str(issue), "--remove-label", "in-progress"])
         if rc:
             log(f"budget hold #{issue}: window recovered but labels could not be updated ({err.strip()[-120:]})", brain=False)

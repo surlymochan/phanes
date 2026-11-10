@@ -46,6 +46,7 @@ import importlib.util
 import json
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -305,10 +306,10 @@ class BudgetRequeueTest(unittest.TestCase):
         # backend (the channel the dispatcher may use to ask for it)
         self.fleet.write_window_file()
         probe = self.root / "window-probe.sh"
-        probe.write_text("#!/bin/sh\ncat %s\n" % (self.root / "window.json"))
+        probe.write_text("#!/bin/sh\ncat %s\n" % shlex.quote(str(self.root / "window.json")))
         os.chmod(str(probe), 0o755)
         old_probe = os.environ.get("AD_BUDGET_PROBE_CMD")
-        os.environ["AD_BUDGET_PROBE_CMD"] = str(probe)
+        os.environ["AD_BUDGET_PROBE_CMD"] = shlex.quote(str(probe))
         self.addCleanup(self._restore_env, "AD_BUDGET_PROBE_CMD", old_probe)
         self.lanes = {LANE: {"host": HOST, "backend": "pi", "repo": "/tmp/fleet",
                              "fleet": "/tmp/swrm-fleet"}}
@@ -596,6 +597,38 @@ class BudgetRequeueTest(unittest.TestCase):
         path.write_text(json.dumps({"minimax": dict(minimax, observed_at=self.clock.time() - age)}))
         stamp = self.clock.time() - age
         os.utime(path, (stamp, stamp))
+
+    def test_unobserved_health_hold_expires_once(self):
+        os.environ.pop("AD_BUDGET_PROBE_CMD", None)
+        old = os.environ.get("AD_BUDGET_HOLD_MAX_HOURS")
+        os.environ["AD_BUDGET_HOLD_MAX_HOURS"] = "1"
+        self.addCleanup(self._restore_env, "AD_BUDGET_HOLD_MAX_HOURS", old)
+        for observed in (None, self.clock.time() - 1000):
+            with self.subTest(observed_at=observed):
+                self.fleet.issues[ISSUE]["labels"] = ["lane-ready", "in-progress"]
+                state = self.running()
+                self.fleet.end_run("run-1")
+                self.tick(state)
+                row = {"interval_pct": 80, "weekly_pct": 80}
+                if observed is not None:
+                    row["observed_at"] = observed
+                (self.state_dir / "health.json").write_text(json.dumps({"minimax": row}))
+                self.advance(3599)
+                self.tick(state)
+                self.assertIn("in-progress", self.labels())
+                self.advance(2)
+                messages = []
+                original_log = self.module.log
+                self.module.log = lambda message, **kwargs: messages.append(message)
+                try:
+                    self.tick(state)
+                    self.assertIn("lane-failed", self.labels())
+                    self.assertNotIn("in-progress", self.labels())
+                    self.tick(state)
+                finally:
+                    self.module.log = original_log
+                self.assertEqual(sum("hold_expired" in msg for msg in messages), 1)
+                self.assertEqual(self.holds(state), [])
 
     def test_health_file_rewrite_does_not_refresh_quota_observation(self):
         os.environ.pop("AD_BUDGET_PROBE_CMD", None)
