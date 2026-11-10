@@ -76,6 +76,13 @@ point are abandoned. Events and brain log lines contain the run ID, level and
 commit/path recovery point; recovery failure leaves the lane available for new
 assignments.
 
+### Review finding map
+
+| Finding | Change in `swrm/bin/swrm` | Test evidence |
+|---|---|---|
+| B1: a pushed commit is the recovery point | `lane_recover_assignment` fetches the exact `origin/swrm/<run_id>`; `lane_prepare_workspace` rebuilds a missing workspace from that tip or advances an existing one with `merge --ff-only` (never reset or clean) | `test_lane_recovery`: `test_pushed_commit_recovers_at_remote_tip`, `test_remote_branch_at_base_is_not_commit_recovery`, `test_stale_tracking_ref_without_remote_confirmation_is_workspace_only`; `test_lane`: `test_restart_restores_remote_tip_ahead_of_local_head`, `test_restart_restores_missing_workspace_from_pushed_tip` |
+| B2: authoritative AD verification | `lane_ad_recovery_view` reads AD's exact lane/run ownership and the open issue's `in-progress` label (read-only, local or over SSH); unavailable authority never falls back to local run status | `test_lane_recovery`: `test_ad_requires_exact_issue_owner_and_explicit_live_status`, `test_remote_ad_reads_run_ownership_and_issue_status`, `test_unavailable_ad_then_new_run_keeps_abandoned_files`, `test_mismatched_run_status_is_abandoned`; `test_lane`: `test_restart_abandons_unavailable_ad_authority` |
+
 Focused acceptance (the lane module uses fake executors and an isolated capacity
 configuration, including a disconnected Unix-socket broker):
 
