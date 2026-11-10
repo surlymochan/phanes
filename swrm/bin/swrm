@@ -7631,6 +7631,30 @@ def lane_git(args, cwd, timeout=60):
     return rc, out.strip(), err.strip()
 
 
+def lane_codex_sandbox_policy(worktree):
+    """Build the turn sandbox policy with this worktree's actual gitdir writable."""
+    policy = load_policy().get("codex", {})
+    mode = policy.get("sandbox", "workspace-write")
+    network_access = policy.get("network_access", policy.get("networkAccess", False)) is True
+    if mode == "read-only":
+        return {"type": "readOnly", "networkAccess": network_access}
+    if mode == "danger-full-access":
+        return {"type": "dangerFullAccess"}
+    if mode != "workspace-write":
+        raise ValueError(f"unsupported codex sandbox mode: {mode}")
+    rc, gitdir, err = lane_git(["rev-parse", "--absolute-git-dir"], worktree)
+    if rc:
+        raise RuntimeError(f"cannot resolve lane worktree gitdir: {err[:250]}")
+    # Linked worktrees keep their index/HEAD in gitdir, but objects and branch
+    # refs in the common directory. Both are needed for an actual git commit.
+    rc, common, err = lane_git(["rev-parse", "--git-common-dir"], worktree)
+    if rc:
+        raise RuntimeError(f"cannot resolve lane common gitdir: {err[:250]}")
+    common = os.path.realpath(os.path.join(worktree, common))
+    roots = list(dict.fromkeys([gitdir, common]))
+    return {"type": "workspaceWrite", "writableRoots": roots, "networkAccess": network_access}
+
+
 def lane_worktree_matches(repo, wt):
     if not os.path.isdir(wt) or os.path.islink(wt):
         return False
@@ -8331,7 +8355,8 @@ def lane_begin_turn(lane, child, prompt, worktree, event_file, turn):
         req_id = "turn-" + uuid.uuid4().hex
         child.send({"jsonrpc": "2.0", "id": req_id, "method": "turn/start",
                     "params": {"threadId": turn["thread_id"], "input": [{"type": "text", "text": prompt}],
-                               "effort": lane["effort"], "outputSchema": RESULT_SCHEMA}})
+                               "effort": lane["effort"], "outputSchema": RESULT_SCHEMA,
+                               "sandboxPolicy": lane_codex_sandbox_policy(worktree)}})
         reply = child.wait_response(req_id, 60, event_file)
         if reply.get("error"):
             raise RuntimeError(f"codex turn/start failed: {short(reply['error'], 300)}")
