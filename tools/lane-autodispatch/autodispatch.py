@@ -1398,6 +1398,36 @@ def save_state(s):
 def gh(args, timeout=60):
     return sh(["gh"] + args + ["-R", REPO], timeout=timeout)
 
+# Ported from refs/old/1774; only workflow labels participate in delivery.
+DELIVERY_LABELS = {"lane-ready", "in-progress", "lane-pr"}
+DELIVERY_ATTEMPTS = 3
+
+def ensure_delivery_state(n):
+    """Verify delivery using fresh gh reads; never replace unrelated labels."""
+    def read():
+        rc, out, err = gh(["issue", "view", str(n), "--json", "labels"])
+        if rc: raise RuntimeError(f"label read rc={rc}")
+        payload = json.loads(out)
+        if not isinstance(payload.get("labels"), list):
+            raise ValueError("missing label list")
+        return label_names(payload)
+
+    for attempt in range(1, DELIVERY_ATTEMPTS + 1):
+        try:
+            labels = read()  # A failed pre-read must not authorize a write.
+            if labels & DELIVERY_LABELS == {"lane-pr"}: return True
+            rc, _, _ = gh(["issue", "edit", str(n), "--remove-label", "lane-ready",
+                           "--remove-label", "in-progress", "--add-label", "lane-pr"])
+            if rc: raise RuntimeError(f"label write rc={rc}")
+            if read() & DELIVERY_LABELS == {"lane-pr"}: return True
+            error = "workflow labels not terminal"
+        except Exception as exc:
+            error = type(exc).__name__
+        log(f"#{n} delivery label attempt {attempt}/{DELIVERY_ATTEMPTS} failed: {error}", brain=False)
+    log(f"WARNING #{n} delivery labels unverified after {DELIVERY_ATTEMPTS} attempts; "
+        "lane-ready must be cleared; manual repair required", brain=True)
+    return False
+
 def label_names(issue):
     return {
         label if isinstance(label, str) else label["name"]
@@ -3333,12 +3363,17 @@ def finish(lane, cfg, st, info, state):
         if missing:
             log(f"{lane} #{n} run {run} PR validation ({mode}): 缺 {'；'.join(missing)}", brain=False)
         rc, out, err = gh(["pr", "create", "--base", "main", "--head", b, "--title", title, "--body", body])
-        url = (out.strip().splitlines() or [""])[-1] if not rc else f"(pr create failed: {err.strip()[-160:]})"
-        gh(["issue", "edit", str(n), "--remove-label", "in-progress", "--remove-label", "lane-ready", "--add-label", "lane-pr"])
+        if rc:
+            # No PR exists: the issue is not delivered, so nothing is relabelled, recorded or marked done.
+            log(f"{lane} #{n} run {run} gh pr create failed: {err.strip()[-160:]}")
+            return {"done": False, "status": "pr-create-failed", "error": f"gh pr create failed: {err.strip()[-160:]}", "missing": []}
+        url = (out.strip().splitlines() or [""])[-1]
+        delivered = ensure_delivery_state(n)
         clear_budget_history(state, n)
         record_verify_time(state, n, "evidence_ready")
         log(f"{lane} finished #{n} (run {run}, {info.get('status')}) → {url}"); mark_done(state, n)
-        return {"done": True, "status": "pr-created", "error": None, "missing": []}
+        return {"done": True, "status": "pr-created",
+                "error": None if delivered else "PR delivery labels unverified", "missing": []}
     else:
         if budget_failure(info):
             return hold_budget_failure(lane, cfg, st, info, state)

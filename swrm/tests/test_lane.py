@@ -46,7 +46,7 @@ class CodexSandboxTests(unittest.TestCase):
             # linked worktrees), so the gitdir and common dir are the same path.
             wt.parent.mkdir(parents=True)
             subprocess.run(["git", "clone", "-q", str(self.repo), str(wt)], check=True,
-                           capture_output=True)
+                           capture_output=True, env={**os.environ, **GIT_IDENTITY})
         self.policy = {"codex": {"sandbox": "workspace-write"}}
         patch = mock.patch.object(self.swrm, "load_policy", return_value=self.policy)
         patch.start()
@@ -693,7 +693,8 @@ class LaneTests(unittest.TestCase):
         self.git("reset", "--hard", original)
         self.git("reflog", "expire", "--expire=now", "--all")
         self.git("gc", "--prune=now")
-        missing = subprocess.run(["git", "cat-file", "-e", base], cwd=self.repo, capture_output=True)
+        missing = subprocess.run(["git", "cat-file", "-e", base], cwd=self.repo, capture_output=True,
+                                 env={**os.environ, **GIT_IDENTITY})
         self.assertNotEqual(missing.returncode, 0, "source must actually prune the lane's base")
 
         self.git("-C", str(wt), "fsck", "--full")
@@ -760,7 +761,7 @@ class LaneTests(unittest.TestCase):
                              "user.email=lane-test@example.invalid", "commit", "-q", "-m", run_id)
                     head = self.git("-C", str(wt), "rev-parse", "HEAD")
                     missing = subprocess.run(["git", "cat-file", "-e", head], cwd=self.repo,
-                                             capture_output=True)
+                                             capture_output=True, env={**os.environ, **GIT_IDENTITY})
                     self.assertNotEqual(missing.returncode, 0)
                     spec = {"run_id": run_id, "task": "deliver executor commit", "started": time.time(),
                             "budget_minutes": 1}
@@ -971,7 +972,8 @@ class LaneTests(unittest.TestCase):
         worktrees = [self.root / "lanes" / lane / "wt" for lane in ("L1", "L2")]
         for worktree in worktrees:
             subprocess.run(["git", "-C", str(self.repo), "worktree", "add", "--detach", "-q",
-                            str(worktree), "HEAD"], check=True, capture_output=True, text=True)
+                            str(worktree), "HEAD"], check=True, capture_output=True, text=True,
+                           env={**os.environ, **GIT_IDENTITY})
 
         class RecordingChild:
             def __init__(self):
@@ -996,7 +998,8 @@ class LaneTests(unittest.TestCase):
         turns = [request["params"] for request in child.requests if request.get("method") == "turn/start"]
         gitdirs = {str(wt): subprocess.run(
             ["git", "-C", str(wt), "rev-parse", "--absolute-git-dir"],
-            check=True, capture_output=True, text=True).stdout.strip() for wt in worktrees}
+            check=True, capture_output=True, text=True,
+            env={**os.environ, **GIT_IDENTITY}).stdout.strip() for wt in worktrees}
         self.assertEqual(len(set(gitdirs.values())), 2)
         for worktree, params in zip(worktrees, turns):
             sandbox = params["sandboxPolicy"]
@@ -1540,7 +1543,8 @@ class LaneTests(unittest.TestCase):
         self.assertIn("busy", json.loads(second.stdout)["error"])
         wt = self.data / "lanes" / self.lane_name / "wt"
         self.assertEqual(subprocess.run(["git", "rev-parse", "HEAD"], cwd=wt, check=True,
-                                        capture_output=True, text=True).stdout.strip(), original_head)
+                                        capture_output=True, text=True,
+                                        env={**os.environ, **GIT_IDENTITY}).stdout.strip(), original_head)
         self.assertFalse((wt / "later-commit.txt").exists())
         supervisor_pid = self.lane_state()["supervisor_pid"]
         child_pid = self.lane_state()["child_pid"]
@@ -1595,6 +1599,67 @@ class LaneTests(unittest.TestCase):
         pid_after = self.lane_state()["child_pid"]
         self.assertNotEqual(pid_before, pid_after)
 
+    def test_codex_lane_status_reports_app_server_health(self):
+        self.start_lane()
+        self.wait_for(lambda: self.lane_state().get("server_alive"))
+        status = json.loads(self.cli("lane", "status").stdout)[0]
+        self.assertIs(status.get("server_alive"), True)
+        self.assertIsInstance(status.get("server_last_success"), (int, float))
+        self.assertEqual(status.get("server_restart_count"), 0)
+
+    def test_codex_app_server_probe_restarts_unresponsive_process_and_recovers(self):
+        # Issue-described replay: initialize answers, then a live process drops probes.
+        self.env["FAKE_APP_SERVER_IGNORE_PROBE_ONCE_FILE"] = str(self.root / "ignored-probe")
+        (self.data / "policy.local.json").write_text(json.dumps({"lane_health_probe": {
+            "interval_seconds": 0.1, "timeout_seconds": 0.1, "failure_threshold": 2,
+            "smoke_test_timeout_seconds": 2,
+        }}))
+        self.start_lane()
+        pid_before = self.lane_state()["child_pid"]
+        recovered = self.wait_for(
+            lambda: (state if (state := self.lane_state()).get("child_pid") not in (None, pid_before)
+                     and state.get("server_validation_passed") is True else None),
+            timeout=12, description="Codex app-server probe restart and recovery")
+        self.assertTrue(recovered.get("server_alive"))
+        self.assertIsInstance(recovered.get("server_last_success"), (int, float))
+        self.assertNotEqual(recovered.get("state"), "paused")
+
+    def test_codex_app_server_failed_smoke_validation_keeps_lane_paused_and_alerts(self):
+        # Fail only the post-restart smoke turn; the first server ignores health probes.
+        self.env["FAKE_APP_SERVER_IGNORE_PROBE_ONCE_FILE"] = str(self.root / "ignored-probe")
+        self.env["FAKE_APP_SERVER_FAIL_TURNS"] = "1"
+        (self.data / "policy.local.json").write_text(json.dumps({"lane_health_probe": {
+            "interval_seconds": 0.1, "timeout_seconds": 0.1, "failure_threshold": 2,
+            "smoke_test_timeout_seconds": 2,
+        }}))
+        self.start_lane()
+        paused = self.wait_for(
+            lambda: (state if (state := self.lane_state()).get("state") == "paused" else None),
+            timeout=12, description="lane pause after failed app-server smoke validation")
+        self.assertTrue(paused.get("server_health_alert"))
+        self.assertFalse(paused.get("server_validation_passed", True))
+        self.wait_for(lambda: f"ALERT lane {self.lane_name} paused:" in
+                      (self.data / "lanes" / self.lane_name / "supervisor.log").read_text(),
+                      description="active health alert delivery")
+        self.assertNotEqual(self.cli("lane", "assign", self.lane_name, "--prompt", "no dispatch",
+                                     check=False).returncode, 0)
+
+    def test_codex_probe_restarts_server_hung_during_active_task(self):
+        (self.data / "policy.local.json").write_text(json.dumps({"lane_health_probe": {
+            "interval_seconds": 0.1, "timeout_seconds": 0.1, "failure_threshold": 2,
+            "smoke_test_timeout_seconds": 2,
+        }}))
+        self.start_lane()
+        pid_before = self.lane_state()["child_pid"]
+        run_id = self.assign("LANE_TEST_HANG during an active task")
+        self.assertEqual(self.wait_run(run_id)["status"], "failed")
+        recovered = self.wait_for(
+            lambda: (s if (s := self.lane_state()).get("server_validation_passed")
+                     and s.get("state") == "idle" else None), description="active task recovery")
+        self.assertNotEqual(recovered["child_pid"], pid_before)
+        self.assertEqual(self.wait_run(self.assign("task after recovery"))["status"], "done")
+
+
 
 def process_alive(pid):
     try:
@@ -1603,6 +1668,138 @@ def process_alive(pid):
     except (OSError, TypeError, ValueError):
         return False
 
+
+
+
+
+class CodexHealthProbeTests(unittest.TestCase):
+    """Replay issue #1709's live-but-unresponsive server; raw CX9 bundles unavailable."""
+
+    def setUp(self):
+        from _load import load
+        self.xs = load()
+        self.tmp = tempfile.TemporaryDirectory(prefix="health-", dir=ROOT.parent)
+        self.addCleanup(self.tmp.cleanup)
+        self.root = pathlib.Path(self.tmp.name)
+        self.lane = {"name": "L1", "backend": "codex", "model": "fake-model",
+                     "binary": str(FIXTURES / "fake_app_server.py")}
+        self.state = {"server_started": time.time() - 3600}
+        self.policy = {"lane_health_probe": {"interval_seconds": 0.05, "timeout_seconds": 0.1,
+                                            "failure_threshold": 2, "smoke_test_timeout_seconds": 2}}
+        for name, value in (("lane_root", str(self.root)), ("lane_state_path", "unused")):
+            patch = mock.patch.object(self.xs, name, return_value=value)
+            patch.start()
+            self.addCleanup(patch.stop)
+        patch = mock.patch.object(self.xs, "jload", side_effect=lambda *args: dict(self.state))
+        patch.start()
+        self.addCleanup(patch.stop)
+        patch = mock.patch.object(self.xs, "lane_write_state",
+                                  side_effect=lambda name, **kw: self.state.update(kw))
+        patch.start()
+        self.addCleanup(patch.stop)
+        self.children = []
+        self.addCleanup(lambda: [child.close() for child in self.children])
+
+    def spawn(self, *args):
+        child = self.xs.LaneChild(self.lane, str(self.root), self.policy)
+        self.children.append(child)
+        return child
+
+    def test_live_unresponsive_process_restarts_at_threshold_and_verifies(self):
+        marker = self.root / "first-server"
+        with mock.patch.dict(os.environ, {"FAKE_APP_SERVER_IGNORE_PROBE_ONCE_FILE": str(marker)}):
+            child = self.spawn()
+            self.assertIs(self.xs.lane_codex_health_probe(self.lane, child, self.policy), child)
+            self.assertTrue(child.alive())
+            self.assertEqual(self.state["server_probe_failures"], 1)
+            self.assertNotIn("server_restart_count", self.state)
+            self.state["server_probe_at"] = 0
+            with mock.patch.object(self.xs, "lane_child", side_effect=self.spawn):
+                replacement = self.xs.lane_codex_health_probe(self.lane, child, self.policy)
+            self.assertIs(replacement, self.children[1])
+            self.assertFalse(child.alive())
+            self.assertTrue(self.state["server_validation_passed"])
+            self.assertEqual(self.state["server_restart_count"], 1)
+            event = json.loads((self.root / "brain.jsonl").read_text())
+            self.assertEqual(event["lane"], "L1")
+            self.assertGreaterEqual(event["runtime_seconds"], 3600)
+            self.assertIn("timed out", event["reason"])
+
+    def test_failed_validation_stays_paused_and_alerts(self):
+        marker = self.root / "first-server"
+        self.policy["lane_health_probe"]["failure_threshold"] = 1
+        with mock.patch.dict(os.environ, {"FAKE_APP_SERVER_IGNORE_PROBE_ONCE_FILE": str(marker),
+                                         "FAKE_APP_SERVER_FAIL_TURNS": "1"}):
+            child = self.spawn()
+            with mock.patch.object(self.xs, "lane_child", side_effect=self.spawn),                     mock.patch("sys.stderr") as stderr:
+                self.assertIsNone(self.xs.lane_codex_health_probe(self.lane, child, self.policy))
+            self.assertEqual(self.state["state"], "paused")
+            self.assertFalse(self.state["server_validation_passed"])
+            self.assertTrue(self.state["server_health_alert"])
+            self.assertFalse(self.children[1].alive())
+            self.assertTrue(stderr.write.called)
+            events = [json.loads(line) for line in (self.root / "brain.jsonl").read_text().splitlines()]
+            self.assertEqual(events[-1]["type"], "codex_app_server_health_alert")
+
+    def test_monitor_detects_active_hang_without_consuming_task_reply(self):
+        child = self.spawn()
+        child.send({"id": "task", "method": "turn/start", "params": {
+            "threadId": "fake-thread", "input": [{"type": "text", "text": "LANE_TEST_HANG"}]}})
+        self.xs.lane_start_codex_health_monitor(self.lane, child, self.policy)
+        self.assertEqual(child.wait_response("task", 2)["turn"]["id"], "fake-turn")
+        child.health_monitor.join(timeout=4)
+        self.assertFalse(child.health_monitor.is_alive())
+        self.assertIsInstance(child.health_restart_reason, str)
+        self.assertFalse(child.alive())
+        self.assertEqual(self.state["server_probe_failures"], 2)
+        self.assertFalse(child.health_waiters)
+
+    def test_health_fields_are_visible_and_dead_pid_overrides_cached_alive(self):
+        self.state.update(supervisor_pid=12, child_pid=13, server_alive=True,
+                          server_last_success=123, server_restart_count=2)
+        with mock.patch.object(self.xs, "lane_config", return_value=[self.lane]),                 mock.patch.object(self.xs, "pid_alive", return_value=True),                 mock.patch.object(self.xs, "lane_state_lock"),                 mock.patch.object(self.xs, "load_policy", return_value={}):
+            row = self.xs.lane_status_rows()[0]
+            self.assertTrue(row["server_alive"])
+            self.assertEqual(row["server_last_success"], 123)
+            self.assertEqual(row["server_restart_count"], 2)
+            with mock.patch.object(self.xs, "pid_alive", return_value=False):
+                self.assertFalse(self.xs.lane_status_rows()[0]["server_alive"])
+
+    def test_rpc_error_is_liveness_and_success_resets_failure_streak(self):
+        child = mock.Mock()
+        child.health_restart_reason = None
+        child.wait_response.return_value = {"error": {"code": -32601}}
+        self.state["server_probe_failures"] = 1
+        self.assertIs(self.xs.lane_codex_health_probe(self.lane, child, self.policy), child)
+        self.assertEqual(self.state["server_probe_failures"], 0)
+        self.assertTrue(self.state["server_alive"])
+        self.assertEqual(child.send.call_args.args[0]["method"], "model/list")
+
+    def test_smoke_rejects_unrelated_turn_completion(self):
+        child = mock.Mock()
+        child.health_restart_reason = "no response"
+        replacement = mock.Mock()
+        replacement.wait_response.side_effect = [{"thread": {"id": "smoke"}},
+                                                 {"turn": {"id": "smoke-turn"}}]
+        replacement.next_event.return_value = {
+            "method": "turn/completed",
+            "params": {"threadId": "other", "turn": {"id": "other", "status": "completed"}}}
+        self.policy["lane_health_probe"]["smoke_test_timeout_seconds"] = 0.1
+        with mock.patch.object(self.xs, "lane_child", return_value=replacement),                 mock.patch("sys.stderr"):
+            self.assertIsNone(self.xs.lane_codex_health_probe(self.lane, child, self.policy))
+        self.assertEqual(self.state["state"], "paused")
+        self.assertFalse(self.state["server_validation_passed"])
+        replacement.close.assert_called_once()
+
+    def test_failed_restart_counts_attempt_and_pauses(self):
+        child = mock.Mock()
+        child.health_restart_reason = "no response"
+        self.state["server_probe_failures"] = 2
+        with mock.patch.object(self.xs, "lane_child", side_effect=RuntimeError("cannot start")),                 mock.patch("sys.stderr"):
+            self.assertIsNone(self.xs.lane_codex_health_probe(self.lane, child, self.policy))
+        self.assertEqual(self.state["server_restart_count"], 1)
+        self.assertEqual(self.state["state"], "paused")
+        self.assertTrue(self.state["server_health_alert"])
 
 
 class AgyStartupRegressionTests(unittest.TestCase):
