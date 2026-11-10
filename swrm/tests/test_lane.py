@@ -1762,6 +1762,76 @@ class CodexHealthProbeTests(unittest.TestCase):
         self.assertNotIn("server_restart_count", self.state)
         self.assertFalse(child.health_waiters)
 
+    def session_stats(self, child):
+        child.send({"id": "health-stats", "method": "fixture/session-stats"})
+        return child.wait_response("health-stats", 2)
+
+    def test_repeated_probes_release_unique_sessions(self):
+        log = self.root / "requests.jsonl"
+        with mock.patch.dict(os.environ, {"FAKE_APP_SERVER_LOG": str(log)}):
+            child = self.spawn()
+        for _ in range(100):
+            self.state["server_probe_at"] = 0
+            self.assertIs(self.xs.lane_codex_health_probe(self.lane, child, self.policy), child)
+            self.assertTrue(self.state["server_alive"])
+            self.assertEqual(self.session_stats(child)["live"], 0)
+        self.assertEqual(self.session_stats(child), {"created": 100, "released": 100, "live": 0})
+        requests = [json.loads(line) for line in log.read_text().splitlines()]
+        ids = [req["params"]["threadId"] for req in requests
+               if req.get("method") == "thread/unsubscribe"]
+        self.assertEqual(len(set(ids)), 100)
+        self.assertFalse(child.health_waiters)
+
+    def test_failure_after_creation_still_releases_session(self):
+        for error in (RuntimeError("probe failed"), TimeoutError("probe timed out")):
+            with self.subTest(error=error):
+                self.state.clear()
+                child = self.spawn()
+
+                def write_state(name, **kw):
+                    if kw.get("server_alive"):
+                        raise error
+                    self.state.update(kw)
+
+                with mock.patch.object(self.xs, "lane_write_state", side_effect=write_state):
+                    self.assertIs(self.xs.lane_codex_health_probe(self.lane, child, self.policy), child)
+                self.assertFalse(self.state["server_alive"])
+                self.assertEqual(self.state["server_probe_failures"], 1)
+                self.assertEqual(self.session_stats(child), {"created": 1, "released": 1, "live": 0})
+
+    def test_creation_failure_without_id_does_not_release(self):
+        for reply in ({"error": {"message": "cannot create"}}, {"thread": {}}):
+            with self.subTest(reply=reply):
+                self.state.clear()
+                child = mock.Mock(health_restart_reason=None)
+                child.wait_response.side_effect = [{}, reply]
+                self.xs.lane_codex_health_probe(self.lane, child, self.policy)
+                self.assertFalse(self.state["server_alive"])
+                self.assertEqual([call.args[0]["method"] for call in child.send.call_args_list],
+                                 ["model/list", "thread/start"])
+        for failure in ("error", "timeout"):
+            with self.subTest(failure=failure):
+                self.state.clear()
+                with mock.patch.dict(os.environ, {"FAKE_APP_SERVER_SESSION_FAILURE": failure}):
+                    child = self.spawn()
+                self.xs.lane_codex_health_probe(self.lane, child, self.policy)
+                self.assertFalse(self.state["server_alive"])
+                self.assertEqual(self.session_stats(child), {"created": 0, "released": 0, "live": 0})
+
+    def test_release_failure_is_logged_without_failing_probe(self):
+        for failure in ("error", "timeout"):
+            with self.subTest(failure=failure):
+                self.state.clear()
+                with mock.patch.dict(os.environ, {"FAKE_APP_SERVER_RELEASE_FAILURE": failure}):
+                    child = self.spawn()
+                with mock.patch("sys.stderr") as stderr:
+                    self.assertIs(self.xs.lane_codex_health_probe(self.lane, child, self.policy), child)
+                self.assertTrue(self.state["server_alive"])
+                self.assertEqual(self.state["server_probe_failures"], 0)
+                self.assertIn("thread/unsubscribe failed", "".join(
+                    call.args[0] for call in stderr.write.call_args_list))
+                self.assertFalse(child.health_waiters)
+
     def test_failed_validation_stays_paused_and_alerts(self):
         marker = self.root / "first-server"
         self.policy["lane_health_probe"]["failure_threshold"] = 1
@@ -1805,6 +1875,10 @@ class CodexHealthProbeTests(unittest.TestCase):
         self.assertFalse(child.health_monitor.is_alive())
         self.assertTrue(self.state.get("server_alive"))
         self.assertEqual(self.state["server_probe_failures"], 0)
+        stats = self.session_stats(child)
+        self.assertGreater(stats["created"], 0)
+        self.assertEqual(stats["created"], stats["released"])
+        self.assertEqual(stats["live"], 0)
         self.assertIsNone(child.health_restart_reason)
         self.assertTrue(child.alive())
         self.assertFalse(child.health_waiters)
@@ -1824,13 +1898,13 @@ class CodexHealthProbeTests(unittest.TestCase):
         child = mock.Mock()
         child.health_restart_reason = None
         child.wait_response.side_effect = [{"error": {"code": -32601}},
-                                           {"thread": {"id": "probe-thread"}}]
+                                           {"thread": {"id": "probe-thread"}}, {}]
         self.state["server_probe_failures"] = 1
         self.assertIs(self.xs.lane_codex_health_probe(self.lane, child, self.policy), child)
         self.assertEqual(self.state["server_probe_failures"], 0)
         self.assertTrue(self.state["server_alive"])
         self.assertEqual([call.args[0]["method"] for call in child.send.call_args_list],
-                         ["model/list", "thread/start"])
+                         ["model/list", "thread/start", "thread/unsubscribe"])
 
     def test_smoke_rejects_unrelated_turn_completion(self):
         child = mock.Mock()
