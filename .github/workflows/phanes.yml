@@ -175,3 +175,33 @@ jobs:
             done
       - name: Validate scenario data
         run: python examples/org-health-local/validate.py
+  ci-gate:
+    name: ci-gate
+    needs:
+      - forbidden-paths
+      - changes
+      - example-json
+      - upstream-drift
+      - swrm
+      - volto
+      - volto-scenario-tests
+    if: always()
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions: {}
+    steps:
+      - name: Require all checks to pass
+        env:
+          NEEDS_JSON: ${{ toJSON(needs) }}
+        run: |
+          python3 - <<'PY'
+          import json
+          import os
+          import sys
+
+          results = json.loads(os.environ["NEEDS_JSON"])
+          failed = [name for name, job in results.items() if job["result"] in {"failure", "cancelled"}]
+          if failed:
+              print("Failed or cancelled checks: " + ", ".join(sorted(failed)), file=sys.stderr)
+              sys.exit(1)
+          PY
