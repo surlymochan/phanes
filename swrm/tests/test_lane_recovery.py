@@ -48,7 +48,7 @@ class LaneRecoveryTests(unittest.TestCase):
                                                            "workspace_path": str(self.wt), "session_file": "saved-session.jsonl",
                                                            "base": self.git("rev-parse", "HEAD")}))
         self.wt.parent.mkdir(parents=True)
-        self.git("worktree", "add", "--detach", "-q", str(self.wt), "HEAD")
+        self.git("clone", "--no-hardlinks", "--dissociate", "-q", str(self.repo), str(self.wt))
         self.git("checkout", "-q", "-b", f"swrm/{self.run_id}", cwd=self.wt)
         (self.data / "lanes" / "L1" / "state.json").parent.mkdir(parents=True, exist_ok=True)
         (self.data / "lanes" / "L1" / "state.json").write_text(json.dumps({
@@ -408,9 +408,8 @@ class LaneRecoveryTests(unittest.TestCase):
         self.git("commit", "-q", "-m", "saved progress", cwd=self.wt)
         bare = self.root / "remote.git"
         subprocess.run(["git", "init", "--bare", "-q", str(bare)], check=True)
-        self.git("remote", "add", "origin", str(bare), cwd=self.wt)
-        self.git("push", "-q", "origin", f"swrm/{self.run_id}", cwd=self.wt)
-        self.git("fetch", "-q", "origin", cwd=self.wt)
+        self.git("remote", "add", "origin", str(bare))
+        self.git("push", "-q", str(bare), f"swrm/{self.run_id}", cwd=self.wt)
         spec, error = self.recover()
         self.assertIsNone(error)
         self.assertEqual(spec["_recovery_level"], "commit")
@@ -420,9 +419,8 @@ class LaneRecoveryTests(unittest.TestCase):
         self.setup_run()
         bare = self.root / "remote.git"
         subprocess.run(["git", "init", "--bare", "-q", str(bare)], check=True)
-        self.git("remote", "add", "origin", str(bare), cwd=self.wt)
-        self.git("push", "-q", "origin", f"swrm/{self.run_id}", cwd=self.wt)
-        self.git("fetch", "-q", "origin", cwd=self.wt)
+        self.git("remote", "add", "origin", str(bare))
+        self.git("push", "-q", str(bare), f"swrm/{self.run_id}", cwd=self.wt)
         spec, error = self.recover()
         self.assertIsNone(error)
         self.assertEqual(spec["_recovery_level"], "workspace")
@@ -467,6 +465,7 @@ class LaneRecoveryTests(unittest.TestCase):
         self.git("add", "saved.txt", cwd=self.wt)
         self.git("commit", "-qm", "local progress", cwd=self.wt)
         tip = self.git("rev-parse", "HEAD", cwd=self.wt)
+        self.git("fetch", "-q", str(self.wt), tip)
         self.git("update-ref", f"refs/remotes/origin/swrm/{self.run_id}", tip)
         spec, error = self.recover()
         self.assertIsNone(error)
@@ -480,6 +479,7 @@ class LaneRecoveryTests(unittest.TestCase):
         child.send.assert_not_called()
 
     def test_codex_resumes_saved_persistent_thread(self):
+        self.setup_run()
         child = mock.Mock()
         child.wait_response.side_effect = [{"thread": {"id": "saved-thread"}}, {"turn": {"id": "new-turn"}}]
         spec = {"_recovered": True, "run_id": self.run_id, "thread_id": "saved-thread"}

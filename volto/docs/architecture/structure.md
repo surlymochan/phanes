@@ -39,8 +39,9 @@ vendor/              Patches for the vendored remote desktop runtime
 ```
 
 The desktop application stays at the repository root. Its package metadata is also the release
-metadata used by Electron Builder and GitHub releases. Moving it into `apps/desktop` would create a
-second version source and add package-signing risk without adding a useful runtime boundary.
+metadata used by Electron Builder and GitHub releases. Moving it into a directory under `apps/` would
+create a second version source and add package-signing risk without adding a useful runtime
+boundary.
 
 Unpackaged and test Electron runs isolate `safeStorage` from the OS keychain (`use-mock-keychain` on
 macOS and `password-store=basic` on Linux), including standalone browser E2E launches. Packaged
