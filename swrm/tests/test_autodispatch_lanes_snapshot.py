@@ -416,6 +416,32 @@ class TenMinuteConsistencyTests(unittest.TestCase):
         self.assertGreater(max(ages), STALE_AFTER)
         self.assertEqual(set(statuses), {"stale"})
 
+    def test_successful_queue_read_is_saved_even_when_later_steps_raise(self):
+        """State updated by a good queue read must reach disk if deps/metrics/publish then fail."""
+        clock = FakeClock(1700000000.0)
+        fixture = DispatcherFixture(self.ad, self.tmp.name, clock)
+        fixture.path.write_text(json.dumps({"_at": STALLED_AT, "_ready": 99}))
+        state = {"_queue_failures": 3}
+        saved = []
+        patches = fixture.patches()
+
+        def bad_publish(self_, **kwargs):
+            if kwargs.get("phase") == "deps":
+                raise RuntimeError("snapshot build failed")
+
+        for patch in patches:
+            patch.start()
+        try:
+            with mock.patch.object(self.ad, "time", clock), \
+                    mock.patch.object(self.ad.StatusPublisher, "publish", bad_publish), \
+                    mock.patch.object(self.ad, "save_state", side_effect=lambda st: saved.append(dict(st))):
+                with self.assertRaises(RuntimeError):
+                    self.ad.tick(dict(fixture.LANES), state, 0)
+        finally:
+            for patch in reversed(patches):
+                patch.stop()
+        self.assertTrue(any(snap.get("_queue_failures") == 0 for snap in saved), saved)
+
     def test_dispatch_updates_queue_counts_before_slow_save_and_next_dispatch(self):
         """A fresh stamp must carry the remaining queue, including during slow I/O."""
         clock = FakeClock(1700000000.0)

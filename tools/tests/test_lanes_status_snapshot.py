@@ -143,7 +143,7 @@ class TickRunner:
             "dispatch": lambda lane, cfg, item, base: ("run-1", None),
             "replenish": lambda count, state: [],
             "save_state": lambda state: None,
-            "queue": lambda: [],
+            "queue": lambda *args, **kwargs: [],
             "gh": lambda *a, **k: (0, "", ""),
             "sh": lambda *a, **k: (0, "0" * 40, ""),
             "log": self._collect,

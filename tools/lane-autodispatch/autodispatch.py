@@ -3157,21 +3157,25 @@ def run_tick(lanes, state, last_warn, publisher):
                 return False
             raise
         state["_queue_failures"] = 0
-        for i in q:
-            if "deps_ok" not in i: i["deps_ok"] = deps_met(i)
-        metrics = verify_metrics(state)
-        for item in q:
-            if item.get("verify"):
-                # Use the order time, including time spent waiting while AD was stopped.
-                queued = item.get("queued")
-                metrics["cards"].setdefault(str(item["n"]), {"issue": item["n"], "queued": now if queued is None else queued})
-        # Dispatch reads labels in score order before freshen_queue uses the remaining
-        # read budget. Prefetching by issue number can starve a high-scoring old card,
-        # so the early snapshot counts the rows as read; the authoritative freshen_queue
-        # pass runs after the dispatches.
-        blocked = sum(not i["deps_ok"] for i in q)
-        publisher.publish(res=res, ready=len(q) - blocked, blocked=blocked, phase="deps")
-        save_state(state)  # admission clocks survive --once and failures later in the tick; after the fresh counts are stamped
+        try:
+            for i in q:
+                if "deps_ok" not in i: i["deps_ok"] = deps_met(i)
+            metrics = verify_metrics(state)
+            for item in q:
+                if item.get("verify"):
+                    # Use the order time, including time spent waiting while AD was stopped.
+                    queued = item.get("queued")
+                    metrics["cards"].setdefault(str(item["n"]), {"issue": item["n"], "queued": now if queued is None else queued})
+            # Dispatch reads labels in score order before freshen_queue uses the remaining
+            # read budget. Prefetching by issue number can starve a high-scoring old card,
+            # so the early snapshot counts the rows as read; the authoritative freshen_queue
+            # pass runs after the dispatches.
+            blocked = sum(not i["deps_ok"] for i in q)
+            publisher.publish(res=res, ready=len(q) - blocked, blocked=blocked, phase="deps")
+        finally:
+            # persist right after a successful read even if the steps above raise; the normal path
+            # stamps the fresh counts first so the snapshot is never staler than the saved state
+            save_state(state)
         return True
 
     def base_commit():
