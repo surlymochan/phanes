@@ -13,7 +13,8 @@ from pathlib import Path
 from unittest.mock import patch
 
 from tools.evalid_roles_control import (LocalEvidence, MockSwrm, NativeEvidence, Rejected, RoleController,
-                                        RECORDED_REJECTIONS, UNRECORDED_REJECTIONS, _tree_snapshot_digest, digest)
+                                        RECORDED_REJECTIONS, UNRECORDED_JUSTIFICATIONS, UNRECORDED_REJECTIONS,
+                                        _tree_snapshot_digest, digest)
 
 
 ROOT = Path(__file__).resolve().parent
@@ -75,8 +76,14 @@ class TestEvalidRolesControl(unittest.TestCase):
         self.temp.cleanup()
 
     def _git(self, *args):
+        # The fixture commits with an explicit identity, so the tests never
+        # depend on the identity of the machine that runs them.
+        env = dict(os.environ, GIT_AUTHOR_NAME="Fixture Author",
+                   GIT_AUTHOR_EMAIL="fixture@example.invalid",
+                   GIT_COMMITTER_NAME="Fixture Author",
+                   GIT_COMMITTER_EMAIL="fixture@example.invalid")
         result = subprocess.run(["git", "-C", str(self.project), *args], check=True,
-                                capture_output=True, text=True)
+                                capture_output=True, text=True, env=env)
         return result.stdout.strip()
 
     def _file_digest(self, relative):
@@ -370,6 +377,16 @@ class TestEvalidRolesControl(unittest.TestCase):
         raised = set(re.findall(r'Rejected\("([a-z_]+)"\)', source))
         self.assertFalse(RECORDED_REJECTIONS & UNRECORDED_REJECTIONS)
         self.assertEqual(raised, RECORDED_REJECTIONS | UNRECORDED_REJECTIONS)
+
+    def test_every_unrecorded_code_carries_a_written_reason(self):
+        # An UNRECORDED code stays out of the attempt history only because it is a
+        # precondition or a malformed call, never a verdict on the evidence: the
+        # written reason says which one it is, for every code.
+        self.assertEqual(set(UNRECORDED_JUSTIFICATIONS), set(UNRECORDED_REJECTIONS))
+        for code, reason in sorted(UNRECORDED_JUSTIFICATIONS.items()):
+            with self.subTest(code=code):
+                self.assertTrue(reason.startswith(("precondition: ", "malformed call: ")), reason)
+                self.assertGreater(len(reason.split(": ", 1)[1]), 20)
 
     def test_delivery_rejects_caller_supplied_short_commit_chain(self):
         controller = self._controller(self.root / "control-short-chain")
@@ -721,6 +738,27 @@ class ReviewerHistoryTests(unittest.TestCase):
                           for item in history], [(0, "PASS", "GREEN_REJECTED")])
         self.assertNotIn("failed-green-run", json.dumps(history))
 
+    def test_spec_not_revised_refusal_is_auditable_by_the_reviewer(self):
+        fixture = self.fixture
+        controller = fixture.controller
+        controller.accept("offline-demo", "spec", {"status": "PASS", "spec_digest": digest({"spec": 1})})
+        controller.accept("offline-demo", "spec-check", {"verdict": "FAIL", "blockers": ["exit code missing"]})
+        state = controller.state("offline-demo")
+        current = state["receipts"]["spec"]["spec_digest"]
+        with self.assertRaisesRegex(Rejected, "spec_not_revised"):
+            controller.accept("offline-demo", "spec", {
+                "status": "PASS", "spec_digest": current, "spec_version": 2,
+                "parent_receipt": state["rejections"][-1]["receipt_digest"]})
+
+        history = self._deliver_repair(controller)
+        first = history[0]
+        self.assertEqual((first["terminal"], first["rejection_reason"]),
+                         ("REJECTED", "spec_not_revised"))
+        self.assertEqual(first["run_id"], digest([
+            fixture.controller._swrm.responses[stage]["run_id"]
+            for stage in ("spec", "spec-check", "spec")]))
+        self.assertNotIn(fixture.controller._swrm.responses["spec"]["run_id"], json.dumps(history))
+
     def test_semantic_rejection_survives_restart(self):
         fixture = self.fixture
         controller = fixture.controller
@@ -1050,6 +1088,44 @@ class SpecRevisionTests(TestEvalidRolesControl):
         state = self.controller.state("offline-demo")
         self.assertEqual(state["receipts"]["spec"]["spec_digest"], current)
         self.assertEqual(state["next"], "spec")
+
+    def test_spec_not_revised_refusal_enters_the_attempt_history(self):
+        # A revision that repeats the accepted digest is a verdict on the
+        # evidence: the refusal is public, so a reviewer can audit it and the
+        # run it belongs to.
+        self._spec(version=1)
+        self._check(verdict="FAIL", blockers=["exit code missing"])
+        current = self.controller.state("offline-demo")["receipts"]["spec"]["spec_digest"]
+        before = self.controller._log.read_bytes()
+        with self.assertRaisesRegex(Rejected, "spec_not_revised"):
+            self._spec(version=2, spec_digest=current)
+        self.assertNotEqual(self.controller._log.read_bytes(), before)
+
+        history = self.controller._attempt_history("offline-demo")
+        item = history[0]
+        self.assertEqual(item["terminal"], "REJECTED")
+        self.assertIn("spec_not_revised", item["rejection_reason"])
+        expected_runs = [self.controller._swrm.responses[stage]["run_id"]
+                         for stage in ("spec", "spec-check", "spec")]
+        self.assertEqual(item["run_id"], digest(expected_runs))
+        self.assertNotIn(self.controller._swrm.responses["spec"]["run_id"], json.dumps(history))
+        self.controller._validate_attempt_history("offline-demo", history)
+
+        # The refusal survives a restart, so the reviewer still sees it.
+        recovered = self._controller()
+        self.assertEqual(recovered._attempt_history("offline-demo"), history)
+
+    def test_valid_spec_revision_after_a_refused_one_clears_the_terminal(self):
+        self._spec(version=1)
+        self._check(verdict="FAIL", blockers=["exit code missing"])
+        current = self.controller.state("offline-demo")["receipts"]["spec"]["spec_digest"]
+        with self.assertRaisesRegex(Rejected, "spec_not_revised"):
+            self._spec(version=2, spec_digest=current)
+        self._spec(version=2, spec_digest=digest({"spec": 2}))
+        history = self.controller._attempt_history("offline-demo")
+        self.assertEqual(history[0]["terminal"], "IN_PROGRESS")
+        self.assertEqual(history[0]["rejection_reason"], "spec_not_revised")
+        self.controller._validate_attempt_history("offline-demo", history)
 
     def test_legacy_revision_must_change_the_digest(self):
         self._spec(version=1, declare=False)
