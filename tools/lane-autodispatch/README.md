@@ -76,7 +76,7 @@ work_slots   = total - reserve - work_busy # 工作类还剩的车道
 
 ```bash
 # 1) 同步仓库镜像到 box 运行时
-cp /workspace/phanes-repo/tools/lane-autodispatch/autodispatch.py ~/phanes-ctl/bin/autodispatch.py
+cp tools/lane-autodispatch/{autodispatch.py,hotfiles.py,hot_policy.json} "$AD_BIN_DIR"/
 # 2) 在 AD 的启动环境里导出开关（start-control-plane 启动的 lane-autodispatch 也要拿到它）
 export AD_VERIFY_SHARE_ENABLED=1        # 可选：export AD_VERIFY_SHARE=0.2 AD_VERIFY_MIN=1
 # 3) 重启 AD 循环后生效
@@ -252,3 +252,7 @@ python3 tools/lane-autodispatch/test_idle_redispatch.py   # 9 个复现用例（
 | 第 4 轮 B2 | 容量不足仍调用 `host_fail()`：记成主机故障并退避，挡住同主机的其他车道 | `dispatch_failed()` 识别容量耗尽，移除 claim 后静默返回；真实主机故障仍退避 | `test_a_capacity_failure_is_the_reason_of_the_gap`、`test_a_capacity_failure_does_not_block_another_lane_on_the_same_host`、`test_a_transport_failure_still_backs_the_host_off` |
 | 第 4 轮 B3 | 所有车道派发结束后统一关闭窗口，后续车道的耗时虚增前一车道的指标与长空闲日志 | `give_card()` 在本车道派发成功后立即关闭窗口并记录日志 | `test_each_lane_gap_ends_at_its_own_dispatch` |
 | 第 4 轮 B4 | 本轮失败原因被用于上一观察区间（600 秒无卡后才出现的无容量覆盖了已知原因） | `idle_account()` 与 `idle_close()` 一致：按窗口保存的上次结果累计已过时间，再保存本轮结果供下一区间使用 | `test_a_new_capacity_failure_does_not_replace_the_previous_no_card_wait`、`test_an_empty_pool_does_not_replace_the_previous_capacity_wait` |
+
+## 热文件预检（#1721）
+
+`hot_policy.json` 是 backlog 铸卡和 AD 派发共用的上限配置；变更配置后须与脚本及 `hotfiles.py` 一同部署。卡片用 `热文件：path/to/file` 声明修改文件。导入时冲突卡保留待重试，`mint-log.json` 记录预检；同批已铸卡计入占用。`lanes-status.json` 的 `_blocked_details` 给出原因、文件及自首次观测以来的等待秒数；这些卡不计入 `_ready` 和补给水位。旧在途状态缺少 `hot` 字段时，声明了热文件的卡保守等待，直到旧任务结束。文档文件按既有规则豁免。
