@@ -30,13 +30,13 @@ TRANSIENT_ERRORS = (
     "fetch-pack: unexpected disconnect while reading sideband packet",
     "fatal: bad pack header at offset 0",
     "error: RPC failed; curl 92 HTTP/2 stream 5 was not closed cleanly",
-    "ssh: connect to host instabox port 22: Connection reset by peer",
+    "ssh: connect to host worker port 22: Connection reset by peer",
 )
 FATAL_ERROR = "fatal: could not read from remote repository"
 
 LANE = "M4"
 ISSUE = 947
-CFG = {"host": "instabox", "fleet": "fleet", "repo": "repo"}
+CFG = {"host": "worker", "fleet": "fleet", "repo": "repo"}
 INFO = {"branch": "fleet/M4-issue947-run947", "commit": "deadbeef", "status": "ok", "summary": "fake summary",
         "repo": "repo"}
 
