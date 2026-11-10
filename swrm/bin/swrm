@@ -3717,14 +3717,18 @@ def pi_broker_lane_uses_socket(lane=None, policy=None):
 
     A lane that names its broker socket uses it; a lane without one falls back
     to the isolation setting, because the isolated launcher always talks to the
-    broker.  A plain (unisolated) Pi lane never touches the socket and must not
+    broker. Explicit binary overrides are checked against the isolated launcher.
+    A plain (unisolated) Pi lane never touches the socket and must not
     be blocked by a broker that is down.
     """
     lane = lane or {}
     if lane.get("backend") != "pi":
         return False
-    if lane.get("broker_socket"):
+    if lane.get("broker_socket") or envvar("PI_BROKER_SOCKET"):
         return True
+    binary = envvar("PI_RPC_BIN") or lane.get("binary")
+    if binary:
+        return os.path.basename(os.path.realpath(binary)) == "pi-isolated"
     return pi_broker_isolation_required(policy)
 
 

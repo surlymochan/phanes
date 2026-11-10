@@ -71,7 +71,9 @@ second broker being started.
 
 Only a Pi run that really uses the socket is gated by this: `exec_pi` probes when the
 binary is the isolated launcher, and a resident Pi lane probes when it names a
-`broker_socket` or when `pi.require_isolation` is on. A plain (unisolated) Pi run
+`broker_socket` (or exports `PI_BROKER_SOCKET`), selects the isolated binary, or
+uses the default launcher with `pi.require_isolation` on. Explicit plain binaries
+do not trigger broker recovery. A plain (unisolated) Pi run
 never touches the broker.
 
 ### Delivery mapping of the lane review of PR #1778 (round 2)
@@ -82,10 +84,10 @@ delivered files.
 
 | blocker | changed file and line | test | result |
 | --- | --- | --- | --- |
-| B1 — a dead broker has to be restarted automatically, with the default configuration | `swrm/policy.json:250` (`pi.broker.restart_cmd` = `bin/pi-broker-restart`), `swrm/bin/pi-broker-restart:124` (the script starts the broker of this deployment on the probed socket), `swrm/bin/swrm:3739` (`pi_broker_settings`), `swrm/bin/swrm:3775` (`pi_broker_restart_argv`), `swrm/bin/swrm:3815` (`pi_broker_restart`) | `DefaultBrokerRestartTests.test_the_default_restart_command_is_the_one_of_the_deployment`, `DefaultBrokerRestartTests.test_the_default_restart_command_brings_the_broker_back`, `DefaultBrokerRestartTests.test_the_restart_command_reports_why_it_failed`, `BrokerRestartScriptTests.test_the_script_execs_the_broker_on_the_given_socket`, `BrokerRestartScriptTests.test_the_script_removes_a_stale_socket`, `BrokerRestartScriptTests.test_the_script_refuses_a_path_that_is_not_a_socket`, `BrokerRestartScriptTests.test_the_script_keeps_a_socket_of_another_user`, `BrokerRestartScriptTests.test_the_script_keeps_a_socket_whose_state_is_unclear`, `ExecutorBrokerDispatchTests.test_a_dead_socket_is_restarted_and_the_dispatch_continues` | real-socket evidence requires an AF_UNIX-capable host; see local results below |
-| B1 — the recovery runs before the dispatch, the alert reaches the health output | `swrm/bin/swrm:3872` (`pi_broker_ensure_ready`), `swrm/bin/swrm:5606` (`exec_pi`), `swrm/bin/swrm:9175` (`lane_run_turn`), `swrm/bin/swrm:3917` (`pi_broker_channel_status`), `swrm/bin/swrm:11158` (`fleet_pi_channel_alert`), `swrm/bin/swrm:11727` (`cmd_fleet`), `swrm/bin/broker_recovery.py:210` (`BrokerRecovery`) | `ExecutorBrokerDispatchTests.test_the_pi_dispatch_reports_the_broker_instead_of_a_vague_error`, `ExecutorBrokerDispatchTests.test_the_lane_dispatch_reports_the_broker_instead_of_a_vague_error`, `ExecutorBrokerDispatchTests.test_a_broker_that_stays_dead_alerts_the_host`, `ExecutorBrokerDispatchTests.test_the_health_output_reports_an_interrupted_pi_channel`, `FleetPiChannelTests.test_a_broken_pi_channel_is_an_alert_not_a_pause`, `BrokerRecoveryTests.test_a_broker_that_stays_dead_keeps_the_host_interrupted_and_alerts` | real-socket evidence requires an AF_UNIX-capable host; see local results below |
+| B1 — a dead broker has to be restarted automatically, with the default configuration | `swrm/policy.json:250` (`pi.broker.restart_cmd` = `bin/pi-broker-restart`), `swrm/bin/pi-broker-restart:124` (the script starts the broker of this deployment on the probed socket), `swrm/bin/swrm:3743` (`pi_broker_settings`), `swrm/bin/swrm:3779` (`pi_broker_restart_argv`), `swrm/bin/swrm:3819` (`pi_broker_restart`) | `DefaultBrokerRestartTests.test_the_default_restart_command_is_the_one_of_the_deployment`, `DefaultBrokerRestartTests.test_the_default_restart_command_brings_the_broker_back`, `DefaultBrokerRestartTests.test_the_restart_command_reports_why_it_failed`, `BrokerRestartScriptTests.test_the_script_execs_the_broker_on_the_given_socket`, `BrokerRestartScriptTests.test_the_script_removes_a_stale_socket`, `BrokerRestartScriptTests.test_the_script_refuses_a_path_that_is_not_a_socket`, `BrokerRestartScriptTests.test_the_script_keeps_a_socket_of_another_user`, `BrokerRestartScriptTests.test_the_script_keeps_a_socket_whose_state_is_unclear`, `ExecutorBrokerDispatchTests.test_a_dead_socket_is_restarted_and_the_dispatch_continues` | real-socket evidence requires an AF_UNIX-capable host; see local results below |
+| B1 — the recovery runs before the dispatch, the alert reaches the health output | `swrm/bin/swrm:3876` (`pi_broker_ensure_ready`), `swrm/bin/swrm:5610` (`exec_pi`), `swrm/bin/swrm:9179` (`lane_run_turn`), `swrm/bin/swrm:3921` (`pi_broker_channel_status`), `swrm/bin/swrm:11162` (`fleet_pi_channel_alert`), `swrm/bin/swrm:11731` (`cmd_fleet`), `swrm/bin/broker_recovery.py:210` (`BrokerRecovery`) | `ExecutorBrokerDispatchTests.test_the_pi_dispatch_reports_the_broker_instead_of_a_vague_error`, `ExecutorBrokerDispatchTests.test_the_lane_dispatch_reports_the_broker_instead_of_a_vague_error`, `ExecutorBrokerDispatchTests.test_a_broker_that_stays_dead_alerts_the_host`, `ExecutorBrokerDispatchTests.test_the_health_output_reports_an_interrupted_pi_channel`, `FleetPiChannelTests.test_a_broken_pi_channel_is_an_alert_not_a_pause`, `BrokerRecoveryTests.test_a_broker_that_stays_dead_keeps_the_host_interrupted_and_alerts` | real-socket evidence requires an AF_UNIX-capable host; see local results below |
 | B2 — dispatch level coverage: the lane really runs after the recovery, a failed validation keeps the dispatch blocked | `swrm/tests/test_broker_recovery.py:748` (`BrokerDispatchIntegrationTests`: `swrm lane up` + `swrm lane assign`) | `BrokerDispatchIntegrationTests.test_the_dispatch_continues_after_the_broker_was_restarted`, `BrokerDispatchIntegrationTests.test_a_failed_validation_keeps_the_dispatch_blocked`, `BrokerDispatchIntegrationTests.test_a_dead_broker_without_a_restart_keeps_the_dispatch_blocked`, `BrokerRecoveryTests.test_a_failed_validation_keeps_the_interrupted_marker`, `BrokerRecoveryTests.test_an_interrupted_channel_is_only_released_by_a_validated_session`, `SandboxRecoveryTests.test_lane_child_recovers_before_launch_and_passes_socket`, `SandboxRecoveryTests.test_lane_child_does_not_launch_when_recovery_fails`, `SandboxRecoveryTests.test_concurrent_dispatches_wait_for_validation`, `SandboxRecoveryTests.test_proxy_session_failure_is_unhealthy`, `SandboxRecoveryTests.test_proxy_restart_never_starts_a_local_broker`, `SandboxRecoveryTests.test_concurrent_dispatches_are_released_after_one_validation`, `SandboxRecoveryTests.test_marker_exists_before_restart_and_other_socket_failure_survives` | 7 injected SandboxRecoveryTests pass; real-socket integration requires an AF_UNIX-capable host |
-| follow-up — the minimal session must not block the dispatch forever | `swrm/bin/swrm:3858` (`pi_broker_minimal_session`), `swrm/policy.json:253` (`session_timeout_s`) | `BrokerRecoveryTests.test_the_minimal_session_answers_on_a_live_broker`, `ExecutorBrokerDispatchTests.test_the_health_output_reports_an_interrupted_pi_channel` | real-socket evidence requires an AF_UNIX-capable host; see local results below |
+| follow-up — the minimal session must not block the dispatch forever | `swrm/bin/swrm:3862` (`pi_broker_minimal_session`), `swrm/policy.json:253` (`session_timeout_s`) | `BrokerRecoveryTests.test_the_minimal_session_answers_on_a_live_broker`, `ExecutorBrokerDispatchTests.test_the_health_output_reports_an_interrupted_pi_channel` | real-socket evidence requires an AF_UNIX-capable host; see local results below |
 
 The two blocked-start integration cases assert a nonzero `lane up` exit, the
 `pi broker unavailable` diagnostic and no executor prompt. They do not assign a
@@ -111,6 +113,37 @@ Local acceptance in the restricted sandbox (no tests removed or newly skipped):
   118 failures, 32 errors, 13 existing skips; this is not a passing full-suite
   acceptance run (the permitted fleet-auto baseline alone does not explain it).
 - `git diff --check`: pass.
+
+
+### CI classification regression verification
+
+The dispatch predicate now recognizes explicit plain RPC binaries before falling
+back to isolation policy; explicit socket configuration still enables recovery.
+Mock RPC recovery fixtures explicitly use a non-isolated policy, and the stream
+classification fixture names its plain binary. Existing assertions are unchanged.
+
+Restricted Linux sandbox (Python 3.14), compared with the supplied HEAD:
+
+- Focused lane recovery, stream contracts and SandboxRecoveryTests: 54 tests,
+  20.988s, OK (including the new socket-selection boundary test).
+- Requested four modules: 108 tests, 74.253s, 14 failures and 15 errors.
+  Baseline: 107 tests, 212.373s, 22 failures and 15 errors. No new failing test
+  records; eight baseline failure records disappear. AF_UNIX binding is denied
+  in both runs, so this is not broker integration acceptance.
+- Full discovery: 1031 tests, 455.692s, 110 failures, 35 errors, 13 skips.
+  This run began before the additional boundary test was added; that test passed
+  in the subsequent four-module run. Archived HEAD baseline: 989 tests, 533.502s,
+  125 failures, 88 errors, 13 skips. The archive lacks repository metadata and
+  collected fewer tests, so these totals are not an equivalent full-suite baseline
+  and cannot establish that every remaining failure is environmental.
+- All 15 file:line references above were checked against their target lines;
+  `git diff --check` passes.
+
+FOLLOW-UP: run the requested commands on gocc with AF_UNIX support and the CI
+Python versions; confirm all original 49 broker tests and the new boundary test
+pass. Recheck the candidate-only full-suite failure
+`test_bus.BusTests.test_reference_worker_claims_runs_pushes_and_reports` against
+an equivalent git-backed baseline. No remote host access was available in this execution environment.
 
 
 Copilot on macOS uses the normal GitHub device login. If the system keychain is

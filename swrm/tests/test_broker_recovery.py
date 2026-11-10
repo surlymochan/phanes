@@ -1099,6 +1099,21 @@ class SandboxRecoveryTests(unittest.TestCase):
                         execute.assert_called_once_with(sys.executable, [sys.executable, str(ROOT / "bin" / "pi-worker-proxy")])
                         self.assertEqual(os.environ["OPENSWARM_PI_WORKER_SOCKET"], str(path))
 
+    def test_socket_selection_respects_explicit_launchers(self):
+        policy = {"pi": {"require_isolation": True}}
+        with mock.patch.dict(os.environ, {}, clear=True):
+            for binary, expected in (("fake-pi", False), ("pi-isolated", True)):
+                lane = {"backend": "pi", "binary": binary}
+                with self.subTest(binary=binary):
+                    self.assertEqual(xs.pi_broker_lane_uses_socket(lane, policy), expected)
+                    lane["broker_socket"] = "/broker.sock"
+                    self.assertTrue(xs.pi_broker_lane_uses_socket(lane, policy))
+            self.assertFalse(xs.pi_broker_lane_uses_socket(
+                {"backend": "pi"}, {"pi": {"require_isolation": False}}))
+            with mock.patch.dict(os.environ, {"OPENSWARM_PI_BROKER_SOCKET": "/broker.sock"}):
+                self.assertTrue(xs.pi_broker_lane_uses_socket({"backend": "pi"}, policy))
+                self.assertFalse(xs.pi_broker_lane_uses_socket({"backend": "codex"}, policy))
+
     def test_lane_child_recovers_before_launch_and_passes_socket(self):
         calls = []
         lane = {"name": "P1", "backend": "pi", "model": "model", "binary": "/bin/pi", "broker_socket": "/broker.sock"}
