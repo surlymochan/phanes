@@ -1612,12 +1612,16 @@ FIX_THINKING_LEVELS = ("high", "medium", "low")
 # ("Review round N (...) on PR #x head ... returned CHANGES"). It names the fix round a card
 # belongs to, so the dispatcher can pick the thinking level of that round (Refs #1847).
 FIX_ROUND_RE = re.compile(
-    r"^Review round ([1-9]\d*) \([^\r\n)]+\) on PR #\d+ head `[^`\r\n]+` "
+    r"^Review round ([1-9]\d*) \([^\r\n]+\) on PR #\d+ head `[^`\r\n]+` "
     r"returned (CHANGES|APPROVED)\.", re.M)
 
 def fix_round_of(body):
     """Use the latest review result; only a CHANGES result requests a fix round."""
-    rounds = FIX_ROUND_RE.findall(body or "")
+    # Only a formal result counts: examples inside fenced code blocks (an unclosed fence runs to the
+    # end) and quoted lines are not results of the review.
+    text = re.sub(r"^[ \t]*(`{3,}|~{3,}).*?(?:^[ \t]*\1[`~]*[ \t]*$|\Z)", "", body or "", flags=re.M | re.S)
+    text = re.sub(r"^[ \t]*>.*$", "", text, flags=re.M)
+    rounds = FIX_ROUND_RE.findall(text)
     if not rounds or rounds[-1][1] != "CHANGES": return None
     return int(rounds[-1][0])
 

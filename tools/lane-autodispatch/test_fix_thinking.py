@@ -55,6 +55,18 @@ class FixThinkingLevelTest(unittest.TestCase):
         body = round_body(9).replace("CHANGES", "APPROVED") + "\n" + round_body(1)
         self.assertEqual(AUTODISPATCH.fix_thinking({"backend": "pi"}, card(body)), "high")
 
+    def test_the_real_review_format_with_a_nested_parenthesis_is_a_fix_round(self):
+        body = "Review round 1 (P1 (pi)) on PR #11 head `abc1234567` returned CHANGES.\nApply the notes."
+        self.assertEqual(AUTODISPATCH.fix_thinking({"backend": "pi"}, card(body)), "high")
+
+    def test_an_example_in_a_code_block_or_quote_does_not_override_the_latest_result(self):
+        formal = "Review round 1 (lane CX2) on PR #12 head `abcdef0123` returned CHANGES.\n"
+        example = "Review round 2 (lane CX2) on PR #12 head `abcdef0123` returned APPROVED.\n"
+        for tail in ("```\n" + example + "```\n", "~~~text\n" + example + "~~~\n", "> " + example,
+                     "```\n" + example):  # the last fence is never closed
+            self.assertEqual(AUTODISPATCH.fix_round_of(formal + tail), 1, tail)
+        self.assertEqual(AUTODISPATCH.fix_round_of(formal + example), None)  # a formal later result still wins
+
     def test_a_latest_approval_does_not_request_a_fix(self):
         body = round_body(1) + "\n" + round_body(2).replace("CHANGES", "APPROVED")
         self.assertIsNone(AUTODISPATCH.fix_thinking({"backend": "pi"}, card(body)))
