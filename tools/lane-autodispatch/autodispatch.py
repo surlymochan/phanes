@@ -5,11 +5,12 @@ Every TICK seconds: finish runs that ended (push branch + open PR, relabel issue
 lane the next open issue labelled `lane-ready` (not `in-progress`), ordered p0 < p1 < p2 < unlabelled,
 then by issue number. Optional `backend:pi|agy|codex` label pins an issue to that executor family.
 State: ~/phanes-ctl/autodispatch/state.json   Log: ~/phanes-ctl/autodispatch/autodispatch.log + brain/log.md
-Pause: the swrm pause store ($OPENSWARM_HOME/pauses, written by `swrm pause <scope>`) and the
-legacy markers ~/phanes-ctl/autodispatch/PAUSE (whole loop), PAUSE-<LANE> (one lane),
-PAUSE-HOST-<HOST>, PAUSE-BACKEND-<BACKEND> and PAUSE-MINT (no new issue minted). Both are read (Refs #1366).
-A legacy marker that carries its own deadline (`until=<epoch|ISO>`) stops holding the lane once that
-deadline passed; the marker file stays on disk as the evidence of the hold (Refs #1592).
+Pause: the swrm pause store ($OPENSWARM_PAUSE_DIR, else $OPENSWARM_HOME/pauses, written by
+`swrm pause <scope>` and by `swrm fleet health --apply`) and the legacy markers
+~/phanes-ctl/autodispatch/PAUSE (whole loop), PAUSE-<LANE> (one lane),
+PAUSE-HOST-<HOST>, PAUSE-BACKEND-<BACKEND> and PAUSE-MINT (no new issue minted). All are read (Refs #1366).
+A hold that a program keeps under a scope of its own (`host:<host>@health`) holds the host as well (Refs #1367).
+A legacy marker with an `until=<epoch|ISO>` deadline stops holding after that deadline, while the file stays as evidence (Refs #1592).
 """
 import base64, hashlib, json, math, os, re, shlex, stat, subprocess, sys, time, tempfile, concurrent.futures as cf
 from datetime import datetime, timezone
@@ -143,15 +144,14 @@ def ctl_state_dir():
     return directory
 
 def pause_home(home=None):
-    """The home that holds the pause store ($OPENSWARM_HOME by default).
-
-    An empty $OPENSWARM_HOME is no home at all: the fallback keeps the store path
-    absolute instead of turning it into a relative `pauses` directory."""
+    """The home that holds the pause store ($OPENSWARM_HOME by default)."""
     if home: return os.path.expanduser(home)
     return os.path.expanduser(os.environ.get("OPENSWARM_HOME") or os.environ.get("XSWARM_HOME") or f"{HOME}/.claude/swrm")
 
 def pause_store_dir(home=None):
-    """The swrm pause store ($OPENSWARM_HOME/pauses), the new home of the pause switches."""
+    """The swrm pause store, shared with the fleet health check (Refs #1367)."""
+    configured = os.environ.get("OPENSWARM_PAUSE_DIR") or os.environ.get("XSWARM_PAUSE_DIR")
+    if home is None and configured: return os.path.expanduser(configured)
     return os.path.join(pause_home(home), "pauses")
 
 def pause_executor_start_lane(lane):
@@ -235,10 +235,10 @@ def pause_until(body):
     if parsed.tzinfo is None: parsed = parsed.replace(tzinfo=timezone.utc)
     return parsed.timestamp()
 
-def marker_body(name):
+def marker_body(name, directory=None):
     """The body of a legacy pause marker (empty when the file cannot be read)."""
     try:
-        with open(os.path.join(D, name)) as stream: return stream.read()
+        with open(os.path.join(D if directory is None else directory, name)) as stream: return stream.read()
     except OSError: return ""
 
 def marker_reason(name, body):
@@ -312,10 +312,24 @@ def pause_records(now=None, home=None):
                 if body.startswith(f"auto:disk-watermark host={host} "): continue
         deadline = pause_until(body)
         if deadline is not None and deadline <= now:
-            log_expired_pause(name, deadline)  # the hold ends here, the marker file stays
+            log_expired_pause(name, deadline)
             continue
         records.append({"scope": scope, "reason": marker_reason(name, body), "created_at": 0.0,
                         "expires_at": deadline, "source": "marker"})
+    # Fleet health also writes legacy markers in the pause store.
+    if os.path.abspath(store) != os.path.abspath(D):
+        try: names = sorted(os.listdir(store))
+        except OSError: names = []
+        for name in names:
+            scope = marker_scope(name)
+            if scope is None: continue
+            body = marker_body(name, store)
+            deadline = pause_until(body)
+            if deadline is not None and deadline <= now:
+                log_expired_pause(name, deadline)
+                continue
+            records.append({"scope": scope, "reason": marker_reason(name, body), "created_at": 0.0,
+                            "expires_at": deadline, "source": "marker"})
     # The private marker also gates dispatch if writing the state failed.
     try: disk_markers = os.listdir(os.path.join(D, ".disk-watermark"))
     except OSError: disk_markers = []
@@ -344,10 +358,20 @@ def lane_paused(lane, cfg=None, scopes=None):
     if "all" in scopes: return True
     if f"lane:{lane}" in scopes: return True
     cfg = cfg or {}
-    if cfg.get("host") and f"host:{cfg['host']}" in scopes: return True
-    if cfg.get("backend") and f"backend:{cfg['backend']}" in scopes: return True
+    if cfg.get("host") and holds_target(scopes, "host", cfg["host"]): return True
+    if cfg.get("backend") and holds_target(scopes, "backend", cfg["backend"]): return True
     return False
 
+def holds_target(scopes, kind, value):
+    """Whether a scope holds the dispatch target `kind:value`.
+
+    A hold that a program keeps under a scope of its own (`host:<host>@health`) holds the
+    target as well: the fleet health check never overwrites the pause of an operator, and
+    the release of the operator never frees the host (Refs #1367).
+    """
+    base = f"{kind}:{value}"
+    if base in scopes: return True
+    return any(str(scope).startswith(base + "@") for scope in scopes)
 def pause_priority(row):
     """The order in which the switches are read: the global PAUSE, then the pause store,
     then the remaining legacy markers (Refs #1592)."""
@@ -370,7 +394,9 @@ def pause_reason(lane, cfg=None, records=None, now=None):
     if cfg.get("backend"): wanted.append(f"backend:{cfg['backend']}")
     for row in sorted(records, key=pause_priority):
         scope = row.get("scope")
-        if scope != "all" and scope not in wanted: continue
+        if scope != "all" and scope not in wanted and not (
+            cfg.get("host") and holds_target({scope}, "host", cfg["host"]) or
+            cfg.get("backend") and holds_target({scope}, "backend", cfg["backend"])): continue
         expires = row.get("expires_at")
         remaining = None if expires is None else max(0, int(round(expires - now)))
         return {"scope": scope, "source": row.get("source"), "reason": row.get("reason"),
@@ -385,6 +411,7 @@ def pause_reasons(lanes, records=None, now=None):
         reason = pause_reason(lane, cfg, records, now)
         if reason: reasons[lane] = reason
     return reasons
+
 
 def mint_paused(scopes=None):
     """Whether the minting of new issues is paused (the PAUSE-MINT marker / the mint scope)."""

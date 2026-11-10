@@ -522,6 +522,16 @@ swrm fleet exec --timeout 120 worker -- runs --active --json
 Status uses `instabox ls` and never connects to a paused box. Unknown box states also remain uncontacted.
 `fleet exec` forwards stdout, stderr and the exit code; it does not issue a separate wake command.
 
+`swrm fleet health --json` probes disk, inodes, memory and SSH using the watermarks in
+`resources.health` in the policy. Add `--apply` to hold unhealthy hosts until recovery.
+The command uses `lib/dispatch/pause.py`'s `PauseStore` API and shares its directory with
+lane autodispatch: `$OPENSWARM_PAUSE_DIR`, otherwise `$OPENSWARM_HOME/pauses`
+(default `~/.claude/swrm/pauses`; `XSWARM_*` aliases are supported).
+Health records have no expiry and use `host:<host>@health`, preserving manual pauses.
+`PauseStore(home).is_paused(host=host, now=time.time())` recognizes this independent
+hold even after an operator resumes `host:<host>` and before another health check.
+Recovery removes only the health hold; any manual pause remains in force.
+
 Write one self-contained task per regular file in a cards directory, then dispatch:
 
 ```bash
