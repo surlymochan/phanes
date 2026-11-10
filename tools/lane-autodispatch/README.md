@@ -108,6 +108,11 @@ summary/tests、host verify rc）拼出 PR 标题与正文，再逐项校验：
 校验结果写入 run 记录（lane 主机 `runs/<run>/pr-validation.json` 与 `pr-validation.log`）
 和 AD 侧 `~/phanes-ctl/autodispatch/runs/<run>.log`，供阻塞诊断引用。
 
+## 派发简报模板（#1851）
+
+实现卡要求入口、调用链、数据结构来源和 tick/集成测试。修复轮额外注入 F1–F6 清单；
+PR 号取自卡内容，未指定时保留 `<N>`。非实现类别不注入修复清单。
+
 ## 收割前的越界产物过滤（Refs #1835）
 
 收割 fix/rebase/impl 的结果、推送回 PR 分支之前，AD 对待推送分支的变更文件做机械过滤：
