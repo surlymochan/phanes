@@ -18,7 +18,7 @@ record.
 
 Usage::
 
-    recovery = BrokerRecovery("/run/swrm-pi/broker.sock", host="gocc",
+    recovery = BrokerRecovery("/run/swrm-pi/broker.sock", host="hostA",
                               restart=restart_broker, validate=minimal_session)
     status = recovery.ensure_ready()
     if not status["ok"]:

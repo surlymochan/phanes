@@ -264,7 +264,7 @@ class BrokerRecoveryTests(unittest.TestCase):
         return server
 
     def recovery(self, **kwargs):
-        options = {"socket_path": str(self.socket_path), "host": "gocc", "attempts": 3,
+        options = {"socket_path": str(self.socket_path), "host": "hostA", "attempts": 3,
                    "backoff_base_s": 1, "backoff_cap_s": 8, "state_path": str(self.state_path),
                    "brain_log": str(self.brain_log), "sleep": self.sleep, "socket_wait_s": 0.5}
         options.update(kwargs)
@@ -373,8 +373,8 @@ class BrokerRecoveryTests(unittest.TestCase):
 
     def test_an_interrupted_channel_is_only_released_by_a_validated_session(self):
         self.broker()
-        recovery.write_state(str(self.state_path), {"hosts": {"gocc": {
-            "host": "gocc", "socket": str(self.socket_path), "ok": False, "interrupted": True,
+        recovery.write_state(str(self.state_path), {"hosts": {"hostA": {
+            "host": "hostA", "socket": str(self.socket_path), "ok": False, "interrupted": True,
             "result": recovery.RESULT_VALIDATION_FAILED, "detail": "minimal session answered with 500",
             "attempts": 3, "reconnects": 3, "failures": 3, "alert": recovery.ALERT_INTERRUPTED}}})
         calls = []
@@ -397,10 +397,10 @@ class BrokerRecoveryTests(unittest.TestCase):
     def test_the_state_file_keeps_the_host_record(self):
         self.recovery(restart=lambda: None).ensure_ready()
         state = recovery.read_state(str(self.state_path))
-        record = recovery.host_state(state, "gocc")
+        record = recovery.host_state(state, "hostA")
         self.assertTrue(record["interrupted"])
         self.assertEqual(record["failures"], 3)
-        self.assertEqual([row["host"] for row in recovery.interrupted_hosts(state)], ["gocc"])
+        self.assertEqual([row["host"] for row in recovery.interrupted_hosts(state)], ["hostA"])
 
     # ---------------------------------------------------------------- logging
 
@@ -408,7 +408,7 @@ class BrokerRecoveryTests(unittest.TestCase):
         self.recovery(restart=lambda: None).ensure_ready()
         lines = self.brain_lines()
         self.assertEqual(len(lines), 3, lines)
-        self.assertIn("host=gocc", lines[0])
+        self.assertIn("host=hostA", lines[0])
         self.assertIn("reconnect#1", lines[0])
         self.assertIn("result=%s" % recovery.RESULT_RECONNECT_FAILED, lines[0])
         self.assertIn("reconnect#3", lines[2])
@@ -419,9 +419,9 @@ class BrokerRecoveryTests(unittest.TestCase):
         self.assertEqual(self.brain_lines(), [])
 
     def test_the_brain_line_shape(self):
-        line = recovery.brain_line("gocc", 2, recovery.RESULT_RECOVERED, "minimal session answered with 200")
+        line = recovery.brain_line("hostA", 2, recovery.RESULT_RECOVERED, "minimal session answered with 200")
         self.assertTrue(line.startswith("- "))
-        self.assertIn("UTC+8 pi-broker: host=gocc reconnect#2 result=recovered", line)
+        self.assertIn("UTC+8 pi-broker: host=hostA reconnect#2 result=recovered", line)
 
     # ---------------------------------------------------------------- backoff
 
@@ -506,20 +506,20 @@ class ExecutorBrokerDispatchTests(unittest.TestCase):
     def test_a_dead_socket_is_restarted_and_the_dispatch_continues(self):
         self.write_policy({"restart_cmd": self.start_broker_script(), "attempts": 3,
                            "socket_wait_s": 5, "restart_grace_s": 5})
-        status = xs.pi_broker_ensure_ready(self.lane(), host="gocc")
+        status = xs.pi_broker_ensure_ready(self.lane(), host="hostA")
         self.assertTrue(status["ok"], status)
         self.assertEqual(status["result"], "recovered")
         self.assertFalse(status["interrupted"])
-        self.assertEqual(status["host"], "gocc")
+        self.assertEqual(status["host"], "hostA")
 
     def test_a_broker_that_stays_dead_alerts_the_host(self):
         self.write_policy({"restart_cmd": "false", "attempts": 2, "socket_wait_s": 0.2,
                            "restart_grace_s": 0.5, "backoff_base_s": 0.01})
-        status = xs.pi_broker_ensure_ready(self.lane(), host="gocc")
+        status = xs.pi_broker_ensure_ready(self.lane(), host="hostA")
         self.assertFalse(status["ok"])
         self.assertTrue(status["interrupted"])
         self.assertEqual(status["alert"], "pi channel interrupted")
-        record = xs.pi_broker_record(host="gocc")
+        record = xs.pi_broker_record(host="hostA")
         self.assertTrue(record["interrupted"])
         self.assertEqual(record["failures"], 2)
 
@@ -565,10 +565,10 @@ class ExecutorBrokerDispatchTests(unittest.TestCase):
         brain = self.tmp / "brain.log"
         self.write_policy({"restart_cmd": "false", "attempts": 1, "brain_log": str(brain),
                            "socket_wait_s": 0.2, "restart_grace_s": 0.5, "backoff_base_s": 0.01})
-        xs.pi_broker_ensure_ready(self.lane(), host="gocc")
+        xs.pi_broker_ensure_ready(self.lane(), host="hostA")
         lines = [line for line in brain.read_text(encoding="utf-8").splitlines() if line.strip()]
         self.assertEqual(len(lines), 1, lines)
-        self.assertIn("host=gocc", lines[0])
+        self.assertIn("host=hostA", lines[0])
         self.assertIn("reconnect#1", lines[0])
 
     # ---------------------------------------------------------------- lane dispatch
@@ -729,7 +729,7 @@ class DefaultBrokerRestartTests(unittest.TestCase):
 
     def test_the_default_restart_command_brings_the_broker_back(self):
         # No restart_cmd of its own: the default of the policy has to recover the host.
-        status = xs.pi_broker_ensure_ready(self.lane(), host="gocc")
+        status = xs.pi_broker_ensure_ready(self.lane(), host="hostA")
         self.assertTrue(status["ok"], status)
         self.assertEqual(status["result"], "recovered")
         self.assertFalse(status["interrupted"])
@@ -739,7 +739,7 @@ class DefaultBrokerRestartTests(unittest.TestCase):
         # A restart that dies right away is a failed reconnect, with its reason.
         (self.home / "policy.local.json").write_text(json.dumps(
             {"pi": {"broker": {"restart_cmd": "false", "attempts": 1}}}), encoding="utf-8")
-        status = xs.pi_broker_ensure_ready(self.lane(), host="gocc")
+        status = xs.pi_broker_ensure_ready(self.lane(), host="hostA")
         self.assertFalse(status["ok"])
         self.assertEqual(status["result"], "reconnect_failed")
         self.assertIn("broker restart failed", status["detail"])
