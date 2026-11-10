@@ -287,7 +287,7 @@ class Fleet:
             issue = self.issues.get(int(args[2]))
             if issue is None:
                 return 1, "", "gh: no such issue"
-            return 0, json.dumps({"number": int(args[2]), "state": issue["state"],
+            return 0, json.dumps({"number": int(args[2]), "state": issue["state"], "body": issue["body"],
                                   "labels": [{"name": name} for name in issue["labels"]]}), ""
         if args[:2] == ["issue", "edit"]:
             issue = self.issues.get(int(args[2]))

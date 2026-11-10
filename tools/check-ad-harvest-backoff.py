@@ -15,6 +15,7 @@ inside a scratch directory.  It never reads or writes the live lane state
 from __future__ import annotations
 
 import importlib.util
+import json
 import pathlib
 import subprocess
 import tempfile
@@ -113,6 +114,8 @@ class FakeHarvest:
 
     def _gh(self, args, timeout=60):
         self.gh_calls.append(list(args))
+        # the AD reads the card before it pushes (Refs #1833): the fake answers with a card
+        if args[:2] == ["issue", "view"]: return 0, json.dumps({"body": "# card"}), ""
         return 0, "", ""
 
     def lane_failed_edits(self):

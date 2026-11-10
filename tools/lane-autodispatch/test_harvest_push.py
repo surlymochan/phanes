@@ -3,6 +3,7 @@
 output (empty stderr) but whose branch is already on origin does not stop the
 harvest: the update landed, the PR is opened."""
 import importlib.util
+import json
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -39,7 +40,9 @@ def run_finish(sh_impl):
          mock.patch.object(ad, "filter_harvest", return_value=(HEAD, [], False)), \
          mock.patch.object(ad, "pr_validation_mode", return_value="warn"), \
          mock.patch.object(ad, "log"), \
-         mock.patch.object(ad, "gh", return_value=(0, "", "")) as gh:
+         mock.patch.object(ad, "gh", side_effect=lambda args, timeout=60:
+                           (0, json.dumps({"body": "# card"}), "")
+                           if args[:2] == ["issue", "view"] else (0, "", "")) as gh:
         result = ad.finish("lane", {"host": "host"}, st, info, {})
     return result, gh
 
