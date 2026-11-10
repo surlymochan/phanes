@@ -245,16 +245,63 @@ class ConsultTests(unittest.TestCase):
         self.assertLess(elapsed, 3.0)
         self.assertTrue(all(row["valid"] for row in result["answers"]))
 
+    def test_total_concurrency_cap_does_not_depend_on_executor_clocks(self):
+        # Executors can report identical/coarse timestamps despite serial admission.
+        with open(self.script, encoding="utf-8") as stream:
+            script = stream.read()
+        clock = 'time.clock_gettime(time.CLOCK_MONOTONIC) if hasattr(time, "clock_gettime") else time.time()'
+        self.assertIn(clock, script)
+        with open(self.script, "w", encoding="utf-8") as stream:
+            stream.write(script.replace(clock, "0.0"))
+        self.test_total_concurrency_cap_serializes_admission()
+
     def test_total_concurrency_cap_serializes_admission(self):
-        os.environ["FAKE_CONSULT_SLEEP_SECONDS"] = "0.6"
         self.policy["concurrency"]["total"] = 1
-        code, _ = self.run_consult(["agy", "pi"], deadline=0.05)
-        self.assertEqual(code, 0)
-        starts = []
+        queued = threading.Event()
+        observation_lock = threading.Lock()
+        transitions = []
+        reserve = xs.reserve_provider_slot
+        set_status = xs.set_status
+
+        def observe_status(path, **fields):
+            # Record the real transition atomically with respect to observations
+            # from the other worker; never replace the admission implementation.
+            with observation_lock:
+                value = set_status(path, **fields)
+                state = fields.get("state")
+                if state in ("running", "queued", "finished"):
+                    transitions.append((path, state))
+                if state == "queued" and fields.get("queue_reason") == "provider concurrency limit":
+                    queued.set()
+                return value
+
+        def hold_admitted_slot(*args, **kwargs):
+            admitted = reserve(*args, **kwargs)
+            if admitted:
+                # Hold the first real reservation until its contender has been
+                # rejected by the real cap. The timeout is only a deadlock guard.
+                if not queued.wait(60):
+                    raise AssertionError("contender never queued behind the occupied slot")
+            return admitted
+
+        with mock.patch.object(xs, "set_status", side_effect=observe_status), \
+                mock.patch.object(xs, "reserve_provider_slot", side_effect=hold_admitted_slot), \
+                mock.patch.object(xs, "fleet_guard_command", return_value=None):
+            code, result = self.run_consult(["agy", "pi"], deadline=2)
+        self.assertEqual(code, 0, result)
+        self.assertTrue(queued.is_set())
+        self.assertTrue(all(row["valid"] for row in result["answers"]))
+        admitted = [path for path, state in transitions if state == "running"]
+        self.assertEqual(len(admitted), 2, transitions)
+        self.assertNotEqual(admitted[0], admitted[1])
+        first, second = admitted
+        # Capacity must stay occupied until completion, not merely until launch.
+        self.assertLess(transitions.index((first, "running")), transitions.index((second, "queued")))
+        self.assertLess(transitions.index((second, "queued")), transitions.index((first, "finished")))
+        self.assertLess(transitions.index((first, "finished")), transitions.index((second, "running")))
+        self.assertLess(transitions.index((second, "running")), transitions.index((second, "finished")))
         for backend in ("agy", "pi"):
-            with open(os.path.join(self.logs, backend + ".json"), encoding="utf-8") as stream:
-                starts.append(json.load(stream)["started"])
-        self.assertGreaterEqual(abs(starts[0] - starts[1]), 0.45)
+            self.assertTrue(os.path.isfile(os.path.join(self.logs, backend + ".json")))
 
     @unittest.skipIf(os.name == "nt", 'provider concurrency slots coordinate through flock-style advisory locking; msvcrt byte-range locks have different intra-process/thread contention semantics, so slot acquisition times out under the multi-profile tests (follow-up: Windows slot backend)')
     def test_malformed_and_timeout_answers_keep_raw_text_and_fail_exec_pass(self):

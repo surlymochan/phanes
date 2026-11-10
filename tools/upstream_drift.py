@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
 import fnmatch
 import hashlib
 import json
@@ -26,8 +27,8 @@ def run(args: list[str], *, cwd: Path | None = None) -> str:
     return result.stdout
 
 
-def run_bytes(args: list[str]) -> bytes:
-    result = subprocess.run(args, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+def run_bytes(args: list[str], *, cwd: Path | None = None) -> bytes:
+    result = subprocess.run(args, cwd=cwd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     if result.returncode:
         raise RuntimeError(result.stderr.decode(errors="replace").strip())
     return result.stdout
@@ -50,21 +51,30 @@ def blob_id(data: bytes) -> str:
 
 
 def snapshot(upstream: dict[str, str], base_sha: str, work_dir: Path) -> dict[str, str]:
-    # Fetch just the pinned object, keeping all scratch data inside TMPDIR.
-    with tempfile.TemporaryDirectory(dir=os.environ.get("TMPDIR", str(ROOT))) as scratch:
-        repo = Path(scratch)
-        run(["git", "init", "--bare", str(repo)])
-        run(["git", "--git-dir", str(repo), "fetch", "--depth=1", upstream["upstream_repo"], base_sha])
-        tree = run_bytes(["git", "--git-dir", str(repo), "ls-tree", "-r", "-z", "FETCH_HEAD"])
-        result: dict[str, str] = {}
-        for entry in tree.split(b"\0"):
-            if not entry:
-                continue
-            metadata, path = entry.split(b"\t", 1)
-            mode, kind, oid = metadata.split()
-            if kind == b"blob":
-                result[path.decode()] = blob_id(run_bytes(["git", "--git-dir", str(repo), "cat-file", "blob", oid.decode()]))
-        return result
+    # Fetch just the pinned object, keeping all scratch data inside the
+    # requested work directory. A missing work directory is created for the
+    # snapshot and removed again, so the caller sees no leftovers.
+    created = not work_dir.is_dir()
+    work_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        with tempfile.TemporaryDirectory(dir=work_dir) as scratch:
+            repo = Path(scratch)
+            run(["git", "init", "--bare", str(repo)])
+            run(["git", "--git-dir", str(repo), "fetch", "--depth=1", upstream["upstream_repo"], base_sha])
+            tree = run_bytes(["git", "--git-dir", str(repo), "ls-tree", "-r", "-z", "FETCH_HEAD"])
+            result: dict[str, str] = {}
+            for entry in tree.split(b"\0"):
+                if not entry:
+                    continue
+                metadata, path = entry.split(b"\t", 1)
+                mode, kind, oid = metadata.split()
+                if kind == b"blob":
+                    result[path.decode()] = blob_id(run_bytes(["git", "--git-dir", str(repo), "cat-file", "blob", oid.decode()]))
+            return result
+    finally:
+        if created:
+            with contextlib.suppress(OSError):
+                work_dir.rmdir()
 
 
 def owns_repository(root: Path) -> bool:
@@ -169,7 +179,8 @@ def pr_changed_paths() -> set[str]:
     if not base_ref:
         return set()
     run(["git", "fetch", "--no-tags", "origin", base_ref], cwd=ROOT)
-    return set(run(["git", "diff", "--name-only", f"origin/{base_ref}...HEAD"], cwd=ROOT).splitlines())
+    output = run_bytes(["git", "diff", "--name-only", "-z", f"origin/{base_ref}...HEAD"], cwd=ROOT)
+    return {os.fsdecode(path) for path in output.split(b"\0") if path}
 
 
 def marks_upstream(title: str) -> bool:

@@ -4,9 +4,11 @@ from pathlib import Path
 import subprocess
 import tempfile
 import unittest
+from unittest.mock import patch
 
+from tools import upstream_drift
 from tools.upstream_drift import (blob_id, classify, local_files, snapshot,
-                                 unmarked_paths)
+                                 pr_changed_paths, unmarked_paths)
 
 
 SCRIPT = Path(__file__).resolve().parents[1] / "upstream_drift.py"
@@ -56,12 +58,100 @@ class UpstreamDriftTests(unittest.TestCase):
             unmarked_paths(report, changed, "swrm(codex): #1372 upstream(openbot): sync"), [])
         self.assertEqual(unmarked_paths(report, set(), "fix: unrelated"), [])
 
+    def test_pr_changed_paths_preserve_unusual_filenames(self):
+        with tempfile.TemporaryDirectory(dir=Path.cwd()) as scratch:
+            root = Path(scratch)
+            subprocess.run(["git", "init", str(root)], check=True, capture_output=True)
+            (root / "base.txt").write_text("base\n")
+            commit(root, "base")
+            subprocess.run(["git", "-C", str(root), "branch", "drift-base"],
+                           check=True, capture_output=True)
+            subprocess.run(["git", "-C", str(root), "remote", "add", "origin", str(root)],
+                           check=True, capture_output=True)
+            names = ["space name.txt", "非ASCII.txt", "line\nbreak.txt",
+                     "crlf\r\nbreak.txt", "cr\rbreak.txt"]
+            (root / "demo").mkdir()
+            for name in names:
+                (root / "demo" / name).write_text("changed\n")
+            commit(root, "change")
+
+            with patch("tools.upstream_drift.ROOT", root), patch.dict(
+                    os.environ, {"GITHUB_BASE_REF": "drift-base"}):
+                changed = pr_changed_paths()
+            expected = {f"demo/{name}" for name in names}
+            self.assertEqual(changed, expected)
+            report = {"demo": {"generic": names, "missing": [], "phanes_only": []}}
+            self.assertEqual(set(unmarked_paths(report, changed, "fix: change")), expected)
+
     def test_snapshot_rejects_missing_base_sha(self):
         with tempfile.TemporaryDirectory(dir=os.environ.get("TMPDIR")) as scratch:
             remote = Path(scratch) / "remote.git"
             subprocess.run(["git", "init", "--bare", str(remote)], check=True, capture_output=True)
-            with self.assertRaisesRegex(RuntimeError, "couldn't find remote ref|not our ref|fatal"):
+            with self.assertRaises(RuntimeError):
                 snapshot({"upstream_repo": str(remote)}, "deadbeef", Path(scratch))
+
+    def test_snapshot_uses_requested_work_dir_for_scratch_and_cleans_it(self):
+        with tempfile.TemporaryDirectory(dir=os.environ.get("TMPDIR")) as scratch:
+            root = Path(scratch)
+            remote = root / "upstream"
+            work_dir = root / "requested-work"
+            remote.mkdir()
+            work_dir.mkdir()
+            subprocess.run(["git", "init", str(remote)], check=True, capture_output=True)
+            (remote / "tracked.txt").write_text("snapshot\n")
+            base_sha = commit(remote, "base")
+
+            init_locations = []
+            original_run = upstream_drift.run
+
+            def recording_run(args, *, cwd=None):
+                if args[:3] == ["git", "init", "--bare"]:
+                    init_locations.append(Path(args[3]))
+                return original_run(args, cwd=cwd)
+
+            with patch.object(upstream_drift, "run", side_effect=recording_run):
+                result = snapshot({"upstream_repo": str(remote)}, base_sha, work_dir)
+
+            self.assertEqual(result, {"tracked.txt": blob_id(b"snapshot\n")})
+            self.assertEqual(len(init_locations), 1)
+            self.assertEqual(init_locations[0].parent, work_dir)
+            self.assertFalse(init_locations[0].exists())
+
+    def test_snapshot_creates_a_missing_work_dir_and_removes_it(self):
+        with tempfile.TemporaryDirectory(dir=os.environ.get("TMPDIR")) as scratch:
+            root = Path(scratch)
+            remote = root / "upstream"
+            work_dir = root / "missing-work"
+            remote.mkdir()
+            subprocess.run(["git", "init", str(remote)], check=True, capture_output=True)
+            (remote / "tracked.txt").write_text("snapshot\n")
+            base_sha = commit(remote, "base")
+
+            result = snapshot({"upstream_repo": str(remote)}, base_sha, work_dir)
+
+            self.assertEqual(result, {"tracked.txt": blob_id(b"snapshot\n")})
+            self.assertFalse(work_dir.exists())
+
+    def test_snapshot_rejects_missing_base_sha_with_localized_git_error(self):
+        with tempfile.TemporaryDirectory(dir=os.environ.get("TMPDIR")) as scratch:
+            remote = Path(scratch) / "remote.git"
+            subprocess.run(["git", "init", "--bare", str(remote)], check=True, capture_output=True)
+            real_run = subprocess.run
+            fetch_results = []
+
+            def run_with_localized_fetch_error(args, **kwargs):
+                if args[:2] == ["git", "--git-dir"] and "fetch" in args:
+                    result = subprocess.CompletedProcess(args, 128, "", "致命错误：找不到远程版本")
+                    fetch_results.append(result)
+                    return result
+                return real_run(args, **kwargs)
+
+            with patch("tools.upstream_drift.subprocess.run", side_effect=run_with_localized_fetch_error):
+                with self.assertRaises(RuntimeError):
+                    snapshot({"upstream_repo": str(remote)}, "deadbeef", Path(scratch))
+            self.assertEqual(len(fetch_results), 1)
+            self.assertNotEqual(fetch_results[0].returncode, 0)
+            self.assertEqual(fetch_results[0].args[-2:], [str(remote), "deadbeef"])
 
     def test_local_files_hash_symlink_targets(self):
         with tempfile.TemporaryDirectory(dir=os.environ.get("TMPDIR")) as scratch:

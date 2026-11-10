@@ -58,9 +58,47 @@ def extract_result_object(text: str) -> dict | None:
             obj, _end = decoder.raw_decode(text[index:])
         except json.JSONDecodeError:
             continue
-        if isinstance(obj, dict) and obj.get("id"):
+        if _is_result_receipt(obj):
             found = obj
     return found
+
+
+def _is_result_receipt(obj: object) -> bool:
+    if not isinstance(obj, dict):
+        return False
+    if not isinstance(obj.get("id"), str) or not obj["id"].strip():
+        return False
+    terminal_statuses = ("done", "partial", "failed", "stopped", "budget_exceeded", "unroutable")
+    if "status" in obj and obj["status"] not in terminal_statuses:
+        return False
+    run_dir = obj.get("run_dir")
+    workspace = obj.get("workspace")
+    has_run_context = (
+        (isinstance(run_dir, str) and bool(run_dir.strip()))
+        or (isinstance(workspace, dict) and workspace.get("mode") in ("worktree", "in-place", "github-issue"))
+    )
+    if obj.get("status") in terminal_statuses and has_run_context:
+        return True
+    decision = obj.get("decision")
+    if (obj.get("status") == "unroutable" and isinstance(decision, dict)
+            and decision.get("ok") is False and isinstance(decision.get("reasons"), list)
+            and "skipped" in decision and "planner" in decision and "profile" in decision
+            and "scope" in obj):
+        return True
+    # Statusless receipts must include executor attempts and a top-level usage
+    # summary; run context alone is also common on unrelated telemetry events.
+    attempts = obj.get("attempts")
+    has_executor_attempts = isinstance(attempts, list) and bool(attempts) and all(
+        isinstance(attempt, dict)
+        and isinstance(attempt.get("backend"), str)
+        and bool(attempt["backend"].strip())
+        and "model" in attempt
+        and isinstance(attempt.get("meta"), dict)
+        for attempt in attempts
+    )
+    if not has_executor_attempts:
+        return False
+    return obj.get("status") in terminal_statuses or looks_like_usage(obj.get("usage"))
 
 
 def executor_calls(result: dict) -> list[dict]:
@@ -130,6 +168,7 @@ def main(argv: list[str]) -> int:
         print("usage: swrm_finish.py <stdout> <events-dir> <workdir>", file=sys.stderr)
         return 2
     stdout_path, events, workdir = Path(argv[1]), Path(argv[2]), Path(argv[3])
+    events.mkdir(parents=True, exist_ok=True)
     text = stdout_path.read_text(encoding="utf-8", errors="replace") if stdout_path.is_file() else ""
     result = extract_result_object(text)
     if result is None:
