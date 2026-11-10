@@ -361,7 +361,9 @@ class ReviewEvidenceTest(unittest.TestCase):
              mock.patch.object(ad, "D", str(self.state)), \
              mock.patch.object(ad, "harvest_fetch", return_value=(True, "", 0)), \
              mock.patch.object(ad, "log"), \
-             mock.patch.object(ad, "gh", return_value=(0, "", "")) as gh, \
+             mock.patch.object(ad, "gh", side_effect=lambda args, timeout=60:
+                               (0, json.dumps({"body": "# verify card"}), "")
+                               if args[:2] == ["issue", "view"] else (0, "", "")) as gh, \
              mock.patch.object(ad, "sh", side_effect=fake_sh):
             result = ad.finish(LANE, {"host": HOST}, st, info, state)
         return result, gh

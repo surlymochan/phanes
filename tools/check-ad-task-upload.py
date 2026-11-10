@@ -36,7 +36,7 @@ def main():
 
         module.sh = fake_sh
         run, _ = module.dispatch(
-            "lane-a", {"host": "instabox", "fleet": "fleet", "repo": "repo"},
+            "lane-a", {"host": "worker", "fleet": "fleet", "repo": "repo"},
             {"n": 920, "title": "upload contract", "body": "fake task body"}, "base",
         )
         assert run == "run-920"

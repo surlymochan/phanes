@@ -17,6 +17,13 @@ AUTODISPATCH = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(AUTODISPATCH)
 
 
+
+def fake_sh(cmd, *args, **kwargs):
+    """Answer the codex memory probe with plenty of KiB; every other call gets a SHA."""
+    if "/proc/meminfo" in " ".join(map(str, cmd if isinstance(cmd, (list, tuple)) else [cmd])):
+        return 0, "8388608\n", ""
+    return 0, "a" * 40, ""
+
 class DispatchPriorityTest(unittest.TestCase):
     NOW = AUTODISPATCH.timestamp("2026-11-08T23:40:00Z")
 
@@ -134,7 +141,7 @@ class DispatchPriorityTest(unittest.TestCase):
                 with ExitStack() as stack:
                     replacements = {
                         "D": directory, "gh": gh, "dispatch": dispatch,
-                        "sh": lambda *a, **k: (0, "a" * 40, ""),
+                        "sh": fake_sh,
                         "remote": lambda *a: {"lane": "idle", "run": {"ended_at": self.NOW}},
                         "finish": lambda *a: {"done": True},
                         "audit_switches": lambda: None,
@@ -258,7 +265,7 @@ class DispatchPriorityTest(unittest.TestCase):
                 with ExitStack() as stack:
                     replacements = {
                         "D": directory, "gh": gh, "dispatch": dispatch,
-                        "sh": lambda *a, **k: (0, "a" * 40, ""),
+                        "sh": fake_sh,
                         "remote": lambda *a: {"lane": "idle" if index == 2 else "busy"},
                         "audit_switches": lambda: None,
                         "paused_scopes": lambda **k: {"mint"},
