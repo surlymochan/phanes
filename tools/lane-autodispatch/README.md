@@ -78,7 +78,7 @@ work_slots   = total - reserve - work_busy # 工作类还剩的车道
 
 ```bash
 # 1) 同步仓库镜像到 box 运行时
-cp /workspace/phanes-repo/tools/lane-autodispatch/autodispatch.py ~/phanes-ctl/bin/autodispatch.py
+cp tools/lane-autodispatch/{autodispatch.py,hotfiles.py,hot_policy.json} "$AD_BIN_DIR"/
 # 2) 在 AD 的启动环境里导出开关（start-control-plane 启动的 lane-autodispatch 也要拿到它）
 export AD_VERIFY_SHARE_ENABLED=1        # 可选：export AD_VERIFY_SHARE=0.2 AD_VERIFY_MIN=1
 # 3) 重启 AD 循环后生效
@@ -360,3 +360,7 @@ issue 读取或解析失败保留 run 重试，不推送、不换标。strict �
 映射写进提交信息；PR 评论可供人工复核，但当前自动预检仅读取提交正文。
 REPORT: dropped — 旧 .lane-review 文件载体已由 main 过滤，按 issue 裁定移除；旧 PR 无 dispatch 引擎改动需移植。
 验证：python3 -m pytest -q swrm/tests/test_lane_delivery_map.py tools/tests/test_lane_pr_validation.py
+
+## 热文件预检（#1721）
+
+`hot_policy.json` 是 backlog 铸卡和 AD 派发共用的上限配置；变更配置后须与脚本及 `hotfiles.py` 一同部署。卡片用 `热文件：path/to/file` 声明修改文件。导入时冲突卡保留待重试，`mint-log.json` 记录预检；同批已铸卡计入占用。`lanes-status.json` 的 `_blocked_details` 给出原因、文件及自首次观测以来的等待秒数；这些卡不计入 `_ready` 和补给水位。旧在途状态缺少 `hot` 字段时，声明了热文件的卡保守等待，直到旧任务结束。文档文件按既有规则豁免。

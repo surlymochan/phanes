@@ -2197,6 +2197,71 @@ def minimax_burn_status(now=None, max_age_s=MM_BURN_MAX_AGE_S):
         if rows: fields["_minimax_hourly_buckets"] = rows
     return fields
 
+# Shared by the backlog mint and dispatch decisions (Refs #1721).
+_HOT_DIR = os.path.dirname(os.path.abspath(__file__))
+_spec = importlib.util.spec_from_file_location("ad_hotfiles", os.path.join(_HOT_DIR, "hotfiles.py"))
+HOTFILES = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(HOTFILES)
+with open(os.path.join(_HOT_DIR, "hot_policy.json"), encoding="utf-8") as _stream:
+    _hot_policy = json.load(_stream)
+HOT_LOCK = HOTFILES.HotLock(
+    dict(_hot_policy["hot_shared"], **{f: _hot_policy["hot_default"] for f in _hot_policy["hot_bare"]}),
+    _hot_policy["hot_default"])
+HOT_UNION = set(HOTFILES.parse_hot_files("热文件：" + " ".join(_hot_policy["hot_union"])))
+
+
+def hot_files(body):
+    return [f for f in HOTFILES.parse_hot_files(body) if f not in HOT_UNION and not HOTFILES.is_doc_file(f)]
+
+
+def hot_inflight(state):
+    counts = {}
+    for lane, entry in (state or {}).items():
+        if lane.startswith("_") or not isinstance(entry, dict) or not entry.get("issue"): continue
+        # Runs dispatched before this feature have no declared files in state.
+        if not isinstance(entry.get("hot"), list) or not all(isinstance(f, str) for f in entry["hot"]):
+            counts["__unknown__"] = 1
+            continue
+        for path in set(hot_files("热文件：" + " ".join(entry["hot"]))):
+            counts[path] = counts.get(path, 0) + 1
+    return counts
+
+
+def hot_verdict(body, counts):
+    files = sorted(hot_files(body))
+    verdict = HOT_LOCK.preflight(files, counts)
+    if files and counts.get("__unknown__"):
+        verdict["blocked"] = True
+        verdict["unknown_inflight"] = True
+        verdict["advice"] = "在途热文件未知，等待或核实后重试"
+    return verdict
+
+
+def blocked_details(q, hot_blocked, memory_blocks, state):
+    now = time.time()
+    since = state.setdefault("_blocked_since", {})
+    if not isinstance(since, dict): since = {}; state["_blocked_since"] = since
+    details = []
+    for item in q:
+        n = item["n"]
+        if not item.get("deps_ok", True): reason = "deps"; files = []
+        elif n in hot_blocked:
+            reason = "hot_file"; files = [c["file"] for c in hot_blocked[n]["conflicts"]]
+            if hot_blocked[n].get("unknown_inflight"): files = hot_blocked[n]["files"]
+        elif n in memory_blocks: reason = "memory"; files = []
+        else: continue
+        key = str(n)
+        try: first = float(since[key])
+        except (KeyError, TypeError, ValueError): first = now; since[key] = first
+        details.append({"issue": n, "reason": reason, "files": files,
+                        "unknown_inflight": bool(hot_blocked.get(n, {}).get("unknown_inflight")),
+                        "wait_seconds": max(0, int(now - first))})
+    active = {str(d["issue"]) for d in details}
+    for key in list(since):
+        if key not in active: since.pop(key, None)
+    return details
+
+
 def status_snapshot(lanes, state, res, ready, blocked, records=None):
     """Build the observable lane status row, including this process's stale skips."""
     lanes = lanes or {}
@@ -2259,6 +2324,7 @@ class StatusPublisher:
         self.ready = self.previous("_ready")
         self.blocked = self.previous("_blocked")
         self.memory_blocks = {}
+        self.blocked_details = None
         self.rows = self.previous_rows()
         self.refresh = STATUS_REFRESH_SECONDS if refresh is None else float(refresh)
         self.phase = "start"
@@ -2300,6 +2366,10 @@ class StatusPublisher:
                                    self.records)
         if isinstance(snapshot, dict):
             snapshot["_memory_blocks"] = self.memory_blocks
+            if self.blocked_details is not None:
+                snapshot["_blocked_details"] = self.blocked_details
+                snapshot["_blocked_reasons"] = {reason: sum(d["reason"] == reason for d in self.blocked_details)
+                                                for reason in ("deps", "hot_file", "memory")}
             # The phase and the tick start tell the reader how far the current tick got
             # (Refs #1697): a snapshot whose phase does not change while `_at` advances
             # means a slow step is running.
@@ -3586,7 +3656,9 @@ def run_tick(lanes, state, last_warn, publisher):
         for c in candidates:
             if c not in eligible: continue
             status, detail = label_state(c["n"])
-            if status == "fresh": pick = c; break
+            if status == "fresh":
+                if hot_verdict(c.get("body", ""), hot_inflight(state))["blocked"]: continue
+                pick = c; break
             if status == "stale":
                 q.remove(c); skip_stale(c["n"], detail)  # try the next one this tick
                 continue
@@ -3639,7 +3711,7 @@ def run_tick(lanes, state, last_warn, publisher):
             return "no-capacity"
         if L != asked: outcomes[L] = "dispatched"
         q.remove(pick)
-        record = {"issue": pick["n"], "run": run, "host": cfg["host"], "base": commit, "at": time.strftime("%F %T"), "verify": ver, "class": "verify" if pick.get("verify") else "work"}
+        record = {"issue": pick["n"], "run": run, "host": cfg["host"], "base": commit, "at": time.strftime("%F %T"), "verify": ver, "class": "verify" if pick.get("verify") else "work", "hot": hot_files(pick.get("body", ""))}
         with publisher._lock:
             state[L] = record
             state.setdefault("_pool_entered_at", {}).pop(str(pick["n"]), None)
@@ -3754,11 +3826,15 @@ def run_tick(lanes, state, last_warn, publisher):
         rejections = memory_rejections.get(item["n"], {})
         if candidates and all(L in rejections for L in candidates):
             memory_blocks[item["n"]] = list(rejections.values())
-    blocked += len(memory_blocks)
+    hot_blocked = {i["n"]: verdict for i in q if i.get("deps_ok", True)
+                   for verdict in [hot_verdict(i.get("body", ""), hot_inflight(state))]
+                   if verdict["blocked"]}
+    details = blocked_details(q, hot_blocked, memory_blocks, state)
+    blocked = len(details)
     ready = len(q) - blocked
     publisher.publish(res=res, ready=ready, blocked=blocked, phase="queue")  # the queue counters are measured
     # refill when the queue is short, or when some backend's lanes could not all be fed (counting cross-pin fallback)
-    short = {b: sum(c["backend"] == b for c in lanes.values()) - sum(1 for i in q if i.get("deps_ok", True) and can_take(b, i, verify_gate=False))
+    short = {b: sum(c["backend"] == b for c in lanes.values()) - sum(1 for i in q if i.get("deps_ok", True) and i["n"] not in hot_blocked and i["n"] not in memory_blocks and can_take(b, i, verify_gate=False))
              for b in {c["backend"] for c in lanes.values()}}
     starve = max(short.values(), default=0)
     need = refill_need(ready, low=LOW, target=TARGET, starved=starve)
@@ -3784,6 +3860,7 @@ def run_tick(lanes, state, last_warn, publisher):
     refresh_minimax_burn()  # the burn watchdog refreshes the reading the status shows (Refs #1671)
     with publisher._lock:
         publisher.memory_blocks = memory_blocks
+        publisher.blocked_details = details
         publisher.publish(res=res, ready=ready, blocked=blocked, phase="idle")
     return last_warn
 
@@ -3991,6 +4068,50 @@ def file_issue_once(text, key, state):
     done[marker] = issue; pending.pop(marker, None); save_state(state)
     return issue
 
+
+def record_mint(record):
+    ledger = load(f"{D}/mint-log.json", [])
+    if not isinstance(ledger, list): ledger = []
+    ledger.append(record)
+    tmp = f"{D}/mint-log.json.tmp"
+    with open(tmp, "w", encoding="utf-8") as stream:
+        json.dump(ledger[-100:], stream, ensure_ascii=False, indent=1)
+    os.replace(tmp, f"{D}/mint-log.json")
+
+
+def mint_card(text, state, counts, source):
+    lines = card_lines(text)
+    if len(lines) < 2 or not lines[0].startswith("#") or not lines[1].startswith("labels:"):
+        record_mint({"at": time.strftime("%F %T"), "source": source,
+                     "minted": False, "reason": "bad_format"})
+        raise ValueError("bad card format")
+    verdict = hot_verdict("\n".join(lines[2:]), counts)
+    record = {"at": time.strftime("%F %T"), "title": lines[0].lstrip("# ").strip(),
+              "source": source, "preflight": verdict, "minted": False, "issue": None}
+    if verdict["blocked"]:
+        # A card that conflicts on a hot file is never created, not even for a starved
+        # lane: the caller moves on to the next card that does not conflict (Refs #1721).
+        record["reason"] = "hot_file_conflict"
+        record_mint(record)
+        log(f"mint refused {record['title']}: {verdict['advice']} {verdict['conflicts']}", brain=False)
+        return None
+    # Persist the decision before the external write, including if issue creation fails.
+    record_mint({**record, "reason": "mint_pending"})
+    try:
+        ref = file_issue_once(text, source, state)
+    except Exception:
+        record_mint({**record, "reason": "mint_failed"})
+        raise
+    if ref is None:  # the earlier creation of this card is not settled: nothing new is created, retried next tick
+        record_mint({**record, "reason": "creation_pending"})
+        return None
+    record.update(minted=True, issue=re.sub(r"\(.*\)$", "", ref).lstrip("#"))
+    for path in verdict["files"]: counts[path] = counts.get(path, 0) + 1
+    try: record_mint(record)
+    except OSError as e: log(f"mint ledger final write failed: {e}", brain=False)
+    return ref
+
+
 PLANNER = """# 规划：为 lane 队列写 {k} 条新任务（{tag}）
 labels: p1,backend:codex,planner
 自动补队列任务。读 main 上的代码与 `docs/reviews/`、`docs/scenario/`、`examples/org-health-local/`，写 {k} 个新文件 `docs/backlog/next/{tag}-01.md` … `{tag}-{k:02d}.md`，每个文件是一条可独立派给 lane 的小任务，格式严格为：
@@ -3999,6 +4120,8 @@ labels: p1,backend:codex,planner
 # <中文标题>
 labels: <p1 或 p2>,backend:<pi|codex|agy>
 <任务正文：要改的文件路径、具体改动、边界；不得依赖其它未完成任务>
+
+热文件：`<要改的仓库相对路径>`（多个用逗号分隔）
 
 验收：`<一条在仓库根或 cd 子目录后可直接运行、只用 python3 标准库/现有脚本的命令>`
 
@@ -4069,6 +4192,7 @@ def replenish(k, state):
     if mint_paused():
         log("replenish skipped: mint paused (PAUSE-MINT marker or the mint pause scope)", brain=False); return []
     bd = f"{D}/backlog"; os.makedirs(f"{bd}/filed", exist_ok=True); os.makedirs(f"{bd}/rejected", exist_ok=True); out = []
+    counts = hot_inflight(state)
     MINT_EVIDENCE.clear(); MINT_EVIDENCE["need"] = k; rejected = 0
     for f in sorted(x for x in os.listdir(bd) if x.endswith(".md")):
         if len(out) >= k: break
@@ -4079,11 +4203,12 @@ def replenish(k, state):
         if defect:
             target = move_without_overwrite(f"{bd}/{f}", f"{bd}/rejected/{f}")
             rejected += 1
+            record_mint({"at": time.strftime("%F %T"), "source": f"backlog/{f}", "minted": False, "reason": "bad_format", "detail": defect})
             log(f"backlog {f}: {defect} → {target}", brain=False); continue
-        try: issue = file_issue_once(text, "backlog/" + f, state)
+        try: issue = mint_card(text, state, counts, f"backlog/{f}")
         except Exception as e:
             log(f"backlog {f}: {e}", brain=False); continue  # one failing card must not block the batch
-        if issue is None: continue
+        if issue is None: continue  # refused by the hot-file gate, or its earlier creation is not settled
         out.append(issue)
         move_without_overwrite(f"{bd}/{f}", f"{bd}/filed/{f}")
     MINT_EVIDENCE["rejected"] = rejected
@@ -4100,7 +4225,7 @@ def replenish(k, state):
         if defect:
             imp.append(path); save_state(state)
             log(f"repo backlog {path}: {defect} → skipped", brain=False); continue
-        try: issue = file_issue_once(text, path, state)
+        try: issue = mint_card(text, state, counts, path)
         except Exception as e:
             log(f"repo backlog {path}: {e}", brain=False); continue  # keep the card unimported: it is retried next tick
         if issue is None: continue
