@@ -567,6 +567,14 @@ class ReassignmentGuardTests(unittest.TestCase):
             self.assertNotIn('in-progress', case.fleet.issues[n]['labels'], notes)
             self.assertTrue(any('open PR #99' in x or 'post-dispatch' in x for x in notes))
 
+    def test_tick_does_not_dispatch_when_pr_lookup_fails(self):
+        case, fixture = self.fixture(); ad = case.module
+        case.fleet.issues[fixture.ISSUE]['labels'] = ['lane-ready']
+        with mock.patch.object(ad, 'open_pr_for_issue', side_effect=RuntimeError('offline')):
+            case.tick()
+        self.assertEqual(case.fleet.dispatches, [])
+        self.assertNotIn(fixture.LANE, case.state)
+
     def test_cancel_is_verified_and_retained_for_retry(self):
         case, fixture = self.fixture(); ad = case.module; n = fixture.ISSUE
         st = {'issue': n, 'run': 'r', 'cancel_pending': True}

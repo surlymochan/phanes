@@ -1,4 +1,5 @@
 """Acceptance tests for the tester evidence review risk classifier (#1988)."""
+from pr_guard_fixtures import no_open_prs
 import importlib.util
 import json
 import os
@@ -120,6 +121,7 @@ class TesterRiskDispatchTests(unittest.TestCase):
                "labels": ["lane-ready", "verify-intent"] if verify else ["lane-ready"]}
         reads = []
 
+        @no_open_prs
         def fake_sh(cmd, **kwargs):
             if cmd[:3] == ["gh", "issue", "list"]:
                 return 0, json.dumps([row]), ""

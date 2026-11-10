@@ -1,3 +1,7 @@
+import sys
+from pathlib import Path as _FixturePath
+sys.path.insert(0, str(_FixturePath(__file__).resolve().parent))
+from pr_guard_fixtures import no_open_prs
 #!/usr/bin/env python3
 """The deadline of a legacy pause marker (Refs #1592).
 
@@ -214,6 +218,8 @@ class PauseTickTests(PauseDeadlineHarness):
     def run_tick(self):
         """One tick with GitHub, ssh and the dispatch faked; returns the dispatched pairs."""
         dispatched = []
+
+        @no_open_prs
 
         def fake_gh(args, timeout=60):
             if args[:2] == ["issue", "list"]:

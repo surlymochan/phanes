@@ -1,3 +1,7 @@
+import sys
+from pathlib import Path as _FixturePath
+sys.path.insert(0, str(_FixturePath(__file__).resolve().parents[1] / "lane-autodispatch"))
+from pr_guard_fixtures import no_open_prs
 """The hot-file preflight on the real AD backlog import path (Refs #1721).
 
 The AD (``tools/lane-autodispatch/autodispatch.py``) is where the planner's cards become
@@ -80,6 +84,8 @@ class Base(unittest.TestCase):
     def restore(self):
         for name, value in self.orig.items():
             setattr(autodispatch, name, value)
+
+    @no_open_prs
 
     def fake_gh(self, args, timeout=60):
         self.calls.append(" ".join(str(a) for a in args))
