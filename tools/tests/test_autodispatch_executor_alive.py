@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import contextlib
 import importlib.util
+import importlib.machinery
 import io
 import json
 import os
@@ -156,6 +157,28 @@ class SessionVerdictTests(unittest.TestCase):
         self.assertIs(status["executor_alive"], False,
                       "an empty process group is the proof that the session is gone")
         self.assertEqual(status["executor_pgid"], pgid)
+
+    def test_swrm_status_writer_supplies_group_for_remote_probe(self):
+        loader = importlib.machinery.SourceFileLoader("swrm_status_test", str(ROOT / "swrm/bin/swrm"))
+        spec = importlib.util.spec_from_loader(loader.name, loader)
+        swrm = importlib.util.module_from_spec(spec)
+        loader.exec_module(swrm)
+        pgid, child = live_group()
+        self.addCleanup(stop, child)
+        swrm.set_status(str(self.host.run_dir), runner_pid=DEAD_PID,
+                        executor_pid=child.pid, events=str(self.host.events), state="running")
+        recorded = json.loads((self.host.run_dir / "status.json").read_text())
+        self.assertEqual(recorded["executor_pgid"], pgid)
+        self.assertIsNone(self.host.probe()["executor_alive"])
+        stop(child)
+        verdict = self.host.probe()
+        self.assertIs(verdict["runner_alive"], False)
+        self.assertIs(verdict["executor_alive"], False)
+        with patch.object(swrm.os, "getpgid", side_effect=ProcessLookupError):
+            swrm.set_status(str(self.host.run_dir), executor_pid=child.pid)
+        recorded = json.loads((self.host.run_dir / "status.json").read_text())
+        self.assertNotIn("executor_pgid", recorded)
+        self.assertIsNone(self.host.probe()["executor_alive"])
 
     def test_a_process_group_with_a_living_member_is_unknown(self):
         pgid, child = live_group()
