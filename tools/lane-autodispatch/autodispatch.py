@@ -1668,7 +1668,7 @@ def review_in_flight(lanes, state):
     return {lane: running[lane] + int(lane in queued) + int(bool((state.get(lane) or {}).get("review_queued"))) for lane in lanes}
 
 def reconcile_review_queue(state, res):
-    """Release reservations only on an observed start, terminal result or cancellation."""
+    """Release reservations on start, terminal result, or an idle interrupted dispatch."""
     queued = state.get("_review_queued") or {}
     assigned = {lane: card for lane, card in state.items()
                 if isinstance(card, dict) and card.get("review_queued")}
@@ -1676,6 +1676,9 @@ def reconcile_review_queue(state, res):
         remote = res.get(lane) or {}
         if "error" in remote: continue
         run = card.get("run")
+        if not run and lane in queued and remote.get("lane") == "idle" and not state.get(lane):
+            queued.pop(lane, None)
+            continue
         if run and (isinstance(remote.get("run"), dict)
                     or (remote.get("run") == "running"
                         and remote.get("current_run") == run)):
@@ -3556,7 +3559,6 @@ def run_tick(lanes, state, last_warn, publisher):
     for L in lanes:
         if L not in res: res[L] = {"error": "host in backoff", "skip": True}
     reconcile_review_queue(state, res)
-    save_state(state)
     seen = set()
     recovered_hosts = []
     for L in live:

@@ -517,6 +517,19 @@ class ReviewBacklogTickTest(TickHarness, unittest.TestCase):
         self.assertEqual(dispatched, [("CX4", 1)])
         self.assertEqual(self.last_state["_review_queued"]["CX2"]["issue"], 90)
 
+    def test_interrupted_reservation_recovers_after_restart(self):
+        # State saved before dispatch returned a run ID, loaded by the next process.
+        state = {"_review_queued": {"CX2": {"issue": 1}}}
+        AUTODISPATCH.reconcile_review_queue(state, {"CX2": {"error": "unavailable"}})
+        self.assertIn("CX2", state["_review_queued"])
+        AUTODISPATCH.reconcile_review_queue(state, {"CX2": {"lane": "busy"}})
+        self.assertIn("CX2", state["_review_queued"])
+        dispatched, _ = self.run_tick(
+            [issue(1, VERIFY_BODY, ("lane-ready", "verify-intent"))],
+            {"CX2": self.LANES["CX2"]}, state)
+        self.assertEqual(dispatched, [("CX2", 1)])
+        self.assertNotIn("CX2", self.last_state["_review_queued"])
+
     def test_dispatch_registers_real_queue_and_failure_clears_it(self):
         rows = [issue(1, VERIFY_BODY, ("lane-ready", "verify-intent"))]
         dispatched, _ = self.run_tick(rows, self.LANES)
