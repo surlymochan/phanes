@@ -3,6 +3,7 @@
 
 import importlib.util
 import json
+from card_fixtures import fixture_json
 import tempfile
 import unittest
 from contextlib import ExitStack
@@ -114,10 +115,10 @@ class DispatchPriorityTest(unittest.TestCase):
 
         def gh(args, timeout=60):
             if args[:2] == ["issue", "list"]:
-                return 0, json.dumps(issues), ""
+                return 0, fixture_json(issues), ""
             item = next(i for i in issues if i["number"] == int(args[2]))
             if args[:2] == ["issue", "view"]:
-                return 0, json.dumps({**item, "state": "OPEN"}), ""
+                return 0, fixture_json({**item, "state": "OPEN"}), ""
             if args[:2] == ["issue", "edit"]:
                 item["labels"].append("in-progress")
                 return 0, "", ""
@@ -163,7 +164,7 @@ class DispatchPriorityTest(unittest.TestCase):
     def test_pool_clock_resets_after_leaving_and_survives_queue_read_failure(self):
         issue = {"number": 1, "title": "small", "body": "预算：30", "labels": ["lane-ready"]}
         state = {}
-        with patch.object(AUTODISPATCH, "gh", return_value=(0, json.dumps([issue]), "")), \
+        with patch.object(AUTODISPATCH, "gh", return_value=(0, fixture_json([issue]), "")), \
                 patch.object(AUTODISPATCH.time, "time", return_value=self.NOW):
             AUTODISPATCH.queue(state)
         original = dict(state["_pool_entered_at"])
@@ -174,7 +175,7 @@ class DispatchPriorityTest(unittest.TestCase):
         with patch.object(AUTODISPATCH, "gh", return_value=(0, "[]", "")):
             AUTODISPATCH.queue(state)
         self.assertEqual(state["_pool_entered_at"], {})
-        with patch.object(AUTODISPATCH, "gh", return_value=(0, json.dumps([issue]), "")), \
+        with patch.object(AUTODISPATCH, "gh", return_value=(0, fixture_json([issue]), "")), \
                 patch.object(AUTODISPATCH.time, "time", return_value=self.NOW + 7200):
             returned = AUTODISPATCH.queue(state)
         self.assertEqual(returned[0]["pool_entered_at"], self.NOW + 7200)
@@ -182,13 +183,13 @@ class DispatchPriorityTest(unittest.TestCase):
     def test_dependency_block_resets_pool_clock(self):
         issue = {"number": 1, "title": "small", "body": "Depends on: #2\n预算：30", "labels": ["lane-ready"]}
         state = {"_pool_entered_at": {"1": self.NOW - 7200}}
-        with patch.object(AUTODISPATCH, "gh", return_value=(0, json.dumps([issue]), "")), \
+        with patch.object(AUTODISPATCH, "gh", return_value=(0, fixture_json([issue]), "")), \
                 patch.object(AUTODISPATCH, "deps_met", return_value=False), \
                 patch.object(AUTODISPATCH.time, "time", return_value=self.NOW):
             blocked = AUTODISPATCH.queue(state)
         self.assertFalse(blocked[0]["deps_ok"])
         self.assertEqual(state["_pool_entered_at"], {})
-        with patch.object(AUTODISPATCH, "gh", return_value=(0, json.dumps([issue]), "")), \
+        with patch.object(AUTODISPATCH, "gh", return_value=(0, fixture_json([issue]), "")), \
                 patch.object(AUTODISPATCH, "deps_met", return_value=True), \
                 patch.object(AUTODISPATCH.time, "time", return_value=self.NOW + 7200):
             ready = AUTODISPATCH.queue(state)
@@ -208,7 +209,7 @@ class DispatchPriorityTest(unittest.TestCase):
 
                 def gh(args, timeout=60):
                     limit = int(args[args.index("--limit") + 1])
-                    return 0, json.dumps(rows[:limit]), ""
+                    return 0, fixture_json(rows[:limit]), ""
 
                 with patch.object(AUTODISPATCH, "gh", side_effect=gh), \
                         patch.object(AUTODISPATCH.time, "time", return_value=self.NOW):
@@ -221,7 +222,7 @@ class DispatchPriorityTest(unittest.TestCase):
         state = {"_pool_entered_at": {"1705": self.NOW - 3600}}
         rows = [{"number": n, "title": "small", "body": "预算：30",
                  "labels": ["lane-ready"]} for n in range(1, 101)]
-        responses = [(0, json.dumps(rows), ""), (1, "", "next page unavailable")]
+        responses = [(0, fixture_json(rows), ""), (1, "", "next page unavailable")]
         with patch.object(AUTODISPATCH, "gh", side_effect=responses):
             with self.assertRaisesRegex(RuntimeError, "next page unavailable"):
                 AUTODISPATCH.queue(state)
@@ -235,11 +236,11 @@ class DispatchPriorityTest(unittest.TestCase):
         def gh(args, timeout=60):
             if args[:2] == ["issue", "list"]:
                 limit = int(args[args.index("--limit") + 1])
-                return 0, json.dumps(rows[:limit]), ""
+                return 0, fixture_json(rows[:limit]), ""
             item = next(i for i in rows if i["number"] == int(args[2]))
             if args[:2] == ["issue", "view"]:
                 reads.append(item["number"])
-                return 0, json.dumps({**item, "state": "OPEN"}), ""
+                return 0, fixture_json({**item, "state": "OPEN"}), ""
             if args[:2] == ["issue", "edit"]:
                 item["labels"].append("in-progress")
                 return 0, "", ""

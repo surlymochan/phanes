@@ -1477,6 +1477,48 @@ def remote(lane, cfg, run=""):
     try: return json.loads(out.strip().splitlines()[-1])
     except Exception: return {"error": out[-200:]}
 
+PRIVATE_HOST_RE = re.compile(
+    r'(?<![A-Za-z0-9_])(?:' + '|'.join('go' + n for n in ('vpn', 'res', 'cc', 'relay')) + r')[0-9]*(?![A-Za-z0-9_])', re.I)
+
+def card_quality(body):
+    """Check legacy dispatch cards against origin/main, without rewriting them."""
+    for line in body.splitlines():
+        if PRIVATE_HOST_RE.search(line) and not re.search(r'本机|localhost', line, re.I):
+            return "跨主机引用"
+        if re.search(r'(?<![A-Za-z0-9_.:/-])(?:/(?!/)[^\s`\"<>]*|~/[^\s`]*|\.\./[^\s`]*)', line):
+            return "仓外路径"
+    # Keep the old command structure, but require scripts to name a verification task.
+    script = r'[A-Za-z0-9_./-]*(?:test|check|lint|verify)[A-Za-z0-9_./-]*'
+    command = re.compile(r'(?:^|[;&]\s*)(?:\./' + script + r'|(?:bash|sh|python\d*)\s+' + script + r'|(?:python\d*\s+-m\s+)?(?:pytest|unittest|ruff|mypy|tox)\b|(?:npm|pnpm|yarn|cargo|go|make)\s+(?:run\s+)?(?:test|check|lint|build)\b)(?:\s|$)', re.I)
+    def executable(line):
+        return command.search(re.sub(r'^(?:验收|acceptance)\s*[:：]\s*', '', line.strip(), flags=re.I).strip('`').lstrip('$').strip())
+    fence = None
+    commands = False
+    for line in body.splitlines():
+        if line.strip().startswith('```'):
+            fence = None if fence is not None else line.strip()[3:].lower()
+            continue
+        if fence in (None, '', 'sh', 'bash', 'shell', 'console') and executable(line):
+            commands = True
+    if not commands:
+        if re.search(r'(?:验收|acceptance)[\s\S]*(?:或|至少|酌情)', body, re.I):
+            return "验收含糊且缺少可执行命令"
+        return "缺少可执行验证命令"
+    for match in re.finditer(r'(?:分支|branch)\s*[:：]?\s*[`\'\"]?([A-Za-z0-9_./-]+)', body, re.I):
+        if re.search(r'(?:新建|创建|新增|生成)\s*$', body[:match.start()]): continue
+        branch = match.group(1)
+        rc, _, _ = sh(["git", "-C", LOCAL, "merge-base", "--is-ancestor", branch, "origin/main"])
+        if rc: return f"分支不存在于 main: {branch}"
+    for line in body.splitlines():
+        if executable(line) or '://' in line: continue
+        for match in re.finditer(r'(?<![A-Za-z0-9_./-])(?:[A-Za-z0-9_.-]+/)+[A-Za-z0-9_.-]+|(?<![A-Za-z0-9_./-])[A-Za-z0-9_-]+\.[A-Za-z0-9]+', line):
+            verbs = list(re.finditer(r'新建|创建|新增|生成|读取|修改|查看|引用|编辑|分支|branch', line[:match.start()], re.I))
+            if verbs and verbs[-1].group().lower() in ('新建', '创建', '新增', '生成', '分支', 'branch'): continue
+            path = match.group()
+            rc, _, _ = sh(["git", "-C", LOCAL, "cat-file", "-e", f"origin/main:{path}"])
+            if rc: return f"main 文件不存在: {path}"
+    return None
+
 def queue(state=None):
     """Track admission clocks in tick's persisted state, keyed by JSON issue numbers.
 
@@ -1511,6 +1553,15 @@ def queue(state=None):
             valid, missing = verify_requirements(body)
             if not valid:
                 log_verify_rejected(i["number"], missing); continue
+        if not verify:
+            defect = card_quality(body)
+            if defect:
+                # New cards already accepted by #1732 keep their preflight contract.
+                try: preflight_card(body)
+                except RuntimeError:
+                    rc, _, err = gh(["issue", "edit", str(i["number"]), "--remove-label", "lane-ready"])
+                    log(f"卡 #{i['number']} 退回: {defect}" + (f"; 标签移除失败: {err.strip()}" if rc else ""))
+                    continue
         match = re.search(r"(?im)(?:budget(?:[_ -]minutes)?|预算)\s*[:：]\s*(\d+(?:\.\d+)?)", body)
         budget = float(match.group(1)) if match else float(BUDGET)
         item = {"n": i["number"], "title": i["title"], "body": body, "labels": sorted(labels), "prio": pr, "backend": be, "strict": "strict-backend" in labels, "verify": verify,

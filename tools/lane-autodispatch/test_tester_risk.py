@@ -1,6 +1,7 @@
 """Acceptance tests for the tester evidence review risk classifier (#1988)."""
 import importlib.util
 import json
+from card_fixtures import fixture_json
 import os
 from pathlib import Path
 import subprocess
@@ -122,9 +123,9 @@ class TesterRiskDispatchTests(unittest.TestCase):
 
         def fake_sh(cmd, **kwargs):
             if cmd[:3] == ["gh", "issue", "list"]:
-                return 0, json.dumps([row]), ""
+                return 0, fixture_json([row]), ""
             if cmd[:3] == ["gh", "issue", "view"]:
-                return 0, json.dumps(row), ""
+                return 0, fixture_json(row), ""
             if cmd[:3] == ["gh", "issue", "edit"]:
                 return 0, "", ""
             if cmd[:2] == ["gh", "api"]:

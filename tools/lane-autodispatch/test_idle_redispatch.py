@@ -39,6 +39,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+from card_fixtures import fixture_json
 import os
 import re
 import shutil
@@ -183,7 +184,7 @@ class Fleet:
             rows = [{"number": number, "title": issue["title"], "body": issue["body"],
                      "labels": list(issue["labels"]), "state": "OPEN"}
                     for number, issue in sorted(self.issues.items())]
-            return 0, json.dumps(rows), ""
+            return 0, fixture_json(rows), ""
         if args[:2] == ["issue", "view"]:
             issue = self.issues.get(int(args[2]))
             if issue is None:
