@@ -224,7 +224,7 @@ class SnapshotFreshnessTests(unittest.TestCase):
                                             encoding="utf-8")
             refreshed = []
 
-            def blocked_queue():
+            def blocked_queue(*args, **kwargs):
                 """A queue fetch that blocks until the snapshot was refreshed meanwhile."""
                 first = json.loads(runner.snapshot_path.read_text(encoding="utf-8"))["_at"]
                 deadline = time.time() + 10

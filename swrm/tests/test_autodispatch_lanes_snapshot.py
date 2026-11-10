@@ -309,7 +309,7 @@ class DispatcherFixture:
             fixture.slow(90)  # the harvest of one lane: a slow fetch plus a PR
             return {"done": True, "status": "pr-created", "error": None, "missing": []}
 
-        def queue():
+        def queue(*args, **kwargs):
             fixture.slow(20)  # the queue fetch
             return [{"n": 100 + index, "title": f"issue {index}", "body": "", "prio": 3,
                      "backend": None, "strict": False} for index in range(3)]
@@ -462,7 +462,7 @@ class SlowStepTests(unittest.TestCase):
             ad = load_autodispatch(OPENSWARM_AD_STATE_DIR=directory, AD_STATUS_REFRESH="0.2")
             path = pathlib.Path(directory) / "lanes-status.json"
 
-            def blocked_queue():
+            def blocked_queue(*args, **kwargs):
                 """A queue fetch that hangs until the snapshot was refreshed meanwhile."""
                 first = json.loads(path.read_text(encoding="utf-8"))["_at"]
                 deadline = time.time() + 30

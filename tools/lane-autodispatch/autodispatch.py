@@ -2420,6 +2420,7 @@ def clear_budget_history(state, issue):
 def release_recovered_budget_holds(state, lanes):
     """Return held cards to lane-ready only after the window query confirms recovery."""
     holds, _ = budget_holds(state)
+    if not holds: return  # nothing held: no state write before the queue is measured
     for issue, hold in list(holds.items()):
         if not isinstance(hold, dict): continue
         lane = hold.get("lane")
@@ -3150,7 +3151,6 @@ def run_tick(lanes, state, last_warn, publisher):
             queue_failed = True; queue_error = str(e)
             log(f"queue error: {e}", brain=False)
             return False
-        save_state(state)  # admission clocks survive --once and failures later in the tick
         for i in q:
             if "deps_ok" not in i: i["deps_ok"] = deps_met(i)
         metrics = verify_metrics(state)
@@ -3160,10 +3160,12 @@ def run_tick(lanes, state, last_warn, publisher):
                 queued = item.get("queued")
                 metrics["cards"].setdefault(str(item["n"]), {"issue": item["n"], "queued": now if queued is None else queued})
         # Dispatch reads labels in score order before freshen_queue uses the remaining
-        # read budget. Prefetching by issue number can starve a high-scoring old card.
-        q = freshen_queue(q, state)
+        # read budget. Prefetching by issue number can starve a high-scoring old card,
+        # so the early snapshot counts the rows as read; the authoritative freshen_queue
+        # pass runs after the dispatches.
         blocked = sum(not i["deps_ok"] for i in q)
         publisher.publish(res=res, ready=len(q) - blocked, blocked=blocked, phase="deps")
+        save_state(state)  # admission clocks survive --once and failures later in the tick; after the fresh counts are stamped
         return True
 
     def base_commit():
@@ -3250,7 +3252,7 @@ def run_tick(lanes, state, last_warn, publisher):
         record = {"issue": pick["n"], "run": run, "host": cfg["host"], "base": commit, "at": time.strftime("%F %T"), "verify": ver, "class": "verify" if pick.get("verify") else "work"}
         with publisher._lock:
             state[L] = record
-            state["_pool_entered_at"].pop(str(pick["n"]), None)
+            state.setdefault("_pool_entered_at", {}).pop(str(pick["n"]), None)
             metrics = verify_metrics(state)
             # The snapshot and saved state must reflect the slot just occupied.
             if AD_VERIFY_SHARE_ENABLED: metrics["deficit"] = queue_class_limits(lanes, state, idle)[0]
