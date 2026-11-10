@@ -91,6 +91,16 @@ https.request = (_options, callback) => {
 '''
 
 
+def short_tmp_root():
+    """A short directory root for unix-domain sockets (sun_path is ~104 bytes).
+
+    TMPDIR can be deep, so prefer /tmp and fall back to the default temp dir only when
+    /tmp is unusable; the length assertion in the broker start then explains a failure."""
+    if os.path.isdir('/tmp') and os.access('/tmp', os.W_OK | os.X_OK):
+        return '/tmp'
+    return tempfile.gettempdir()
+
+
 class UnixHTTP(http.client.HTTPConnection):
     def __init__(self, path):
         super().__init__('localhost', timeout=5)
@@ -171,7 +181,7 @@ class PiBrokerUsageTests(unittest.TestCase):
         SCRATCH.mkdir(exist_ok=True)
         self.tmp = tempfile.TemporaryDirectory(dir=SCRATCH)
         self.addCleanup(self.tmp.cleanup)
-        self.sockets = tempfile.TemporaryDirectory(prefix='pb')
+        self.sockets = tempfile.TemporaryDirectory(prefix='pb', dir=short_tmp_root())  # short: sun_path limit
         self.addCleanup(self.sockets.cleanup)
         self.root = pathlib.Path(self.tmp.name)
         self.module = self.root / 'auth.mjs'
