@@ -28,7 +28,8 @@ pause_dir="$ctl/autodispatch"
 brain_log="${DISK_WATERMARK_BRAIN_LOG:-/workspace/phanes/brain/log.md}"
 guard_src="$repo_root/tools/disk-watermark-guard.py"
 probe_src="$repo_root/tools/disk-usage-probe.py"
-dispatcher_src="$repo_root/tools/lane-autodispatch/autodispatch.py"
+dispatcher_dir="$repo_root/tools/lane-autodispatch"
+dispatcher_src="$dispatcher_dir/autodispatch.py"
 guard_dst="$bin/disk-watermark-guard.py"
 probe_dst="$bin/disk-usage-probe.py"
 start_script="$bin/start-control-plane"
@@ -113,6 +114,8 @@ deploy_dispatcher() {
     if [[ -f "$target" ]] && grep -q "Phanes lane autodispatcher" "$target"; then
       cp -p "$target" "$target.bak-$(date +%Y%m%d%H%M%S)"
       install -m 0755 "$dispatcher_src" "$target"
+      # the dispatcher loads the hot-file module and its policy from its own directory
+      install -m 0644 "$dispatcher_dir/hotfiles.py" "$dispatcher_dir/hot_policy.json" "$(dirname "$target")/"
       dispatcher_deployed+=("$target")
       echo "deploy: $target (the disk watermark gate of the dispatcher)"
     fi

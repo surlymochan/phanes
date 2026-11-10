@@ -1724,7 +1724,9 @@ HOTFILES = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(HOTFILES)
 with open(os.path.join(_HOT_DIR, "hot_policy.json"), encoding="utf-8") as _stream:
     _hot_policy = json.load(_stream)
-HOT_LOCK = HOTFILES.HotLock(_hot_policy["hot_shared"], _hot_policy["hot_default"])
+HOT_LOCK = HOTFILES.HotLock(
+    dict(_hot_policy["hot_shared"], **{f: _hot_policy["hot_default"] for f in _hot_policy["hot_bare"]}),
+    _hot_policy["hot_default"])
 HOT_UNION = set(HOTFILES.parse_hot_files("热文件：" + " ".join(_hot_policy["hot_union"])))
 
 
@@ -2756,7 +2758,10 @@ def tick(lanes, state, last_warn):
             if time.time() - last_warn > 600:
                 log(f"{why}: mint paused, no new issue minted", brain=False); last_warn = time.time()
         else:
-            filed = replenish(max(LOW - ready, starve), state)
+            global MINT_STARVED
+            MINT_STARVED = starve > 0
+            try: filed = replenish(max(LOW - ready, starve), state)
+            finally: MINT_STARVED = False
             if filed: log(f"{why}: filed {len(filed)} issue(s) from backlog: {' '.join(filed)}")
             elif time.time() - last_warn > 600:
                 log(f"WARNING queue low: {ready} dispatchable lane-ready issue(s) left (+{blocked} waiting on 依赖), backlog/ empty (threshold {LOW})"); last_warn = time.time()
@@ -2792,7 +2797,11 @@ def record_mint(record):
     os.replace(tmp, f"{D}/mint-log.json")
 
 
-def mint_card(text, state, counts, source):
+MINT_STARVED = False  # set by the tick while a lane has no card it may take
+
+
+def mint_card(text, state, counts, source, starved=None):
+    if starved is None: starved = MINT_STARVED
     lines = text.splitlines()
     if len(lines) < 2 or not lines[0].startswith("#") or not lines[1].startswith("labels:"):
         record_mint({"at": time.strftime("%F %T"), "source": source,
@@ -2801,7 +2810,11 @@ def mint_card(text, state, counts, source):
     verdict = hot_verdict("\n".join(lines[2:]), counts)
     record = {"at": time.strftime("%F %T"), "title": lines[0].lstrip("# ").strip(),
               "source": source, "preflight": verdict, "minted": False, "issue": None}
-    if verdict["blocked"]:
+    if verdict["blocked"] and starved:
+        # A lane has nothing it may take: a card that waits for its hot file is still
+        # supply the status explains, a refused one leaves the lane idle (Refs #1721).
+        record["starved_override"] = True
+    elif verdict["blocked"]:
         record["reason"] = "hot_file_conflict"
         record_mint(record)
         log(f"mint refused {record['title']}: {verdict['advice']} {verdict['conflicts']}", brain=False)
