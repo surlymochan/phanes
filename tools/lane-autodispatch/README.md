@@ -201,6 +201,28 @@ PR 号取自卡内容，未指定时保留 `<N>`。非实现类别不注入修�
 旧 dispatcher 及其离线回放工具已删除。仓内 AD 的过滤由
 `test_harvest_filter.py` 独立验证；不再与已删除的模块同步。
 
+## fix/rebase 收割塌缩护栏（Refs #1833）
+
+fix/rebase 卡重新推送到 PR 分支前，AD 读取卡正文和目标 PR head/base；正文读不到、解析不了或
+没有正文时拒绝收割（读不到不等于空正文：没有正文就没有目标 PR，无从判断）。只有 fix/rebase 卡
+（`重基PR：#1845`、`fix/rebase PR #1845` 等）才比对，普通实现卡即使提到别的 PR 也不比对。
+目标 PR 的两个 SHA 由只读 `gh api repos/<owner>/<repo>/pulls/<pr>` 的 `head.sha` / `base.sha`
+获取；`gh pr view --json` 不提供 `baseRefOid`。API 失败或元数据解析失败同样拒绝收割。
+实际推送的过滤后 head 必须包含 fix 前 head（越界产物过滤重建提交后仍须通过祖先检查），
+且相对 base 的变更文件数和增删行数分别不得下降超过
+`AD_HARVEST_COLLAPSE_THRESHOLD`（默认 `0.5`）。任一维度超限、或 git 检查失败（含祖先检查超时、启动异常），
+均不推送、不改 PR、标记 `lane-failed`，并把 PR、前后 SHA、体量和原因写入 brain 日志和
+`$D/runs/<run>.log`（失败台账线索）。卡正文明确写 `整体重写：是` 可豁免。
+护栏之前的真实产物过滤器若因引用缺失或 Git 错误失败，同样标记 `lane-failed`、写 brain 和失败台账，
+返回 `filter-failed` / `done=True` 释放车道，不推送、不改 PR，也不消耗 review 轮次。
+过滤后为空的 diff 也先经过塌缩护栏：完全撤销 PR 的修复仍记录 PR、前后 SHA、体量和拒绝原因。
+普通卡或整体重写豁免卡的空 diff 仍不推送，并记录 brain 日志和失败台账后释放车道。
+
+对应测试：`python3 -m unittest tools/lane-autodispatch/test_harvest_collapse_guard.py`
+（`pytest -q tools/lane-autodispatch/test_harvest_collapse_guard.py` 等价）。
+真实事故回放需设置 `AD_HARVEST_COLLAPSE_MANIFEST=<清单路径>` 和 `AD_LOCAL=<对象仓库>`，
+加 `-s` 输出六个 PR 的完整 before/after/base SHA、体量与拒绝原因；提供清单后缺例或对象不可达均失败。
+
 ## 开关来源审计（Refs #1827）
 
 `PAUSE*` / `EXCLUDE*` 文件是派发开关：今天它们被不明来源写入，事后追不到创建者，只能
