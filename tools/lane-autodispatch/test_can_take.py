@@ -501,6 +501,36 @@ class ReviewBacklogTickTest(TickHarness, unittest.TestCase):
         return {lane: {"issue": 9, "run": "run-9", "host": "h2", "base": "b" * 40,
                        "at": "2026-01-01 00:00:00", "verify": None, "class": cls}}
 
+    def test_queue_survives_probe_errors_and_clears_on_terminal_result(self):
+        state = {"CX2": {"class": "verify", "run": "pending", "review_queued": True}}
+        AUTODISPATCH.reconcile_review_queue(state, {"CX2": {"error": "unavailable"}})
+        self.assertTrue(state["CX2"]["review_queued"])
+        self.assertEqual(AUTODISPATCH.review_in_flight(self.LANES, state)["CX2"], 1)
+        AUTODISPATCH.reconcile_review_queue(state, {"CX2": {"run": {"status": "cancelled"}}})
+        self.assertNotIn("review_queued", state["CX2"])
+
+    def test_real_queued_review_consumes_capacity(self):
+        state = {"_review_queued": {"CX2": {"issue": 90, "run": "pending"}}}
+        dispatched, _ = self.run_tick(
+            [issue(1, VERIFY_BODY, ("lane-ready", "verify-intent"))],
+            self.LANES, state)
+        self.assertEqual(dispatched, [("CX4", 1)])
+        self.assertEqual(self.last_state["_review_queued"]["CX2"]["issue"], 90)
+
+    def test_dispatch_registers_real_queue_and_failure_clears_it(self):
+        rows = [issue(1, VERIFY_BODY, ("lane-ready", "verify-intent"))]
+        dispatched, _ = self.run_tick(rows, self.LANES)
+        lane = dispatched[0][0]
+        self.assertTrue(self.last_state[lane]["review_queued"])
+        self.assertEqual(AUTODISPATCH.review_in_flight(self.LANES, self.last_state)[lane], 1)
+        AUTODISPATCH.reconcile_review_queue(self.last_state, {
+            lane: {"run": "running", "current_run": "run-1"}})
+        self.assertNotIn("review_queued", self.last_state[lane])
+        self.assertEqual(AUTODISPATCH.review_running(self.LANES, self.last_state)[lane], 1)
+        self.failing_lanes = tuple(self.LANES)
+        self.run_tick(rows, self.LANES)
+        self.assertEqual(self.last_state.get("_review_queued", {}), {})
+
     def test_the_review_goes_to_the_lane_with_the_smallest_load(self):
         # CX2 runs a review (load 1) and CX4 runs a work card: only CX5 is free, so the
         # review card goes there - never to the lane that already reviews
