@@ -4167,6 +4167,7 @@ def replenish(k, state):
         if defect:
             target = move_without_overwrite(f"{bd}/{f}", f"{bd}/rejected/{f}")
             rejected += 1
+            record_mint({"at": time.strftime("%F %T"), "source": f"backlog/{f}", "minted": False, "reason": "bad_format", "detail": defect})
             log(f"backlog {f}: {defect} → {target}", brain=False); continue
         try: issue = mint_card(text, state, counts, f"backlog/{f}")
         except Exception as e:

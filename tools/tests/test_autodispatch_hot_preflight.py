@@ -69,10 +69,11 @@ class Base(unittest.TestCase):
         self.repo_cards = {}
         self.repo_backlog = ""
         self.orig = {name: getattr(autodispatch, name)
-                     for name in ("D", "gh", "sh", "log", "replenish", "time")}
+                     for name in ("D", "gh", "sh", "log", "replenish", "time", "preflight_card")}
         autodispatch.D = str(self.state_dir)
         autodispatch.log = lambda msg, brain=True: None
         autodispatch.gh = self.fake_gh
+        autodispatch.preflight_card = lambda text: None  # these tests judge the hot files, not the card lint
         autodispatch.sh = self.fake_sh
         self.addCleanup(self.restore)
 
