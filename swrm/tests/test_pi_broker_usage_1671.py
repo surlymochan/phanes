@@ -36,6 +36,8 @@ import tempfile
 import time
 import unittest
 
+from _broker_wait import short_tmp_root, wait_for_unix_socket
+
 BROKER = pathlib.Path(__file__).resolve().parents[1] / 'bin' / 'pi-minimax-broker.mjs'
 WATCHDOG = pathlib.Path(__file__).resolve().parents[2] / 'tools' / 'mm-burn-rate.py'
 
@@ -88,16 +90,6 @@ https.request = (_options, callback) => {
   return req;
 };
 '''
-
-
-def short_tmp_root():
-    """A short directory root for unix-domain sockets (sun_path is ~104 bytes).
-
-    TMPDIR can be deep, so prefer /tmp and fall back to the default temp dir only when
-    /tmp is unusable; the length assertion in the broker start then explains a failure."""
-    if os.path.isdir('/tmp') and os.access('/tmp', os.W_OK | os.X_OK):
-        return '/tmp'
-    return tempfile.gettempdir()
 
 
 class UnixHTTP(http.client.HTTPConnection):
@@ -219,31 +211,7 @@ class PiBrokerUsageTests(unittest.TestCase):
 
     @staticmethod
     def _wait_listening(path, proc, errors, timeout=45):
-        """Wait until the broker accepts connections, not merely until its socket file exists.
-
-        The file appears at bind time and node startup can be slow on a loaded runner, so a
-        fixed short wait or an exists() check races with the listener."""
-        deadline = time.monotonic() + timeout
-        last = None
-        while time.monotonic() < deadline:
-            if proc.poll() is not None:
-                break
-            probe = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-            probe.settimeout(1)
-            try:
-                probe.connect(str(path))
-                return
-            except OSError as exc:
-                last = exc
-                time.sleep(0.05)
-            finally:
-                probe.close()
-        try:
-            detail = pathlib.Path(errors).read_text(errors='replace')[-800:]
-        except OSError:
-            detail = ''
-        raise AssertionError('the broker did not accept connections on %s (exit=%s, last=%r): %s'
-                             % (path, proc.poll(), last, detail))
+        wait_for_unix_socket(path, timeout=timeout, proc=proc, errors=errors)
 
     @staticmethod
     def _stop(proc):
