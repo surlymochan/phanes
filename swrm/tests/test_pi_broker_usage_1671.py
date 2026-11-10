@@ -38,7 +38,6 @@ import unittest
 
 BROKER = pathlib.Path(__file__).resolve().parents[1] / 'bin' / 'pi-minimax-broker.mjs'
 WATCHDOG = pathlib.Path(__file__).resolve().parents[2] / 'tools' / 'mm-burn-rate.py'
-SCRATCH = pathlib.Path(__file__).resolve().parents[2] / '.swrm-tmp'
 
 # The provider answer of a normal tool call: the content carries numbers that
 # look like usage, the usage object carries the real ones.
@@ -89,6 +88,16 @@ https.request = (_options, callback) => {
   return req;
 };
 '''
+
+
+def short_tmp_root():
+    """A short directory root for unix-domain sockets (sun_path is ~104 bytes).
+
+    TMPDIR can be deep, so prefer /tmp and fall back to the default temp dir only when
+    /tmp is unusable; the length assertion in the broker start then explains a failure."""
+    if os.path.isdir('/tmp') and os.access('/tmp', os.W_OK | os.X_OK):
+        return '/tmp'
+    return tempfile.gettempdir()
 
 
 class UnixHTTP(http.client.HTTPConnection):
@@ -168,8 +177,11 @@ for (const answer of JSON.parse(readFileSync(0, 'utf8'))) {
                  "pi broker binds a '/'-rooted unix-domain socket by design; no Windows transport")
 class PiBrokerUsageTests(unittest.TestCase):
     def setUp(self):
-        SCRATCH.mkdir(exist_ok=True)
-        self.tmp = tempfile.TemporaryDirectory(dir=SCRATCH)
+        # One private workspace per test, outside the shared repo-local .swrm-tmp: other tests (run in
+        # parallel workers) share and clean that directory, which removed this test's logs, stderr and
+        # sockets mid-run (FileNotFoundError / "wrote no request log").  /tmp keeps the socket path short
+        # (sun_path limit) whatever TMPDIR is.
+        self.tmp = tempfile.TemporaryDirectory(prefix='pb', dir=short_tmp_root())
         self.addCleanup(self.tmp.cleanup)
         self.root = pathlib.Path(self.tmp.name)
         self.module = self.root / 'auth.mjs'
@@ -195,14 +207,43 @@ class PiBrokerUsageTests(unittest.TestCase):
         env = self._env(PI_BROKER_LOG=str(log),
                         FAKE_UPSTREAM_CHUNK_SIZE=str(chunk_size),
                         FAKE_UPSTREAM_BODY=base64.b64encode(answer).decode('ascii'))
-        proc = subprocess.Popen(['node', str(BROKER), str(path), str(self.module), 'allowed-model'],
-                                env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        # unix-domain socket paths are limited (104 bytes on macOS, 108 on Linux)
+        self.assertLess(len(str(path).encode()), 100, 'socket path too long: %s' % path)
+        errors = log.with_suffix('.stderr')
+        with open(errors, 'wb') as stderr:
+            proc = subprocess.Popen(['node', str(BROKER), str(path), str(self.module), 'allowed-model'],
+                                    env=env, stdout=subprocess.DEVNULL, stderr=stderr)
         self.addCleanup(self._stop, proc)
-        deadline = time.monotonic() + 10
-        while not path.exists() and proc.poll() is None and time.monotonic() < deadline:
-            time.sleep(0.02)
-        self.assertTrue(path.exists(), 'the broker did not create its socket')
+        self._wait_listening(path, proc, errors)
         return path, log
+
+    @staticmethod
+    def _wait_listening(path, proc, errors, timeout=45):
+        """Wait until the broker accepts connections, not merely until its socket file exists.
+
+        The file appears at bind time and node startup can be slow on a loaded runner, so a
+        fixed short wait or an exists() check races with the listener."""
+        deadline = time.monotonic() + timeout
+        last = None
+        while time.monotonic() < deadline:
+            if proc.poll() is not None:
+                break
+            probe = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            probe.settimeout(1)
+            try:
+                probe.connect(str(path))
+                return
+            except OSError as exc:
+                last = exc
+                time.sleep(0.05)
+            finally:
+                probe.close()
+        try:
+            detail = pathlib.Path(errors).read_text(errors='replace')[-800:]
+        except OSError:
+            detail = ''
+        raise AssertionError('the broker did not accept connections on %s (exit=%s, last=%r): %s'
+                             % (path, proc.poll(), last, detail))
 
     @staticmethod
     def _stop(proc):

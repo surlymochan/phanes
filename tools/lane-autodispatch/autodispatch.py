@@ -12,18 +12,53 @@ PAUSE-HOST-<HOST>, PAUSE-BACKEND-<BACKEND> and PAUSE-MINT (no new issue minted).
 A hold that a program keeps under a scope of its own (`host:<host>@health`) holds the host as well (Refs #1367).
 A legacy marker with an `until=<epoch|ISO>` deadline stops holding after that deadline, while the file stays as evidence (Refs #1592).
 """
-import base64, hashlib, json, math, os, re, shlex, stat, subprocess, sys, time, tempfile, concurrent.futures as cf
+import base64, hashlib, json, math, os, re, shlex, stat, subprocess, sys, threading, time, traceback, tempfile, concurrent.futures as cf
+import importlib.util
 from datetime import datetime, timezone
-HOME = os.path.expanduser("~"); D = f"{HOME}/phanes-ctl/autodispatch"
+# Resolve the sibling even when the dispatcher is loaded by path from another directory.
+# A deployment that copies only this file must still dispatch: without the
+# classifier every card is read in full (Refs #1988).
+try:
+    _risk_spec = importlib.util.spec_from_file_location("tester_risk", os.path.join(os.path.dirname(__file__), "tester_risk.py"))
+    tester_risk = importlib.util.module_from_spec(_risk_spec)
+    _risk_spec.loader.exec_module(tester_risk)
+except Exception:
+    tester_risk = None
+HOME = os.path.expanduser("~")
+# The state dir holds the snapshot, the heartbeat and the log. It can be moved for a test or a
+# second deployment (Refs #1697): the reader (tools/check-lanes-status-stall.py) resolves the
+# same variables, so both sides always name the same file.
+D = os.path.expanduser(os.environ.get("OPENSWARM_AD_STATE_DIR") or os.environ.get("XSWARM_AD_STATE_DIR")
+                        or f"{HOME}/phanes-ctl/autodispatch")
+# The snapshot file itself can be named explicitly (the control plane reads the same path).
+LANES_STATUS_FILE_ENVS = ("OPENSWARM_LANES_STATUS_FILE", "XSWARM_LANES_STATUS_FILE")
+# The knobs that name the refresh cadence of the snapshot publisher: while a slow step of the
+# tick runs, the snapshot is republished so `_at` follows the dispatch rhythm (Refs #1697).
+STATUS_REFRESH_ENVS = ("AD_STATUS_REFRESH", "AD_STATUS_REFRESH_SECONDS", "AD_SNAPSHOT_REFRESH",
+                        "AD_REFRESH_SECONDS", "LANES_STATUS_REFRESH")
+try:  # a typo in the configuration must not kill the dispatcher at import time
+    STATUS_REFRESH_SECONDS = float(next(os.environ[name] for name in STATUS_REFRESH_ENVS if os.environ.get(name)))
+except (StopIteration, TypeError, ValueError):
+    STATUS_REFRESH_SECONDS = 30.0
 REPO = "surlymochan/phanes"; LOCAL = "/workspace/phanes-repo"; BRAIN_LOG = "/workspace/phanes/brain/log.md"
 TICK = int(os.environ.get("AD_TICK", "60")); BUDGET = os.environ.get("AD_BUDGET", "45"); LOW = int(os.environ.get("AD_LOW", "10"))
+# The pool is topped up to TARGET when it drops below LOW: refilling to LOW only leaves the
+# pool at the threshold, so the lanes starve again before the next refill (Refs #1662).
+TARGET = int(os.environ.get("AD_TARGET", "20"))
+# A queue read that fails leaves the pool level unknown. The refill then works on the last
+# known level plus the cards minted since, and the number of consecutive failures is
+# bounded: past the bound the AD waits for an authoritative read instead of minting a new
+# batch every tick (Refs #1662).
+QUEUE_UNREADABLE_REFILL_MAX = int(os.environ.get("AD_QUEUE_FAIL_REFILL_MAX", "3"))
+MINT_EVIDENCE = {}  # what the last refill attempt did: rejected cards, planner gate (Refs #1662)
+LAST_MINT_LOG = 0.0  # throttle of the repeated "the planner gate blocked a new card" line
 RULES = ("Rules: work only inside this repository worktree (the current directory). Never create, modify, move or delete "
          "files outside it — not the main repo, not $HOME, not /tmp; for scratch files use $TMPDIR (inside the worktree, cleaned "
          "automatically) and leave cleanup to the executor. Do not push, do not open PRs, do not touch credentials, no network "
          "installs. Keep the change small and factual; cite file paths and line numbers you checked. Commit your result with a "
          "clear message referencing the issue (\"Refs #{n}\"). Write in the same language as the issue. "
          "Your commit message must also carry a short body with a `Closes #{n}` line and a `验收：<command>` line, and the "
-         "commit subject (the PR title) must contain `#{n}`, so the lane PR passes the pre-submit check (Refs #1704).")
+         "commit subject (the PR title) must contain `#{n}`, so the lane PR passes the pre-submit check (Refs #1704). Include a 验收条目→改动文件→测试 mapping table, one row per acceptance item (Refs #1849).")
 IMPL_CARD_TASK_BOOK = ("## Impl card delivery requirements\n"
                        "1. 交付说明必须对每个新增函数列出入口→调用链→数据结构来源：由谁调用、输入来自哪个真实数据结构、每个字段由谁填写。\n"
                        "2. 至少补一个 tick/集成级测试：从真实入口（tick 或等价入口）驱动到可观测结果；只测函数加 mock 不算。\n")
@@ -137,6 +172,73 @@ MM_BURN_MAX_AGE_S = env_number("MM_BURN_MAX_AGE_S", 900, int)
 # The burn alert is logged at most every this many seconds (the watchdog runs every tick).
 MM_BURN_WARN_SEC = env_number("MM_BURN_WARN_SEC", 600, int)
 BURN_WARN_AT = 0.0  # epoch second of the last burn warning
+
+# --- review lane load balancing (Refs #1701) ---------------------------------------------
+# The review lanes (CX2/CX4/CX5) take the review cards by their in-flight backlog: the
+# lane with the smallest backlog wins, equal backlogs rotate over the review lanes, and a
+# lane that already carries `AD_REVIEW_MAX_IN_FLIGHT` reviews is skipped - the review
+# waits for a free lane instead of piling up on one lane. The decision (the PR, the
+# chosen lane and the backlog of every review lane) goes to the AD log, so the assignment
+# can be reviewed afterwards.
+REVIEW_MAX_IN_FLIGHT = max(1, env_number("AD_REVIEW_MAX_IN_FLIGHT", 1, int))
+# Tie-break rotation for review lanes (#1701 asks only for round-robin among equal backlogs).
+# Deliberately process-local: autodispatch is one long-running loop, and the real selection
+# input (the in-flight review counts) is re-derived every tick, so a restart merely restarts
+# the rotation and can never skew the load balancing or lose a review.
+REVIEW_ROTATION = {}  # review lane set -> {"count": n, "last": {lane: n}}: the turns of the rotation
+
+# --- dispatch priority (Refs #1705) -------------------------------------------------------
+# Scores deliberately use time in the *dispatchable pool*, not issue creation time.
+PRIORITY_WAIT_STEP_S = max(1.0, env_number("AD_PRIORITY_WAIT_STEP_S", 900.0))
+PRIORITY_WAIT_WEIGHT = env_number("AD_PRIORITY_WAIT_WEIGHT", 1.0)
+PRIORITY_LARGE_BUDGET_MINUTES = env_number("AD_PRIORITY_LARGE_BUDGET_MINUTES", 90.0)
+PRIORITY_LARGE_BONUS = env_number("AD_PRIORITY_LARGE_BONUS", 8.0)
+PRIORITY_BACKEND_EXACT = env_number("AD_PRIORITY_BACKEND_EXACT", 4.0)
+PRIORITY_BACKEND_UNPINNED = env_number("AD_PRIORITY_BACKEND_UNPINNED", 2.0)
+PRIORITY_STARVATION_S = max(0.0, env_number("AD_PRIORITY_STARVATION_S", 3600.0))
+PRIORITY_STARVATION_BONUS = env_number("AD_PRIORITY_STARVATION_BONUS", 16.0)
+
+def timestamp(value):
+    """Return an epoch timestamp for a numeric or ISO-8601 value, else None."""
+    if isinstance(value, bool) or value is None: return None
+    if isinstance(value, (int, float)): return float(value)
+    text = str(value).strip()
+    if not text: return None
+    for pattern, candidate in (("%Y-%m-%dT%H:%M:%SZ", text), ("%Y-%m-%dT%H:%M:%S", text[:19])):
+        try: return time.mktime(time.strptime(candidate, pattern))
+        except ValueError: pass
+    return None
+
+def budget_minutes(item):
+    """Read the dispatch budget populated by queue(), accepting legacy spellings."""
+    for key in ("budget_minutes", "budgetMinutes", "budget"):
+        try: return float(item.get(key))
+        except (TypeError, ValueError): pass
+    return 0.0
+
+def pool_wait_seconds(item, now=None):
+    """How long the card has actually been dispatchable, never its issue age."""
+    now = time.time() if now is None else now
+    entered = timestamp(item.get("pool_entered_at"))
+    if entered is None: entered = timestamp(item.get("poolEnteredAt"))
+    if entered is None: entered = now
+    return max(0.0, now - entered)
+
+def priority_score(backend, item, now=None):
+    """Return the score and auditable components used by dispatch ordering."""
+    waited = pool_wait_seconds(item, now)
+    wait_score = math.floor(waited / PRIORITY_WAIT_STEP_S) * PRIORITY_WAIT_WEIGHT
+    budget = budget_minutes(item)
+    large = budget >= PRIORITY_LARGE_BUDGET_MINUTES
+    size_score = PRIORITY_LARGE_BONUS if large else 0.0
+    if item.get("backend") == backend: backend_score = PRIORITY_BACKEND_EXACT
+    elif item.get("backend") is None: backend_score = PRIORITY_BACKEND_UNPINNED
+    else: backend_score = 0.0
+    starvation_score = PRIORITY_STARVATION_BONUS if not large and waited >= PRIORITY_STARVATION_S else 0.0
+    components = {"wait_s": round(waited, 3), "wait": wait_score, "size": size_score,
+                  "backend": backend_score, "starvation": starvation_score,
+                  "budget_minutes": budget}
+    return sum(components[k] for k in ("wait", "size", "backend", "starvation")), components
 
 def ctl_state_dir():
     directory = os.path.expanduser(os.environ.get("OPENSWARM_CTL_STATE_DIR", f"{HOME}/phanes-ctl/state"))
@@ -1079,12 +1181,168 @@ def lane_pr_content(issue, lane, cfg, st, info, subject, message, summary, tests
     if summary: parts.append(f"Executor summary: {summary}")
     return title, "\n\n".join(parts)
 
+# --- 交付说明映射表预检（Refs #1849，rubric A7/F3）--------------------------------
+# 首轮与 fix 轮的交付说明须含「验收条目→改动文件→测试」映射表：缺行时评审必报流程性
+# BLOCKER，白烧一轮。AD 在推送前检查：缺表或缺行就把卡退回作者（不建 PR，不进评审，不计评审轮次）。
+DELIVERY_MAP_CLASS = "delivery_map"        # 预检失败：退回作者，不计入 lane-failed
+DELIVERY_MAP_MISSING = "交付说明缺「验收条目→改动文件→测试」映射表（每行写验收条目、改动文件和测试）"
+ACCEPT_SECTION_RE = re.compile(r"^[ \t]*(?:#{1,6}[ \t]*)?(?:验收|Verify|verify|Acceptance)[^:\n：]{0,24}[:：]?[ \t]*$")
+ACCEPT_ITEM_RE = re.compile(r"^[ \t]*(?:[-*+][ \t]*)?(?:验收|Verify|verify|Acceptance)[ \t]*[:：][ \t]*(.*)$")
+BULLET_RE = re.compile(r"^[ \t]*(?:[-*+]|\d+[.)])[ \t]+(\S.*)$")
+MAP_HEADER_ITEM = ("验收", "acceptance", "条目", "item")
+MAP_HEADER_TEST = ("测试", "test", "验证", "verify")
+SEPARATOR_CELL_RE = re.compile(r"^:?-{2,}:?$")
+PUNCTUATION_RE = re.compile(r"[\s`*_~()\[\]{}<>（）【】、,，.。:：;；!！?？/\\|+\-—–>#]+")
+
+def acceptance_items(body):
+    """The acceptance sentences of a card: the `验收：`/`Verify:` lines and the bullets of an acceptance section.
+
+    Each of them needs a row of the mapping table (Refs #1849)."""
+    items, section = [], False
+    for line in str(body or "").splitlines():
+        if ACCEPT_SECTION_RE.match(line): section = True; continue
+        if line.lstrip().startswith("#"): section = False; continue
+        found = ACCEPT_ITEM_RE.match(line)
+        if found and found.group(1).strip(): items.append(found.group(1).strip()); continue
+        bullet = BULLET_RE.match(line) if section else None
+        if bullet: items.append(bullet.group(1).strip())
+        elif section and line.strip(): section = False
+    return items
+
+def table_cells(line):
+    """The cells of a markdown table row ([] when the line is not a table row)."""
+    text = str(line or "").strip()
+    return [cell.strip() for cell in text.strip("|").split("|")] if "|" in text else []
+
+def mapping_rows(note):
+    """The rows of the 「验收条目→改动文件→测试」tables of a delivery note.
+
+    A table counts when its header names the acceptance column and the test column, the
+    next line is the separator and a data row follows; a row is (acceptance, changed
+    file, test) and only a row with all three cells counts."""
+    rows, lines = [], str(note or "").splitlines()
+    for index, line in enumerate(lines):
+        header = table_cells(line)
+        separator = table_cells(lines[index + 1]) if index + 1 < len(lines) else []
+        if len(header) < 3 or not separator or not all(SEPARATOR_CELL_RE.match(c) for c in separator): continue
+        def column(keywords):
+            return next((i for i, cell in enumerate(header) if any(w in cell.lower() for w in keywords)), None)
+        item_col, test_col = column(MAP_HEADER_ITEM), column(MAP_HEADER_TEST)
+        if item_col is None or test_col is None or item_col == test_col: continue
+        file_col = next((c for c in range(len(header)) if c not in (item_col, test_col)), None)
+        if file_col is None: continue
+        for row_line in lines[index + 2:]:
+            cells = table_cells(row_line)
+            if not cells or len(cells) <= max(item_col, file_col, test_col): break
+            item, files, test = cells[item_col], cells[file_col], cells[test_col]
+            if item and files and test: rows.append((item, files, test))
+    return rows
+
+def normalize_text(text):
+    """The comparable form of a text: no markdown, no punctuation, no spaces, lowercase."""
+    return PUNCTUATION_RE.sub("", str(text or "")).lower()
+
+def row_covers(row, item):
+    """Whether a mapping row covers an acceptance sentence: the acceptance column repeats
+    it in full; unrelated columns cannot supply coverage."""
+    target = normalize_text(item)
+    return bool(target) and target == normalize_text(row[0])
+
+def validate_delivery_map(card, note):
+    """The missing items of the delivery note's mapping table ([] when the delivery is complete).
+
+    Every acceptance sentence of the card needs a row of the 「验收条目→改动文件→测试」table."""
+    rows = mapping_rows(note)
+    if not rows: return [DELIVERY_MAP_MISSING]
+    return [f"验收条目缺映射行：{item}" for item in acceptance_items(card)
+            if not any(row_covers(row, item) for row in rows)]
+
+def delivery_map_missing(lane, n, message):
+    """The missing items of the delivery note's mapping table ([] when the delivery is complete).
+
+    The card body is read from GitHub; a failed read is not a delivery defect."""
+    rc, out, err = gh(["issue", "view", str(n), "--json", "body"])
+    if rc: raise RuntimeError("issue body read failed")
+    try: payload = json.loads(out)
+    except ValueError: raise RuntimeError("issue body JSON invalid")
+    if not isinstance(payload, dict) or not isinstance(payload.get("body"), str):
+        raise RuntimeError("issue body missing or invalid")
+    return validate_delivery_map(payload["body"], message)
+
 def log(msg, brain=True):
     line = f"{time.strftime('%F %T')} {msg}"
     print(line, flush=True)
     with open(f"{D}/autodispatch.log", "a") as f: f.write(line + "\n")
     if brain:
         with open(BRAIN_LOG, "a") as f: f.write(f"- {now()} UTC+8 autodispatch: {msg}\n")
+
+def safe_log(msg, brain=True):
+    """log() that never raises: a broken log file must not kill the dispatcher."""
+    try:
+        log(msg, brain=brain)
+    except Exception:
+        print(f"{time.strftime('%F %T')} {msg}", flush=True)
+
+def lanes_status_path():
+    """The snapshot file the dispatcher publishes and the control plane reads (Refs #1697).
+
+    ``OPENSWARM_LANES_STATUS_FILE`` names the file itself, ``OPENSWARM_AD_STATE_DIR`` the
+    directory that holds it.  The reader (``tools/check-lanes-status-stall.py``) resolves the
+    very same variables, so a configured deployment reads the file that is actually written."""
+    for name in LANES_STATUS_FILE_ENVS:
+        explicit = os.environ.get(name)
+        if explicit: return os.path.abspath(os.path.expanduser(explicit))
+    for name in ("OPENSWARM_AD_STATE_DIR", "XSWARM_AD_STATE_DIR"):
+        directory = os.environ.get(name)
+        if directory: return os.path.join(os.path.expanduser(directory), "lanes-status.json")
+    return os.path.join(D, "lanes-status.json")
+
+def lanes_status_heartbeat_path():
+    """The heartbeat of the dispatcher loop: it lives in the state dir, with the other runtime files."""
+    return os.path.join(D, "heartbeat")
+
+def write_heartbeat(path=None):
+    """Refresh the heartbeat file: the health check reads it to tell a live writer from a stalled one."""
+    target = path or lanes_status_heartbeat_path()
+    try:
+        with open(target, "w") as stream:
+            stream.write(time.strftime("%F %T") + "\n")
+        return True
+    except OSError as error:
+        safe_log(f"ERROR heartbeat write failed ({target}): {error!r}", brain=False)
+        return False
+
+def write_status_snapshot(path, status, logger=print):
+    """Atomically publish the complete snapshot; report failures to the dispatcher log.
+
+    The snapshot is written to a temporary file in the same directory and renamed into place,
+    so a reader never sees a half-written file (Refs #1697).  A failed write is logged, never
+    swallowed, and the previous snapshot is kept.
+    """
+    directory = os.path.dirname(path) or "."
+    temporary = None
+    try:
+        fd, temporary = tempfile.mkstemp(prefix=".lanes-status-", suffix=".tmp", dir=directory)
+        with os.fdopen(fd, "w", encoding="utf-8") as stream:
+            json.dump(status, stream, ensure_ascii=False, indent=1)
+            stream.write("\n")
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, path)
+        temporary = None
+        return True
+    except Exception as error:
+        message = f"ERROR lanes-status write failed ({path}): {error!r}"
+        try:
+            logger(message)
+        except Exception:
+            print(message, flush=True)
+        return False
+    finally:
+        if temporary and os.path.exists(temporary):
+            try: os.unlink(temporary)
+            except OSError: pass
+
 def sh(cmd, timeout=120, inp=None):
     p = subprocess.run(cmd, shell=isinstance(cmd, str), capture_output=True, text=True, timeout=timeout, input=inp)
     return p.returncode, p.stdout, p.stderr
@@ -1219,11 +1477,25 @@ def remote(lane, cfg, run=""):
     try: return json.loads(out.strip().splitlines()[-1])
     except Exception: return {"error": out[-200:]}
 
-def queue():
-    rc, out, err = gh(["issue", "list", "--state", "open", "--label", "lane-ready", "--limit", "100", "--json", "number,title,labels,body,createdAt"])
-    if rc: raise RuntimeError(err)
+def queue(state=None):
+    """Track admission clocks in tick's persisted state, keyed by JSON issue numbers.
+
+    Only a successful, complete pool read replaces the clocks. Missing/invalid cards
+    lose their clock so a later admission cannot inherit an earlier pool visit.
+    """
+    limit = 100
+    while True:
+        rc, out, err = gh(["issue", "list", "--state", "open", "--label", "lane-ready", "--limit", str(limit), "--json", "number,title,labels,body,createdAt"])
+        if rc: raise RuntimeError(err)
+        issues = json.loads(out)
+        if len(issues) < limit: break
+        # gh paginates up to --limit. A full result may omit an older waiting
+        # card, so expand until exhaustion before replacing any admission clocks.
+        limit *= 2
+    state = {} if state is None else state
+    entered_at = state.get("_pool_entered_at", {})
     items = []
-    for i in json.loads(out):
+    for i in issues:
         labels = label_names(i)
         if not dispatchable_issue(i): continue
         pr = min([PRIO[l] for l in labels if l in PRIO] or [3])
@@ -1239,7 +1511,16 @@ def queue():
             valid, missing = verify_requirements(body)
             if not valid:
                 log_verify_rejected(i["number"], missing); continue
-        items.append({"n": i["number"], "title": i["title"], "body": body, "labels": sorted(labels), "prio": pr, "backend": be, "strict": "strict-backend" in labels, "verify": verify, "queued": to_epoch(i.get("createdAt"))})
+        match = re.search(r"(?im)(?:budget(?:[_ -]minutes)?|预算)\s*[:：]\s*(\d+(?:\.\d+)?)", body)
+        budget = float(match.group(1)) if match else float(BUDGET)
+        item = {"n": i["number"], "title": i["title"], "body": body, "labels": sorted(labels), "prio": pr, "backend": be, "strict": "strict-backend" in labels, "verify": verify,
+                "queued": to_epoch(i.get("createdAt")), "created_at": i.get("createdAt"), "budget_minutes": budget}
+        item["deps_ok"] = deps_met(item)
+        if item["deps_ok"]:
+            entered = timestamp(entered_at.get(str(i["number"])))
+            item["pool_entered_at"] = time.time() if entered is None else entered
+        items.append(item)
+    state["_pool_entered_at"] = {str(item["n"]): item["pool_entered_at"] for item in items if item["deps_ok"]}
     return sorted(items, key=lambda x: (x["prio"], x["n"]))
 
 VERIFY_HEADING_RE = re.compile(r"(?mi)^##[^\S\r\n]*Verify[^\S\r\n]*Intent[^\S\r\n]*$")
@@ -1353,8 +1634,148 @@ def fix_thinking(cfg, item):
     if not round_no: return None
     return FIX_THINKING_LEVELS[min(round_no, len(FIX_THINKING_LEVELS)) - 1]
 
-def rank(backend, item):  # own pin first, then unpinned, then cross-pinned; within each by priority, work before verify, number
-    return (0 if item["backend"] == backend else 1 if item["backend"] is None else 2, item["prio"], bool(item.get("verify")), item["n"])
+
+def review_lanes(lanes):
+    """The review lanes of a lane set, in the caller's order (CX2/CX4/CX5)."""
+    return [lane for lane in lanes if is_review_lane(lane)]
+
+def review_running(lanes, state):
+    """The reviews every review lane runs right now (the in-flight part of its load).
+
+    A lane runs one card at a time, so a lane runs at most one review (Refs #1701)."""
+    state = state or {}
+    return {lane: 1 if (state.get(lane) or {}).get("class") == "verify" else 0 for lane in lanes}
+
+def review_backlog(lanes, state):
+    """Running reviews plus the complete waiting queue from the latest tick."""
+    state = state or {}
+    running = review_running(lanes, state)
+    waiting = state.get("_review_waiting") or {}
+    return {lane: running[lane] + int(waiting.get(lane, 0) or 0) for lane in lanes}
+
+def pick_reviewer(lanes, loads, max_in_flight=None, log=None, pr=None, eligible=None, rotation=None,
+                  in_flight=None):
+    """Pick the review lane with the smallest review load (Refs #1701).
+
+    `lanes` is the ordered list of the review lanes (CX2/CX4/CX5); the order is also the
+    rotation order of the equal backlogs. `loads` maps a lane to the reviews it carries:
+    the reviews it runs plus the reviews already queued for it. The lane with the smallest
+    load wins; equal loads rotate over the review lanes. `in_flight` counts reviews
+    actually admitted to each lane for the cap check; it defaults to `loads` for plans
+    whose queues are already assigned. A forecast of the shared waiting queue affects
+    ranking and logging, but must not consume admission capacity. A lane that already
+    carries `max_in_flight` admitted reviews is skipped. `eligible` restricts the lanes
+    that may take the card (a lane that is busy or whose backend cannot take it).
+
+    The rotation remembers the turn of every review lane (the turn is taken by the lane
+    that had it the longest ago), so a lane that is busy for a moment does not break the
+    rotation: the reviews keep rotating over the review lanes instead of stacking on one
+    lane. The decision is logged with the backlog snapshot (the PR, the chosen lane and
+    the load of every review lane), so it can be reviewed afterwards."""
+    order = [str(lane) for lane in lanes]
+    snapshot = {lane: int((loads or {}).get(lane, 0) or 0) for lane in order}
+    admitted = snapshot if in_flight is None else in_flight
+    backlog = ", ".join(f"{lane}={snapshot[lane]}" for lane in order)
+    allowed = set(order) if eligible is None else {str(lane) for lane in eligible}
+    free = [lane for lane in order if lane in allowed
+            and (max_in_flight is None or int(admitted.get(lane, 0) or 0) < max_in_flight)]
+    if not free:
+        if log:
+            log(f"review plan: PR #{pr} → lane none (backlog: {backlog}); every free review lane is at "
+                f"its cap ({max_in_flight}), the review waits for a free lane")
+        return None, snapshot
+    smallest = min(snapshot[lane] for lane in free)
+    tied = [lane for lane in free if snapshot[lane] == smallest]
+    key = tuple(order)
+    cursor = REVIEW_ROTATION if rotation is None else rotation
+    turns = cursor.setdefault(key, {"count": 0, "last": {}})
+    # the tied lane that had its turn the longest ago (a lane that never had one comes
+    # first): that is the rotation over the review lanes
+    chosen = min(tied, key=lambda lane: (turns["last"].get(lane, -1), order.index(lane)))
+    # Every selection consumes a turn, including a unique minimum. Otherwise that
+    # lane can immediately win the next tie after finishing the current round.
+    turns["count"] += 1
+    turns["last"][chosen] = turns["count"]
+    if log:
+        log(f"review plan: PR #{pr} → lane {chosen} (backlog: {backlog})")
+    return chosen, snapshot
+
+def plan_reviews(idle_review_ids, pending, running, max_in_flight=None, lane_cfgs=None, log=None,
+                 review_ids=None):
+    """Plan the review cards over the review lanes by load (Refs #1701).
+
+    `running` maps a review lane to the reviews it runs right now; the load of a lane is
+    that number plus the cards the plan already gave it (its review queue). The cards
+    are taken by the lane with the smallest load, equal loads rotate. The rotation walks
+    `review_ids` (all the review lanes, the ones that are busy included), so the reviews
+    keep rotating over the review lanes.
+
+    Returns (plan, snapshots): the plan maps a review lane to the cards it takes (the
+    first card is dispatched first), the snapshots hold the load at the moment of the
+    decision (for the log). A lane at its cap is skipped: the review waits for a free
+    lane."""
+    order = [str(lane) for lane in (review_ids or idle_review_ids)]
+    plan, snapshots, counts = {}, {}, dict(running)
+    for card in pending:
+        eligible = [lane for lane in idle_review_ids
+                    if lane_cfgs is None or can_take(lane_cfgs[lane].get("backend"), card, lane)]
+        if not eligible: continue
+        lane, snapshot = pick_reviewer(order, counts, max_in_flight=max_in_flight,
+                                      eligible=eligible, log=log, pr=review_target_pr(card))
+        if lane is None:
+            # every free review lane is at its cap: the review waits for a free lane
+            # (pick_reviewer logged the decision with the backlog snapshot)
+            continue
+        plan.setdefault(lane, []).append(card)
+        snapshots[card["n"]] = snapshot
+        counts[lane] = counts.get(lane, 0) + 1
+    return plan, snapshots
+
+def review_waiting_counts(review_ids, pending, running, max_in_flight=None, head_eligible=None):
+    """Spread the entire waiting queue for backlog accounting, without admitting it.
+
+    The in-flight cap limits admission, not visibility: even when every lane is at
+    capacity, every waiting card must appear in the backlog. This forecast uses a
+    private copy of the current cursor so counting cannot consume an actual
+    assignment's turn. During admission, reserve the queue head's prospective turn
+    before forecasting the other waiting cards; the head itself is not counted in
+    the returned queue. This keeps a fresh forecast from biasing every dispatch
+    against the first lane in the rotation.
+    """
+    counts, current = {}, dict(running)
+    rotation = {key: {"count": turns["count"], "last": dict(turns["last"])}
+                for key, turns in REVIEW_ROTATION.items()}
+    if head_eligible is not None:
+        head, _ = pick_reviewer(review_ids, current, eligible=head_eligible, rotation=rotation)
+        if head is not None: current[head] = current.get(head, 0) + 1
+    for card in pending:
+        lane, _ = pick_reviewer(review_ids, current, rotation=rotation)
+        if lane is None: break
+        counts[lane] = counts.get(lane, 0) + 1
+        current[lane] = current.get(lane, 0) + 1
+    return counts
+
+def review_target_pr(card):
+    """Read the target PR, never substitute the verification issue number."""
+    target = re.search(r"(?mi)^[ \t]*目标 PR[^\S\r\n]*[:：][ \t]*([^\r\n]+)", card.get("body", ""))
+    if not target: return "unknown"
+    number = re.search(r"(?:#|/pull/)([0-9]+)\b", target[1])
+    if not number: number = re.fullmatch(r"[ \t]*([0-9]+)[ \t]*", target[1])
+    return number[1] if number else "unknown"
+
+def idle_lane_names(lanes, state, res, scopes, freed=None):
+    """The lanes that can take a card right now (healthy, not paused and idle).
+
+    A lane that was freed by a finished run in this tick is available even if the remote
+    snapshot still calls it busy (Refs #1688)."""
+    freed = freed or ()
+    return [name for name, c in lanes.items() if not state.get(name) and "error" not in res[name]
+            and (name in freed or res[name].get("lane") == "idle")
+            and host_ok(c["host"]) and not lane_paused(name, c, scopes)]
+def rank(backend, item):
+    """Highest score first; stable legacy fields break equal-score ties."""
+    score, _ = priority_score(backend, item)
+    return (-score, item["prio"], bool(item.get("verify")), item["n"])
 
 def queue_class_limits(lanes, state, idle):
     """Reserve review-capable capacity using available lanes and active runs only."""
@@ -1784,6 +2205,9 @@ def status_snapshot(lanes, state, res, ready, blocked, records=None):
     status["_stale"] = sum(1 for L in lanes if state.get(L) and "stale_since" in state[L])
     status["_ready"] = ready
     status["_blocked"] = blocked
+    status["_review_backlog"] = review_backlog(review_lanes(lanes), state)
+    status["_queue_failures"] = int(state.get("_queue_failures", 0) or 0)
+    status["_minted"] = int(state.get("_minted", 0) or 0)
     status["_pauses"] = pause_reasons(lanes, records)  # which switch holds every paused lane (Refs #1592)
     status["_stale_stripped_n"] = STALE_STRIPPED_N
     status["_stale_search_skips"] = STALE_STRIPPED_N
@@ -1795,6 +2219,11 @@ def status_snapshot(lanes, state, res, ready, blocked, records=None):
     status["_idle_open_s"] = idle_open_s    # the gap the idle lanes are in right now
     status["_idle_worst_s"] = max(idle_open_s.values(), default=0.0)
     status["_at"] = time.strftime("%F %T")
+    # The phase and the tick start tell the reader how far the current tick got (Refs #1697):
+    # a snapshot whose phase does not change while `_at` advances means a slow step is running.
+    # The publisher names the phase of the running tick; outside a tick the snapshot is idle.
+    status["_phase"] = "idle"
+    status["_tick_at"] = status["_at"]
     # The burn watchdog measures the real MiniMax token burn of the hour; the
     # lane status shows its reading, so an operator compares it with the
     # MiniMax console instead of watching the dispatch count (Refs #1671).
@@ -1807,6 +2236,125 @@ def status_snapshot(lanes, state, res, ready, blocked, records=None):
     status["_verify_share"] = (dispatches["verify"] / dispatches["all"] if dispatches["all"] else 0.0)
     status["_work_cap_hits"] = metrics["work_cap_hits"]
     return status
+
+class StatusPublisher:
+    """Publishes the lanes-status snapshot and refreshes `_at` on every publish.
+
+    The snapshot used to be written once, at the very end of the tick, so a slow harvest, a
+    hung `gh` call or a long refill froze `_at` while the dispatcher kept dispatching
+    (Refs #1697).  The publisher is called at every step of the tick and a refresher thread
+    republishes it while a slow step runs, so `_at` follows the dispatch rhythm; the queue
+    counters keep their last known value until the current tick measured them again,
+    then every successful assignment updates the busy and ready counts together.
+    """
+
+    def __init__(self, lanes, state, path=None, logger=None, heartbeat=None, refresh=None):
+        self.lanes = lanes
+        self.state = state
+        self.path = path or lanes_status_path()
+        self.heartbeat = heartbeat or lanes_status_heartbeat_path()
+        self.logger = logger or safe_log
+        self.res = {}
+        self.records = None
+        self.ready = self.previous("_ready")
+        self.blocked = self.previous("_blocked")
+        self.memory_blocks = {}
+        self.rows = self.previous_rows()
+        self.refresh = STATUS_REFRESH_SECONDS if refresh is None else float(refresh)
+        self.phase = "start"
+        self.tick_at = None  # the stamp of the first publish: the start of the running tick
+        self._lock = threading.RLock()
+        self._stop = threading.Event()
+        self._thread = None
+
+    def previous(self, key):
+        """The counter of the last published snapshot (an early publish must not report a false 0)."""
+        try:
+            with open(self.path, encoding="utf-8") as stream:
+                published = json.load(stream)
+        except (OSError, ValueError):
+            return None
+        value = published.get(key) if isinstance(published, dict) else None
+        return value if isinstance(value, int) and not isinstance(value, bool) else None
+
+    def previous_rows(self):
+        """The lane rows of the last published snapshot (a publish before the probe keeps them)."""
+        try:
+            with open(self.path, encoding="utf-8") as stream:
+                published = json.load(stream)
+        except (OSError, ValueError):
+            return {}
+        if not isinstance(published, dict): return {}
+        return {lane: row for lane, row in published.items()
+                if not lane.startswith("_") and isinstance(row, str)}
+
+    def snapshot(self, res=None, ready=None, blocked=None):
+        """The snapshot body with the latest known values."""
+        if res is not None: self.res = res
+        if ready is not None: self.ready = ready
+        if blocked is not None: self.blocked = blocked
+        rows = {L: self.res.get(L) or {"lane": self.rows.get(L, "?")} for L in self.lanes}
+        # status_snapshot() keeps the argument shape it always had: a caller that replaces it
+        # (the tick tests do) must keep working. The phase of the tick is added below.
+        snapshot = status_snapshot(self.lanes, self.state, rows, self.ready or 0, self.blocked or 0,
+                                   self.records)
+        if isinstance(snapshot, dict):
+            snapshot["_memory_blocks"] = self.memory_blocks
+            # The phase and the tick start tell the reader how far the current tick got
+            # (Refs #1697): a snapshot whose phase does not change while `_at` advances
+            # means a slow step is running.
+            if self.tick_at is None: self.tick_at = snapshot.get("_at")
+            snapshot["_phase"] = self.phase
+            snapshot["_tick_at"] = self.tick_at
+        return snapshot
+
+    def publish(self, res=None, ready=None, blocked=None, phase=None, heartbeat=True):
+        """Write the snapshot now; a failed write is logged, never swallowed.
+
+        The publish is serialized: the refresher thread and the tick itself must never
+        overwrite a newer snapshot with an older one (Refs #1697)."""
+        with self._lock:
+            if phase is not None: self.phase = phase
+            snapshot = self.snapshot(res=res, ready=ready, blocked=blocked)
+            write_status_snapshot(self.path, snapshot, self.logger)
+            if heartbeat: write_heartbeat(self.heartbeat)
+            return snapshot
+
+    def start(self):
+        """Republish the snapshot while the tick works: a slow step must not freeze `_at`.
+
+        The refresher does not touch the heartbeat: the heartbeat is the signal that the
+        dispatcher loop itself is alive, so a tick stuck in one operation is still reported
+        as a stalled writer by the health check (Refs #1697)."""
+        if self.refresh <= 0 or self._thread is not None: return self
+        self._stop.clear()
+        self._thread = threading.Thread(target=self._refresh, args=(self.refresh,),
+                                        name="lanes-status-refresh", daemon=True)
+        self._thread.start()
+        return self
+
+    def record_dispatch(self, lane, record):
+        """Publish an assignment and its queue decrement before any slow save or logging.
+
+        The refresher shares this lock, so it cannot publish a new busy lane with the
+        ready count from before the assignment.
+        """
+        with self._lock:
+            self.state[lane] = record
+            return self.publish(ready=max(0, (self.ready or 0) - 1), phase="dispatch")
+
+    def _refresh(self, every):
+        while not self._stop.wait(every):
+            try:
+                self.publish(heartbeat=False)
+            except Exception as error:
+                safe_log(f"ERROR lanes-status refresh failed: {error!r}", brain=False)
+
+    def stop(self):
+        """Stop the refresher thread."""
+        self._stop.set()
+        thread, self._thread = self._thread, None
+        if thread is not None: thread.join(timeout=5)
 
 def classify_dispatch_fetch_error(error):
     """Return a useful network failure category for dispatch fetch diagnostics."""
@@ -1958,9 +2506,41 @@ def fix_round_brief(body, title=""):
 LANE_BUSY_RE = re.compile(r"lane \S+ is busy", re.I)  # the host still runs the finished run
 CAPACITY_EXHAUSTED_RE = re.compile(r"\b(?:capacity exhausted|no (?:available )?capacity)\b", re.I)
 
+TESTER_RISK_CARD_LIMIT = 200
+
+def tester_risk_decision(body):
+    """Classify how deep the evidence review of a verify card must go (Refs #1988).
+
+    A failure never buys a cheaper review: the card is read in full.
+    """
+    if tester_risk is None:
+        return {"decision": "full_read", "reason": "risk classifier unavailable"}
+    try:
+        return tester_risk.classify_card(
+            body, repo=REPO, read=sh,
+            # default 1 = every card is read in full: sampling is opt-in and never lowers the default gate
+            sample_rate=os.environ.get("AD_TESTER_RISK_SAMPLE_RATE", "1"),
+            seed=os.environ.get("AD_TESTER_RISK_SEED", "risk-v1"))
+    except (OSError, ValueError, TypeError, subprocess.SubprocessError):
+        return {"decision": "full_read", "reason": "risk classification unavailable"}
+
+def record_tester_risk(state, issue, decision):
+    """Keep the review depth with the card, not only with the lane slot.
+
+    The lane entry is dropped when the run ends, but the card keeps its decision so
+    the tester still reads how deep the evidence review must go.
+    """
+    cards = state.setdefault("_tester_risk_cards", {})
+    cards[str(issue)] = decision
+    if len(cards) > TESTER_RISK_CARD_LIMIT:
+        for key in list(cards)[:len(cards) - TESTER_RISK_CARD_LIMIT]: cards.pop(key)
+
 def dispatch(lane, cfg, item, base):
     n = item["n"]
     body = item["body"]
+    if item.get("verify") and item.get("tester_risk"):
+        risk = item["tester_risk"]
+        body = f"{body.rstrip()}\n\nTester evidence review: {risk['decision']}\nReason: {risk['reason']}\n"
     labels = set(item.get("labels", ()))
     # PLANNER's ordinary work cards have Chinese titles and only priority/backend
     # labels, so impl is the default. Explicit non-impl markers take precedence,
@@ -2171,6 +2751,7 @@ def clear_budget_history(state, issue):
 def release_recovered_budget_holds(state, lanes):
     """Return held cards to lane-ready only after the window query confirms recovery."""
     holds, _ = budget_holds(state)
+    if not holds: return  # nothing held: no state write before the queue is measured
     for issue, hold in list(holds.items()):
         if not isinstance(hold, dict): continue
         lane = hold.get("lane")
@@ -2327,7 +2908,7 @@ def record_pr_validation(cfg, run, record):
     except Exception as e:
         log(f"run {run}: PR validation run record not written to the host ({e!r})", brain=False)
 
-def block_pr_validation(lane, cfg, st, info, state, title, body, missing):
+def block_pr_validation(lane, cfg, st, info, state, title, body, missing, error_class=PR_VALIDATION_CLASS):
     """Block a lane PR whose required fields are missing and hand the issue back for a quick fix.
 
     The missing items are returned to the runner as an explicit error and listed one by
@@ -2335,16 +2916,16 @@ def block_pr_validation(lane, cfg, st, info, state, title, body, missing):
     statistics stay clean (Refs #1704)."""
     n, run = st["issue"], st["run"]
     record = {"run": run, "issue": n, "lane": lane, "class": PR_VALIDATION_FIX_CLASS,
-              "error_class": PR_VALIDATION_CLASS, "missing": list(missing), "title": title,
+              "error_class": error_class, "missing": list(missing), "title": title,
               "at": time.strftime("%F %T")}
     record_pr_validation(cfg, run, record)
     state["_pr_validation"] = (state.get("_pr_validation", []) + [record])[-200:]
     gh(["issue", "edit", str(n), "--remove-label", "in-progress", "--remove-label", "lane-failed", "--add-label", "lane-ready"])
     gh(["issue", "comment", str(n), "--body", f"Lane {lane} (run `{run}`) 的 PR 未通过提交前校验，未创建 PR：\n\n"
         + "".join(f"- {item}\n" for item in missing)
-        + f"\n按可快速修复类（`{PR_VALIDATION_CLASS}`）处理，不计入 lane-failed 统计；已重新标记 `lane-ready`。"])
+        + f"\n按可快速修复类（`{error_class}`）处理，不计评审轮次，不计入 lane-failed 统计；已重新标记 `lane-ready`。"])
     mark_done(state, n)
-    return {"done": True, "status": "pr-validation-failed",
+    return {"done": True, "status": "delivery-map-failed" if error_class == DELIVERY_MAP_CLASS else "pr-validation-failed",
             "error": f"PR 提交前校验未通过（{PR_VALIDATION_STRICT}）：{'；'.join(missing)}",
             "missing": list(missing)}
 
@@ -2636,6 +3217,17 @@ def finish(lane, cfg, st, info, state):
             mark_done(state, n)
             return {"done": True, "status": "lane-failed", "error": "empty after artifact filtering", "missing": []}
         log(f"{lane} #{n} run {run} harvest collapse guard: {guard_detail}", brain=False)
+        _, subj, _ = sh(["git", "-C", LOCAL, "log", "-1", "--format=%s", head])
+        _, msg, _ = sh(["git", "-C", LOCAL, "log", "-1", "--format=%B", head])
+        map_missing = []
+        if st.get("class") != "verify":  # a verify card delivers evidence, not a change with acceptance rows
+            try: map_missing = delivery_map_missing(lane, n, msg)
+            except Exception as error:
+                return {"done": False, "status": "delivery-map-read-failed", "error": str(error), "missing": []}
+        if map_missing and pr_validation_mode() == PR_VALIDATION_STRICT:
+            return block_pr_validation(lane, cfg, st, info, state, subj.strip(), "", map_missing,
+                                       error_class=DELIVERY_MAP_CLASS)
+        if map_missing: log(f"{lane} #{n} delivery map: {'; '.join(map_missing)}", brain=False)
         pushed, push_error = harvest_push(lane, n, b, head)
         if not pushed: return {"done": False, "status": "push-failed", "error": push_error, "missing": []}
         _, lj, _ = gh(["issue", "view", str(n), "--json", "labels"])
@@ -2644,8 +3236,6 @@ def finish(lane, cfg, st, info, state):
             gh(["issue", "comment", str(n), "--body", f"Lane {lane} also finished this issue (run `{run}`, duplicate dispatch); branch `{b}` pushed for comparison, no second PR opened."])
             log(f"{lane} finished #{n} (run {run}) duplicate → branch {b}, no PR"); mark_done(state, n)
             return {"done": True, "status": "duplicate", "error": None, "missing": []}
-        _, subj, _ = sh(["git", "-C", LOCAL, "log", "-1", "--format=%s", head])
-        _, msg, _ = sh(["git", "-C", LOCAL, "log", "-1", "--format=%B", head])
         title, body = lane_pr_content(n, lane, cfg, st, info, subj, msg, info.get("summary"), info.get("tests"), info.get("verify_rc"))
         missing = validate_lane_pr(n, title, body)
         # A quoted opinion (or a raw log) may contain closing keywords, but it
@@ -2693,12 +3283,6 @@ def to_epoch(value, fmt=None):
         return None
 
 def heartbeat_path(): return f"{D}/heartbeat"
-
-def write_heartbeat():
-    """Mark the dispatcher as alive (the heartbeat is the stamp of its last life)."""
-    try:
-        with open(heartbeat_path(), "w") as stream: stream.write(time.strftime("%F %T") + "\n")
-    except OSError: pass
 
 def dispatcher_last_alive():
     """When the dispatcher was last alive (epoch seconds), or None when unknown.
@@ -2833,29 +3417,32 @@ def idle_metrics(state, now=None):
     return idle_s, reasons, open_s
 
 def tick(lanes, state, last_warn):
+    # The snapshot is published at every step of the tick, not only at its end, and a refresher
+    # thread republishes it while a slow step runs: a slow harvest, a hung `gh` call or a long
+    # refill must not freeze `_at` while the dispatcher keeps working (Refs #1697).
+    publisher = StatusPublisher(lanes, state)
+    publisher.start()
+    try:
+        return run_tick(lanes, state, last_warn, publisher)
+    finally:
+        publisher.stop()
+
+def run_tick(lanes, state, last_warn, publisher):
+    """One tick; every step refreshes the snapshot (Refs #1697)."""
     audit_switches()  # the switch audit runs every tick, also when the loop itself is paused (Refs #1827)
     records = pause_records()  # the swrm pause store and the legacy PAUSE markers (Refs #1366, #1592)
+    publisher.records = records
     scopes = paused_scopes(records=records)
     if "all" in scopes:
-        # Keep the pause visible even though this tick does no remote or queue work.
-        # Queue counts remain the last observed values while dispatch is stopped.
-        path = f"{D}/lanes-status.json"
-        try:
-            with open(path) as stream: previous = json.load(stream)
-        except (OSError, ValueError): previous = {}
-        if not isinstance(previous, dict): previous = {}
-        res = {L: {"lane": "paused"} for L in lanes}
-        st = status_snapshot(lanes, state, res, previous.get("_ready", 0), previous.get("_blocked", 0), records)
-        with open(path, "w") as stream: json.dump(st, stream, ensure_ascii=False, indent=1)
+        publisher.publish(res={L: {"lane": "paused"} for L in lanes}, phase="paused")
         return last_warn
     label_cache_reset()  # authoritative label reads are cached for one tick only
     state.setdefault("_done", [])
     idle_books(state)  # the idle bookkeeping of the state exists from the first tick on
     now = time.time()
-    # the heartbeat is the stamp of the dispatcher's last life: the gap to now is its
-    # downtime, and it is read before the dispatcher marks itself alive again (Refs #1688)
+    # Read the previous heartbeat before publishing marks this tick alive (Refs #1688).
     last_alive = dispatcher_last_alive()
-    write_heartbeat()
+    publisher.publish(phase="probe")
     live = [L for L in lanes if host_ok(lanes[L]["host"])]
     with cf.ThreadPoolExecutor(4) as ex:
         res = dict(zip(live, ex.map(lambda L: remote(L, lanes[L], (state.get(L) or {}).get("run", "")), live)))
@@ -2881,12 +3468,17 @@ def tick(lanes, state, last_warn):
         mark_recovery_runs(state, h, lanes)
         scopes = paused_scopes()  # the released pause opens the host again
     release_recovered_budget_holds(state, lanes)
+    publisher.publish(res=res, phase="harvest")  # the remote probe of every lane is done
     q = None
     queue_failed = False
     queue_error = ""
     base = None
     outcomes = {}
     freed_lanes = set()
+    # The review lanes (CX2/CX4/CX5) take the review cards by their backlog (Refs #1701).
+    # The review is chosen at admission time: a work dispatch must not strand a review
+    # on an obsolete plan. Waiting cards are counted separately from admitted runs.
+    review_ids = review_lanes(lanes)
     memory_rejections = {}
     dispatch_eligible_lanes = set()
 
@@ -2898,20 +3490,36 @@ def tick(lanes, state, last_warn):
         nonlocal q, queue_failed, queue_error
         if q is not None: return True
         if queue_failed: return False
-        try: q = queue()
+        try: q = queue(state)
         except Exception as e:
             queue_failed = True; queue_error = str(e)
-            log(f"queue error: {e}", brain=False)
-            return False
-        for i in q: i["deps_ok"] = deps_met(i)
-        metrics = verify_metrics(state)
-        for item in q:
-            if item.get("verify"):
-                # Use the order time, including time spent waiting while AD was stopped.
-                queued = item.get("queued")
-                metrics["cards"].setdefault(str(item["n"]), {"issue": item["n"], "queued": now if queued is None else queued})
-        # one authoritative read per issue per tick, shared by all dispatches and the count
-        prefetch_labels([i["n"] for i in q])
+            state["_queue_failures"] = state.get("_queue_failures", 0) + 1
+            save_state(state)
+            try: log(f"queue error:\n{traceback.format_exc()[-4000:]}", brain=True)
+            except Exception: pass  # logging must not replace the queue failure or stop harvest
+            if isinstance(e, (RuntimeError, OSError, subprocess.SubprocessError, json.JSONDecodeError)):
+                return False
+            raise
+        state["_queue_failures"] = 0
+        try:
+            for i in q:
+                if "deps_ok" not in i: i["deps_ok"] = deps_met(i)
+            metrics = verify_metrics(state)
+            for item in q:
+                if item.get("verify"):
+                    # Use the order time, including time spent waiting while AD was stopped.
+                    queued = item.get("queued")
+                    metrics["cards"].setdefault(str(item["n"]), {"issue": item["n"], "queued": now if queued is None else queued})
+            # Dispatch reads labels in score order before freshen_queue uses the remaining
+            # read budget. Prefetching by issue number can starve a high-scoring old card,
+            # so the early snapshot counts the rows as read; the authoritative freshen_queue
+            # pass runs after the dispatches.
+            blocked = sum(not i["deps_ok"] for i in q)
+            publisher.publish(res=res, ready=len(q) - blocked, blocked=blocked, phase="deps")
+        finally:
+            # persist right after a successful read even if the steps above raise; the normal path
+            # stamps the fresh counts first so the snapshot is never staler than the saved state
+            save_state(state)
         return True
 
     def base_commit():
@@ -2933,15 +3541,15 @@ def tick(lanes, state, last_warn):
         if lane_paused(L, cfg, scopes): return "paused"
         if remote_idle and res[L].get("lane") != "idle": return "no-capacity"
         if not tick_queue(): return "no-card"
+        asked = L  # the lane that was asked for a card (it may hand it to another lane)
         pick = None
         candidates = [i for i in q if i.get("deps_ok", True) and can_take(cfg["backend"], i, L)]
         candidates.sort(key=lambda i: rank(cfg["backend"], i))
+        # A harvested lane is available in this tick even if the remote snapshot still
+        # calls it busy. Keep the same pause/host/cap checks. The list is read in every
+        # tick: the review balancing below needs the lanes that can take a card.
+        idle = idle_lane_names(lanes, state, res, scopes, freed_lanes)
         if AD_VERIFY_SHARE_ENABLED:
-            # A harvested lane is available in this tick even if the remote
-            # snapshot still calls it busy. Keep the same pause/host/cap checks.
-            idle = [name for name, c in lanes.items() if not state.get(name) and "error" not in res[name]
-                    and (name in freed_lanes or res[name].get("lane") == "idle")
-                    and host_ok(c["host"]) and not lane_paused(name, c, scopes)]
             verify_slots, work_slots = queue_class_limits(lanes, state, idle)
             metrics = verify_metrics(state)
             metrics["deficit"] = verify_slots
@@ -2986,20 +3594,71 @@ def tick(lanes, state, last_warn):
             # never count it as a stale skip and never dispatch on unverified labels
             log_unverified(c["n"], status, detail, "kept in queue (not dispatched this tick)")
         if not pick: return "no-card"
+        if pick.get("verify"):
+            # The review card goes to the review lane with the smallest review backlog:
+            # equal backlogs rotate over the review lanes and a lane that is at its
+            # in-flight cap is skipped - the review waits for a free lane (Refs #1701).
+            running = review_running(review_ids, state)
+            waiting = [i for i in q if i is not pick and i.get("deps_ok", True) and i.get("verify")]
+            # Memory admission applies to the lane that finally takes the review, not only to the
+            # lane that was asked: a balanced-away review must not land on a host short of memory.
+            eligible = []
+            for lane in idle:
+                if lane not in review_ids or not can_take(lanes[lane]["backend"], pick, lane): continue
+                rejection = memory_preflight(lane, lanes[lane], pick, memory_cache)
+                if rejection:
+                    memory_rejections.setdefault(pick["n"], {})[lane] = rejection
+                    shown = "unavailable" if rejection["available_mb"] is None else f"{rejection['available_mb']}MB"
+                    log(f"{lane} #{pick['n']} review skipped: blocked-by-host-memory host={rejection['host']} available={shown} threshold={rejection['threshold_mb']}MB", brain=False)
+                    continue
+                eligible.append(lane)
+            queued = review_waiting_counts(review_ids, waiting, running, head_eligible=eligible)
+            # Rank and log the running + waiting forecast, but cap only admitted runs.
+            # Shared waiting demand must not prevent an idle lane from draining it.
+            loads = {lane: running[lane] + queued.get(lane, 0) for lane in review_ids}
+            chosen, snapshot = pick_reviewer(review_ids, loads, eligible=eligible,
+                                             max_in_flight=REVIEW_MAX_IN_FLIGHT,
+                                             in_flight=running,
+                                             pr=review_target_pr(pick),
+                                             log=lambda row: log(row, brain=False))
+            if chosen is None: return "no-capacity"
+            if chosen != L:
+                # The review belongs to another review lane: it takes the card, the lane
+                # that was asked keeps its slot free (the next tick tries again).
+                # recorded as dispatched only after the dispatch succeeded (below): a failed
+                # dispatch must leave the lane free for the rest of this tick
+                L, cfg = chosen, lanes[chosen]
+            pick["tester_risk"] = tester_risk_decision(pick["body"])
+        blocked = sum(not i["deps_ok"] for i in q)
+        publisher.publish(res=res, ready=len(q) - blocked, blocked=blocked, phase="dispatch")
         commit = base_commit()
         gh(["issue", "edit", str(pick["n"]), "--add-label", "in-progress"])
         try: run, ver = dispatch(L, cfg, pick, commit)
         except Exception as e:
             dispatch_failed(L, cfg, pick, e, busy=bool(LANE_BUSY_RE.search(str(e))))
             return "no-capacity"
-        q.remove(pick); state[L] = {"issue": pick["n"], "run": run, "host": cfg["host"], "base": commit, "at": time.strftime("%F %T"), "verify": ver, "class": "verify" if pick.get("verify") else "work"}
-        metrics = verify_metrics(state)
-        # The snapshot and saved state must reflect the slot just occupied.
-        if AD_VERIFY_SHARE_ENABLED: metrics["deficit"] = queue_class_limits(lanes, state, idle)[0]
-        metrics["dispatches"]["all"] += 1
+        if L != asked: outcomes[L] = "dispatched"
+        q.remove(pick)
+        record = {"issue": pick["n"], "run": run, "host": cfg["host"], "base": commit, "at": time.strftime("%F %T"), "verify": ver, "class": "verify" if pick.get("verify") else "work"}
+        with publisher._lock:
+            state[L] = record
+            state.setdefault("_pool_entered_at", {}).pop(str(pick["n"]), None)
+            metrics = verify_metrics(state)
+            # The snapshot and saved state must reflect the slot just occupied.
+            if AD_VERIFY_SHARE_ENABLED: metrics["deficit"] = queue_class_limits(lanes, state, idle)[0]
+            metrics["dispatches"]["all"] += 1
+            if pick.get("verify"):
+                metrics["dispatches"]["verify"] += 1
+                record_verify_time(state, pick["n"], "dispatched", time.time())
+            if pick.get("verify"):
+                state[L]["tester_risk"] = pick["tester_risk"]
+                record_tester_risk(state, pick["n"], pick["tester_risk"])
+            publisher.record_dispatch(L, record)
         if pick.get("verify"):
-            metrics["dispatches"]["verify"] += 1
-            record_verify_time(state, pick["n"], "dispatched", time.time())
+            # the review decision goes to the log with the backlog snapshot of that moment
+            # (the PR, the chosen lane and the load of every review lane) (Refs #1701)
+            backlog = ", ".join(f"{lane}={snapshot[lane]}" for lane in review_ids)
+            log(f"review assignment: PR #{review_target_pr(pick)} → lane {L} (backlog: {backlog})")
         # Stop this lane's gap at its own successful dispatch. Later lanes may take
         # minutes to assign; their work cannot extend an already occupied lane's gap.
         closed = idle_close(state, L, time.time(), last_alive, tick_started_at=now)
@@ -3008,8 +3667,11 @@ def tick(lanes, state, last_warn):
             if idle_s > IDLE_LOG_MIN_S:
                 log(f"{L} idle {idle_s:.0f}s before dispatch (reason: {reason})", brain=True)
         if AD_VERIFY_SHARE_ENABLED: log(f"queue share: dispatched {state[L]['class']} #{pick['n']} on {L}", brain=False)
-        save_state(state); log(f"dispatched #{pick['n']} → {L} ({cfg['host']}) run {run} base {commit[:8]}")
-        return "dispatched"
+        score, basis = priority_score(cfg["backend"], pick)
+        save_state(state); log(f"dispatched #{pick['n']} → {L} ({cfg['host']}) run {run} base {commit[:8]} "
+                               f"priority={score:g} basis={json.dumps(basis, sort_keys=True)}")
+        # the lane that was asked keeps its slot free when the card went to another lane
+        return "dispatched" if L == asked else "no-capacity"
 
     # 1) Re-dispatch each freed lane before harvesting the next one (Refs #1688).
     #    Another lane's slow fetch/push/PR creation must not hold up this lane.
@@ -3039,12 +3701,22 @@ def tick(lanes, state, last_warn):
         if freed:
             freed_lanes.add(L)
             outcomes[L] = give_card(L, lanes[L], remote_idle=False)
+        # The harvest of one lane can take minutes: refresh after every lane.
+        publisher.publish(res=res, phase="harvest")
+    queue_ok = tick_queue()
     update_busy_stale(lanes, state, res)
-    if not tick_queue():
-        st = status_snapshot(lanes, state, res, None, None)
-        st["_queue_error"] = queue_error or "queue unavailable"
-        with open(f"{D}/lanes-status.json", "w") as stream:
-            json.dump(st, stream, ensure_ascii=False, indent=1)
+    if not queue_ok:
+        # the pool level is unknown: the refill works on the last known level and is bounded
+        # (Refs #1662)
+        refill_on_unreadable_queue(state)
+        with publisher._lock:
+            st = status_snapshot(lanes, state, res, None, None, records)
+            if isinstance(st, dict):
+                st["_phase"] = "queue"
+                st["_tick_at"] = publisher.tick_at or st.get("_at")
+            st["_queue_error"] = queue_error or "queue unavailable"
+            st["_ready_estimate"] = pool_level(state)  # the level the refill worked on (not authoritative)
+            write_status_snapshot(publisher.path, st, publisher.logger)
         return last_warn
     # 2) the lanes that were idle before this tick
     for L, cfg in lanes.items():
@@ -3061,6 +3733,16 @@ def tick(lanes, state, last_warn):
         idle_account(state, L, window, now, outcomes.get(L, "no-capacity"), last_alive)
     # stale search rows are not dispatchable: drop them (and log the skip) before counting
     q = freshen_queue(q, state)
+    state["_pool_entered_at"] = {str(item["n"]): item["pool_entered_at"] for item in q if item.get("deps_ok", True) and "pool_entered_at" in item}
+    # Publish the complete remaining queue, including overflow beyond the admission cap.
+    if review_ids:
+        running = review_running(review_ids, state)
+        waiting_reviews = [i for i in q if i.get("deps_ok", True) and i.get("verify")]
+        state["_review_waiting"] = review_waiting_counts(review_ids, waiting_reviews, running, REVIEW_MAX_IN_FLIGHT)
+        if waiting_reviews:
+            backlog = ", ".join(f"{lane}={count}" for lane, count in review_backlog(review_ids, state).items())
+            log(f"review queue: {len(waiting_reviews)} card(s) wait (backlog: {backlog})", brain=False)
+        save_state(state)
     blocked = sum(not i["deps_ok"] for i in q)
     memory_blocks = {}
     for item in q:
@@ -3074,32 +3756,160 @@ def tick(lanes, state, last_warn):
             memory_blocks[item["n"]] = list(rejections.values())
     blocked += len(memory_blocks)
     ready = len(q) - blocked
+    publisher.publish(res=res, ready=ready, blocked=blocked, phase="queue")  # the queue counters are measured
     # refill when the queue is short, or when some backend's lanes could not all be fed (counting cross-pin fallback)
     short = {b: sum(c["backend"] == b for c in lanes.values()) - sum(1 for i in q if i.get("deps_ok", True) and can_take(b, i, verify_gate=False))
              for b in {c["backend"] for c in lanes.values()}}
     starve = max(short.values(), default=0)
-    if ready < LOW or starve > 0:
+    need = refill_need(ready, low=LOW, target=TARGET, starved=starve)
+    filed = []
+    if need > 0:
+        publisher.publish(res=res, ready=ready, blocked=blocked, phase="refill")
         why = f"queue low ({ready} < {LOW})" if ready < LOW else f"backend starved ({', '.join(f'{b} short {k}' for b, k in short.items() if k > 0)})"
         if mint_paused(scopes):
             if time.time() - last_warn > 600:
                 log(f"{why}: mint paused, no new issue minted", brain=False); last_warn = time.time()
         else:
-            filed = replenish(max(LOW - ready, starve), state)
+            filed = replenish(need, state)
             if filed: log(f"{why}: filed {len(filed)} issue(s) from backlog: {' '.join(filed)}")
             elif time.time() - last_warn > 600:
-                log(f"WARNING queue low: {ready} dispatchable lane-ready issue(s) left (+{blocked} waiting on 依赖), backlog/ empty (threshold {LOW})"); last_warn = time.time()
+                log(f"WARNING queue low: {ready} dispatchable lane-ready issue(s) left (+{blocked} waiting on 依赖), need {need} card(s) (threshold {LOW}, target {TARGET}), none filed{mint_evidence()}"); last_warn = time.time()
+        publisher.publish(res=res, ready=ready, blocked=blocked, phase="refill")  # the (slow) refill is done
+    # the level of this tick is authoritative: it replaces the estimate the AD used while the
+    # queue was unreadable, and the cards minted since then are counted on top of it (Refs #1662)
+    state["_ready"] = ready; state["_minted"] = len(filed); state["_queue_failures"] = 0
     state["_tick_at"] = now
     observe_verify_verdicts(state)
     save_state(state)
     refresh_minimax_burn()  # the burn watchdog refreshes the reading the status shows (Refs #1671)
-    st = status_snapshot(lanes, state, res, ready, blocked, records)
-    st["_memory_blocks"] = memory_blocks
-    with open(f"{D}/lanes-status.json", "w") as stream:
-        json.dump(st, stream, ensure_ascii=False, indent=1)
+    with publisher._lock:
+        publisher.memory_blocks = memory_blocks
+        publisher.publish(res=res, ready=ready, blocked=blocked, phase="idle")
     return last_warn
 
+def preflight_card(text):
+    """Reject a card that the card lint refuses; a missing lint script also refuses the card (fail closed, Refs #1732)."""
+    script = next((p for p in (f"{LOCAL}/swrm/bin/swrm",
+                               os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "swrm", "bin", "swrm"))
+                   if os.path.isfile(p)), None)
+    if script is None:
+        log("card preflight unavailable: swrm/bin/swrm not found, card refused", brain=False)
+        raise RuntimeError("card preflight unavailable: swrm/bin/swrm not found")
+    result = subprocess.run([sys.executable, script, "card-lint", "-"],
+                            input=text, text=True, capture_output=True, timeout=120)
+    if result.returncode:
+        raise RuntimeError(f"card preflight rejected: {result.stdout.strip()} {result.stderr.strip()}")
+
+
+def refill_need(ready, low=None, target=None, starved=0):
+    """How many cards the pool needs (Refs #1662).
+
+    Below LOW the pool is topped up to at least LOW or TARGET, whichever is higher.
+    This preserves the low-water trigger when AD_LOW exceeds AD_TARGET.  A backend
+    that cannot be fed can request more cards than the pool deficit."""
+    low = LOW if low is None else low
+    target = TARGET if target is None else target
+    if ready < low: return max(target - ready, low - ready, starved, 0)
+    return max(starved, 0)
+
+def card_lines(text):
+    """Read the first two nonempty header lines, keeping the body formatting intact."""
+    lines = text.splitlines(); header = []
+    for index, line in enumerate(lines):
+        if not line.strip(): continue
+        header.append(line.strip())
+        if len(header) == 2: return header + lines[index + 1:]
+    return header
+
+def card_defect(text, strict=False):
+    """Why a card cannot be minted as a lane-ready issue (None when it can).
+
+    A card needs a `# ` title, a `labels:` line and a body: without them a lane has
+    nothing to run.  A card of the repo backlog (`docs/backlog/next/*.md`, written by a
+    planner run) must also carry the published contract of that batch: a body of at least
+    two lines and an `验收：` acceptance line (the same rules as `is_thin_card` of
+    tools/check-ad-ready-target.py).  The local backlog is the operator's drop box: a card
+    there is minted as long as a lane can run it, because the acceptance line is the
+    convention of the planner cards and not of the local ones.  A card without any of that
+    can never be run by a lane, so minting it only fills the pool with dead cards
+    (Refs #1662)."""
+    lines = [line.strip() for line in card_lines(text) if line.strip()]
+    if len(lines) < 2: return "thin card: needs a title and a labels line"
+    if not lines[0].startswith("# "): return "thin card: the first line is not a '# ' title"
+    if not lines[1].startswith("labels:"): return "thin card: the second line is not a 'labels:' line"
+    if strict:
+        if len(lines) < 4: return "thin card: needs a title, a labels line, a body and an acceptance line"
+        if len(lines[2:]) < 2: return "thin card: no body"
+        if not any(line.startswith("验收：") for line in lines[2:]): return "thin card: no '验收：' acceptance line"
+    elif not lines[2:]: return "thin card: no body"
+    return None
+
+def mint_evidence():
+    """One-line summary of the last refill attempt, for the queue-low warning."""
+    parts = []
+    if MINT_EVIDENCE.get("rejected"): parts.append(f"{MINT_EVIDENCE['rejected']} card(s) rejected")
+    if MINT_EVIDENCE.get("planner"): parts.append(f"planner {MINT_EVIDENCE['planner']}")
+    return f" ({'; '.join(parts)})" if parts else ""
+
+def move_without_overwrite(source, destination):
+    """Move a backlog card without ever overwriting an earlier card of the same name.
+
+    The name is reserved with an exclusive create, so two AD processes cannot pick the
+    same free name; an existing card (a card already quarantined in `rejected/`, a card
+    already filed in `filed/`) keeps its content and the moved card gets the next free
+    serial suffix (Refs #1662)."""
+    stem, suffix = os.path.splitext(destination)
+    target = destination; serial = 0
+    while True:
+        try: handle = os.open(target, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
+        except FileExistsError:
+            serial += 1; target = f"{stem}.{serial}{suffix}"; continue
+        os.close(handle)
+        try: os.replace(source, target)
+        except OSError:
+            os.unlink(target); raise
+        return target
+
+def pool_level(state):
+    """The pool level the AD knows: the last authoritative count plus the cards minted since.
+
+    While the queue cannot be read there is no authoritative count; the cards minted in the
+    meantime are added to the last known level, so a refill does not mint the same batch
+    over and over (Refs #1662)."""
+    ready = state.get("_ready")
+    if isinstance(ready, bool) or not isinstance(ready, int): return None
+    return ready + int(state.get("_minted", 0) or 0)
+
+def refill_on_unreadable_queue(state):
+    """Refill while the queue cannot be read, but only within a bounded number of retries.
+
+    The pool level is unknown when the queue read fails.  The AD mints against the last
+    known level (plus the cards it minted since), counts the consecutive failures and
+    mints nothing any more once the bound is reached: it then waits for an authoritative
+    read, so a broken `gh` cannot flood the backlog with duplicate cards (Refs #1662)."""
+    # tick_queue() already counted this tick's failed read (one count per tick)
+    failures = max(1, int(state.get("_queue_failures", 0) or 0))
+    state["_queue_failures"] = failures
+    level = pool_level(state)
+    if level is None:
+        log(f"queue unreadable #{failures}: pool level unknown, no card minted (waiting for an authoritative read)", brain=False)
+        save_state(state); return []
+    if failures > QUEUE_UNREADABLE_REFILL_MAX:
+        log(f"queue unreadable #{failures}: no card minted any more (bounded retries exhausted, waiting for an authoritative read)", brain=False)
+        save_state(state); return []
+    need = refill_need(level)
+    if need <= 0:
+        log(f"queue unreadable #{failures}: pool level {level} is above the threshold ({LOW}), no card minted", brain=False)
+        save_state(state); return []
+    log(f"queue unreadable #{failures}: minting {need} card(s) for the last known level ({level} dispatchable)", brain=False)
+    filed = replenish(need, state)
+    state["_minted"] = int(state.get("_minted", 0) or 0) + len(filed)
+    save_state(state)
+    return filed
+
 def file_issue(text, extra=()):
-    lines = text.splitlines()
+    preflight_card(text)
+    lines = card_lines(text)
     title = lines[0].lstrip("# ").strip(); labels = [l.strip() for l in lines[1].split(":", 1)[1].split(",") if l.strip()]
     body = "\n".join(lines[2:]).strip() + "\n"
     args = ["issue", "create", "-t", title, "-b", body]
@@ -3107,6 +3917,79 @@ def file_issue(text, extra=()):
     rc, o, e = gh(args)
     if rc: raise RuntimeError(e.strip()[-200:])
     return "#" + o.strip().rsplit("/", 1)[-1]
+
+CARD_MARK = "ad-card:"
+CREATE_SETTLE_S = max(120.0, env_number("AD_CREATE_SETTLE_S", 300.0))  # never below twice the gh timeout  # create timeout + server propagation: a request may still be in flight until then
+CREATE_EMPTY_PROOFS = 2   # consecutive empty listings, all taken after the settle time, before a card is created again
+LOOKBACK_SKEW_S = 300  # clock skew allowed between this host and the server when a listing is used as proof
+
+def card_marker(key, text):
+    """The identity of one card: its source and its text (written into the body of the issue)."""
+    return hashlib.sha256((key + "\n" + text).encode("utf-8")).hexdigest()[:16]
+
+def iso_epoch(value):
+    """Epoch seconds of a UTC ISO-8601 stamp such as 2026-11-10T01:02:03Z, else None."""
+    try: return datetime.strptime(str(value)[:19], "%Y-%m-%dT%H:%M:%S").replace(tzinfo=timezone.utc).timestamp()
+    except ValueError: return None
+
+def find_issue_by_marker(marker, since):
+    """The issue whose body carries this card marker: "#N", "" when it provably does not exist, None when unknown.
+
+    The newest issues are listed (the list is read-your-writes consistent, unlike the search index, so a lag
+    cannot hide an issue). Absence is proven only when the page is not full or reaches back to before the
+    creation attempt (`since`, epoch seconds); otherwise the answer is unknown and the card must not be retried."""
+    limit = 200
+    rc, o, _ = gh(["issue", "list", "--state", "all", "--limit", str(limit), "--json", "number,body,createdAt"])
+    if rc: return None
+    try: rows = json.loads(o)
+    except ValueError: return None
+    if not isinstance(rows, list): return None
+    for row in rows:
+        if isinstance(row, dict) and row.get("number") is not None and f"{CARD_MARK}{marker}" in str(row.get("body") or ""):
+            return "#" + str(row["number"])
+    if len(rows) < limit: return ""
+    created = [iso_epoch(row.get("createdAt")) if isinstance(row, dict) else None for row in rows]
+    if created and all(c is not None for c in created) and min(created) <= float(since) - LOOKBACK_SKEW_S:
+        return ""
+    return None
+
+def file_issue_once(text, key, state):
+    """File the card once, even when the answer of `gh issue create` is lost or the process stops (Refs #1662).
+
+    The body of the issue carries a marker of the card. Before the call the card is persisted as pending;
+    after it, in ONE save, the pending record is replaced by a done record, so a stop between the two
+    leaves either a pending card (looked up by its marker) or a done one, never nothing. A pending card is
+    created again only when the request has certainly ended (CREATE_SETTLE_S) and the listing of the newest
+    issues proves twice that it does not exist; an unknown answer (failed or truncated listing, a request that
+    may still be in flight) never retries. Returns the issue, or None when the card must wait for the next tick."""
+    pending = state.setdefault("_import_pending", {})
+    done = state.setdefault("_import_done", {})
+    marker = card_marker(key, text)
+    if marker in done:
+        return done[marker] + "(already filed)"
+    if marker in pending:
+        found = find_issue_by_marker(marker, float(pending[marker]))
+        if found is None:
+            log(f"card {key}: a pending creation cannot be checked (issue list failed or truncated); not created again, checked next tick", brain=False); return None
+        if found:
+            done[marker] = found; pending.pop(marker, None); save_state(state)
+            log(f"card {key}: the earlier creation reached the server as {found}; not filed again", brain=False)
+            return found + "(already filed)"
+        # An empty listing is not proof: the lost request may still be in flight on the server and
+        # succeed after the listing. Create again only once the request has certainly ended (settle
+        # time passed) and the listing stayed empty twice after that.
+        empties = state.setdefault("_import_empty", {})
+        if time.time() - float(pending[marker]) < CREATE_SETTLE_S:
+            log(f"card {key}: the earlier creation may still be in flight; checked again next tick", brain=False); return None
+        empties[marker] = int(empties.get(marker, 0)) + 1
+        if empties[marker] < CREATE_EMPTY_PROOFS:
+            save_state(state)
+            log(f"card {key}: not found once after the settle time; confirmed again next tick", brain=False); return None
+        empties.pop(marker, None)
+    pending[marker] = time.time(); save_state(state)
+    issue = file_issue(text.rstrip("\n") + f"\n\n<!-- {CARD_MARK}{marker} -->\n")
+    done[marker] = issue; pending.pop(marker, None); save_state(state)
+    return issue
 
 PLANNER = """# 规划：为 lane 队列写 {k} 条新任务（{tag}）
 labels: p1,backend:codex,planner
@@ -3118,27 +4001,92 @@ labels: <p1 或 p2>,backend:<pi|codex|agy>
 <任务正文：要改的文件路径、具体改动、边界；不得依赖其它未完成任务>
 
 验收：`<一条在仓库根或 cd 子目录后可直接运行、只用 python3 标准库/现有脚本的命令>`
+
+## 失败模式清单
+对照 docs/defect-patterns.md 检查相关失败模式。
 ```
+
+工具类卡的 plan 段必须列「复刻的引擎数据形状清单」，验收含真实形状 fixture 门槛。
+派发/暂停/终态类卡的 design 段须逐项填写状态机边例矩阵的预期行为：单后端 / drain / 暂停 / 已派发后变化 / 合并后清理 / dry-run 无副作用。
+涉及派发行为的验收必须写明 tick/集成级测试，仅函数级单测不算关账。
+每条验收须有明确判定方法；逐卡运行 `swrm/bin/swrm card-lint`，通过后才可导入。
 
 要求：{k} 条里 backend:pi / backend:agy / backend:codex / 无 backend 标签 大约 2:1:2:1（至少 3 条无 backend 标签供饥饿兜底）；优先 #6 三 Bot 组织诊断 e2e（examples/org-health-local）的测试覆盖、文档、健壮性小修，其次 swrm 的纯单元测试（不需要 Unix socket 的可标 codex，需要的标 pi）；每条 15 分钟内可完成；不要写安全加固、不要改 CI 的 macOS 矩阵、不要碰签名；不要与下列已有 issue 重复：
 
 {open}
 
+生成前逐项完成以下检查，并把相关证据写入各卡正文：
+- 对照 main 确认目标文件确实存在。
+- 写明当前行为和期望行为之间的差异。
+- 给出能复现问题的输入与目标对象。
+- 明确本卡覆盖的功能范围。
+- 写清不在本卡范围内的工作。
+- 确认不依赖另一张未完成卡。
+- 检查已有 issue 中的同类问题。
+- 给出最小实现入口和调用者。
+- 标明输入字段的实际来源。
+- 给出输出结构及消费方。
+- 工具卡列出复刻的数据形状。
+- 工具卡引用真实 fixture 的来源。
+- fixture 必须覆盖真实嵌套字段。
+- 派发卡填写单后端的预期结果。
+- 派发卡填写 drain 的预期结果。
+- 派发卡填写暂停的预期结果。
+- 派发卡填写已派发后变化的预期结果。
+- 派发卡填写合并后清理的预期结果。
+- 派发卡填写 dry-run 的无副作用断言。
+- 派发卡指定 tick 或等价集成测试入口。
+- 验收命令应能从仓库根运行。
+- 验收写明返回码或可观察判定结果。
+- 每条验收对应一个明确的行为。
+- 保留失败路径和边界输入的测试要求。
+- 对照缺陷模式库说明相关风险。
+- 检查测试是否针对真正的目标对象。
+- 检查覆盖范围与结论范围是否一致。
+- 检查状态写入后是否按同一结构读回。
+- 检查冲突配置的优先级预期。
+- 检查清理后待办任务是否仍存在。
+- 对每张卡运行预审，逐条修正拒绝原因。
+
 只新增 `docs/backlog/next/` 下的文件，不改其它文件。
 
 验收：`ls docs/backlog/next/{tag}-*.md | wc -l | grep -qx {k}`
+
+## 失败模式清单
+对照 docs/defect-patterns.md；检查生成对象和全量卡数，拒绝薄卡及不可测条目。
 """
 
 def replenish(k, state):
     """Queue refill, in order: (1) ~/phanes-ctl/autodispatch/backlog/*.md (`# title` / `labels: a,b` / body; moved to backlog/filed/);
     (2) docs/backlog/next/*.md on origin/main not yet imported (written by planner runs); (3) if still short and no planner
-    issue is open, file one planner issue asking a lane to write the next batch into docs/backlog/next/."""
-    bd = f"{D}/backlog"; os.makedirs(f"{bd}/filed", exist_ok=True); out = []
+    issue is open, file one planner issue asking a lane to write the next batch into docs/backlog/next/.
+
+    A card that does not satisfy the card rules (`card_defect`) is quarantined in backlog/rejected/
+    with its reason and the rest of the batch is still minted: one unusable card must never block
+    the whole refill, and the reason is logged so a silent pool can be diagnosed (Refs #1662).
+    A quarantined card never overwrites an earlier card of the same name (Refs #1662)."""
+    global LAST_MINT_LOG
+    if mint_paused():
+        log("replenish skipped: mint paused (PAUSE-MINT marker or the mint pause scope)", brain=False); return []
+    bd = f"{D}/backlog"; os.makedirs(f"{bd}/filed", exist_ok=True); os.makedirs(f"{bd}/rejected", exist_ok=True); out = []
+    MINT_EVIDENCE.clear(); MINT_EVIDENCE["need"] = k; rejected = 0
     for f in sorted(x for x in os.listdir(bd) if x.endswith(".md")):
-        if len(out) >= k: return out
-        try: out.append(file_issue(open(f"{bd}/{f}").read()))
-        except Exception as e: log(f"backlog {f}: {e}", brain=False); return out
-        os.replace(f"{bd}/{f}", f"{bd}/filed/{f}")
+        if len(out) >= k: break
+        try:
+            with open(f"{bd}/{f}") as stream: text = stream.read()
+        except OSError as e: log(f"backlog {f}: {e}", brain=False); continue
+        defect = card_defect(text)
+        if defect:
+            target = move_without_overwrite(f"{bd}/{f}", f"{bd}/rejected/{f}")
+            rejected += 1
+            log(f"backlog {f}: {defect} → {target}", brain=False); continue
+        try: issue = file_issue_once(text, "backlog/" + f, state)
+        except Exception as e:
+            log(f"backlog {f}: {e}", brain=False); continue  # one failing card must not block the batch
+        if issue is None: continue
+        out.append(issue)
+        move_without_overwrite(f"{bd}/{f}", f"{bd}/filed/{f}")
+    MINT_EVIDENCE["rejected"] = rejected
     G = ["git", "-C", "/workspace/phanes-repo"]
     sh(G + ["fetch", "-q", "origin", "main"], timeout=120)
     rc, ls, _ = sh(G + ["ls-tree", "--name-only", "origin/main", "docs/backlog/next/"])
@@ -3146,34 +4094,64 @@ def replenish(k, state):
     for path in sorted(x for x in ls.split() if x.endswith(".md")) if not rc else []:
         if len(out) >= k: break
         if path in imp: continue
-        rc, text, _ = sh(G + ["show", f"origin/main:{path}"])
-        imp.append(path); save_state(state)
-        try:
-            if rc or not text.startswith("#") or not text.splitlines()[1].startswith("labels:"): raise RuntimeError("bad format")
-            out.append(file_issue(text))
-        except Exception as e: log(f"repo backlog {path}: {e}", brain=False)
+        read_rc, text, _ = sh(G + ["show", f"origin/main:{path}"])
+        if read_rc: log(f"repo backlog {path}: read failed (rc={read_rc})", brain=False); continue
+        defect = card_defect(text, strict=True)
+        if defect:
+            imp.append(path); save_state(state)
+            log(f"repo backlog {path}: {defect} → skipped", brain=False); continue
+        try: issue = file_issue_once(text, path, state)
+        except Exception as e:
+            log(f"repo backlog {path}: {e}", brain=False); continue  # keep the card unimported: it is retried next tick
+        if issue is None: continue
+        imp.append(path); save_state(state); out.append(issue)
     if len(out) < k:
         rc, o, _ = gh(["issue", "list", "--state", "open", "--label", "planner", "--json", "number"])
-        if not rc and json.loads(o) == []:
+        planners = None
+        if rc:
+            # the gate cannot prove that no planner is open: no card is minted (Refs #1662)
+            MINT_EVIDENCE["planner"] = f"issue list failed (rc={rc})"
+            log(f"planner query unreadable: gh issue list failed (rc={rc}); skip planner creation", brain=False)
+        else:
+            try:
+                planners = json.loads(o)
+                if not isinstance(planners, list): raise ValueError("the planner query did not return a JSON list")
+            except (ValueError, TypeError) as e:
+                planners = None
+                # an unreadable planner query cannot prove that no planner is open: the gate stays
+                # closed instead of filing a second planner card (Refs #1662)
+                MINT_EVIDENCE["planner"] = f"query unreadable ({str(e)[:60]})"
+                log(f"planner query unreadable: the planner JSON cannot be parsed ({e}); skip planner creation", brain=False)
+        if planners:
+            numbers = [i["number"] for i in planners if isinstance(i, dict) and i.get("number") is not None]
+            MINT_EVIDENCE["planner"] = f"issue #{numbers[0]} already open" if numbers else "a planner issue is already open"
+            if time.time() - LAST_MINT_LOG > 600:
+                log(f"planner issue already open ({', '.join('#' + str(n) for n in numbers) or 'unknown number'}): no new planner card minted", brain=False); LAST_MINT_LOG = time.time()
+        elif planners == []:
             rc, o, _ = gh(["issue", "list", "--state", "open", "--limit", "200", "--json", "number,title"])
-            titles = "\n".join(f"- #{i['number']} {i['title']}" for i in json.loads(o)) if not rc else ""
+            titles = ""
+            if not rc:
+                try: titles = "\n".join(f"- #{i['number']} {i['title']}" for i in json.loads(o))
+                except (ValueError, TypeError, KeyError) as e: log(f"open issue list unreadable ({e}); the planner card carries no issue list", brain=False)
             tag = time.strftime("%Y%m%d-%H%M")
-            try: out.append(file_issue(PLANNER.format(k=20, tag=tag, open=titles)) + "(planner)")
-            except Exception as e: log(f"planner issue: {e}", brain=False)
+            try:
+                out.append(file_issue(PLANNER.format(k=20, tag=tag, open=titles)) + "(planner)"); MINT_EVIDENCE["planner"] = "card filed"
+            except Exception as e:
+                MINT_EVIDENCE["planner"] = f"card failed ({str(e)[:60]})"; log(f"planner issue: {e}", brain=False)
     return out
 
 def sleep_chunk(total=TICK, chunk=5):
     """Sleep between ticks in chunks <= 5s, refreshing heartbeat on each step to prevent suspend freeze (Refs #906)."""
     rem = max(0, total)
     if rem == 0:
-        open(f"{D}/heartbeat", "w").write(time.strftime("%F %T") + "\n")
+        write_heartbeat()
         return
     while rem > 0:
-        open(f"{D}/heartbeat", "w").write(time.strftime("%F %T") + "\n")
+        write_heartbeat()
         step = min(rem, chunk)
         time.sleep(step)
         rem -= step
-    open(f"{D}/heartbeat", "w").write(time.strftime("%F %T") + "\n")
+    write_heartbeat()
 
 
 SHADOW_VERDICT_LOG = f"{D}/shadow-verdicts.jsonl"  # append-only tester shadow log (Refs #1986)

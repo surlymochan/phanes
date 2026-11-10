@@ -95,6 +95,8 @@ for line in sys.stdin:
     kind = request.get("type")
     if kind == "new_session":
         send({"id": request.get("id"), "type": "response", "command": "new_session", "success": True})
+    elif kind == "get_state":
+        send({"id": request.get("id"), "type": "response", "command": "get_state", "success": True, "data": {}})
     elif kind == "prompt":
         prompts += 1
         send({"id": request.get("id"), "type": "response", "command": "prompt", "success": True})
