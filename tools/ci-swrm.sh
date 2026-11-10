@@ -71,10 +71,12 @@ mkdir -p "$HOME" "$OPENSWARM_HOME" "$OPENSWARM_FLEET_CAPACITY_DIR" "$XDG_CONFIG_
 
 echo "Swrm gate: only the current Python version is covered ($(python --version))."
 
+python -m pip install "pytest>=7" "pytest-xdist>=3"
+
 # Step A: unit tests (phanes.yml "Unit tests", working directory swrm).
 (
   cd swrm
-  python -m unittest discover -s tests -v
+  python -m pytest tests -v -n auto
 )
 
 # Step B: offline CLI smoke test (phanes.yml "Offline CLI smoke test").
