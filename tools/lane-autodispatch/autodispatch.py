@@ -1480,43 +1480,95 @@ def remote(lane, cfg, run=""):
 PRIVATE_HOST_RE = re.compile(
     r'(?<![A-Za-z0-9_])(?:' + '|'.join('go' + n for n in ('vpn', 'res', 'cc', 'relay')) + r')[0-9]*(?![A-Za-z0-9_])', re.I)
 
+CREATE_VERBS = ("新建", "创建", "新增", "生成")
+ACCEPT_LINE_RE = re.compile(r"^\s*(?:验收|acceptance)\s*[:：]\s*(.*)$", re.I)
+NON_ACCEPT_FLAGS = re.compile(r"(?:^|\s)(?:--help|-h|--version|--collect-only|--co)(?:\s|$)")
+SCRIPT_WORD = r"[A-Za-z0-9_./-]*(?:test|check|lint|verify)[A-Za-z0-9_./-]*"
+COMMAND_RE = re.compile(r"(?:^|[;&]\s*)(?:\./" + SCRIPT_WORD + r"|(?:bash|sh|python\d*)\s+" + SCRIPT_WORD
+    + r"|(?:python\d*\s+-m\s+)?(?:pytest|unittest|ruff|mypy|tox)\b|(?:npm|pnpm|yarn|cargo|go|make)\s+(?:run\s+)?(?:test|check|lint|build)\b)(?:\s|$)", re.I)
+FILE_TOKEN_RE = re.compile(r"(?<![A-Za-z0-9_./-])(?:[A-Za-z0-9_.-]+/)+[A-Za-z0-9_.-]+|(?<![A-Za-z0-9_./-])[A-Za-z0-9_-]+\.[A-Za-z0-9]+")
+COMMAND_FILE_RE = re.compile(r"(?:[A-Za-z0-9_.-]+/)+[A-Za-z0-9_.-]+|[A-Za-z0-9_-]+\.(?:py|sh|ts|js|json|md|toml|yml|yaml)\b")
+
+def command_text(line):
+    return re.sub(r"^(?:验收|acceptance)\s*[:：]\s*", "", line.strip(), flags=re.I).strip("`").lstrip("$").strip()
+
+def is_command(line):
+    """A real verification command: a known runner/script, not a help/collect-only/version probe."""
+    text = command_text(line)
+    return bool(COMMAND_RE.search(text)) and not NON_ACCEPT_FLAGS.search(text)
+
+def main_path_missing(path):
+    """True/False when origin/main lacks/has the path; None when git could not answer (never a defect)."""
+    rc, out, _ = sh(["git", "-C", LOCAL, "ls-tree", "origin/main", "--", path])
+    if rc: return None
+    return not out.strip()
+
+def branch_missing(branch):
+    """True when neither the branch nor origin/<branch> resolves; None when git could not answer."""
+    results = []
+    for ref in (branch, f"origin/{branch}"):
+        rc, _, _ = sh(["git", "-C", LOCAL, "rev-parse", "--verify", "--quiet", f"{ref}^{{commit}}"])
+        if rc == 0: return False
+        results.append(rc)
+    return True if all(rc == 1 for rc in results) else None
+
 def card_quality(body):
     """Check legacy dispatch cards against origin/main, without rewriting them."""
-    for line in body.splitlines():
-        if PRIVATE_HOST_RE.search(line) and not re.search(r'本机|localhost', line, re.I):
+    lines = body.splitlines()
+    for line in lines:
+        if PRIVATE_HOST_RE.search(line):
             return "跨主机引用"
-        if re.search(r'(?<![A-Za-z0-9_.:/-])(?:/(?!/)[^\s`\"<>]*|~/[^\s`]*|\.\./[^\s`]*)', line):
+        if re.search(r"(?<![A-Za-z0-9_.:/-])(?:/(?!/)[^\s`\"<>]*|~/[^\s`]*|\.\./[^\s`]*)", line):
             return "仓外路径"
-    # Keep the old command structure, but require scripts to name a verification task.
-    script = r'[A-Za-z0-9_./-]*(?:test|check|lint|verify)[A-Za-z0-9_./-]*'
-    command = re.compile(r'(?:^|[;&]\s*)(?:\./' + script + r'|(?:bash|sh|python\d*)\s+' + script + r'|(?:python\d*\s+-m\s+)?(?:pytest|unittest|ruff|mypy|tox)\b|(?:npm|pnpm|yarn|cargo|go|make)\s+(?:run\s+)?(?:test|check|lint|build)\b)(?:\s|$)', re.I)
-    def executable(line):
-        return command.search(re.sub(r'^(?:验收|acceptance)\s*[:：]\s*', '', line.strip(), flags=re.I).strip('`').lstrip('$').strip())
+    command_lines = []
     fence = None
-    commands = False
-    for line in body.splitlines():
-        if line.strip().startswith('```'):
+    for index, line in enumerate(lines):
+        if line.strip().startswith("```"):
             fence = None if fence is not None else line.strip()[3:].lower()
             continue
-        if fence in (None, '', 'sh', 'bash', 'shell', 'console') and executable(line):
-            commands = True
-    if not commands:
-        if re.search(r'(?:验收|acceptance)[\s\S]*(?:或|至少|酌情)', body, re.I):
+        if fence in (None, "", "sh", "bash", "shell", "console") and is_command(line):
+            command_lines.append(index)
+    if not command_lines:
+        if re.search(r"(?:验收|acceptance)[\s\S]*(?:或|至少|酌情)", body, re.I):
             return "验收含糊且缺少可执行命令"
         return "缺少可执行验证命令"
-    for match in re.finditer(r'(?:分支|branch)\s*[:：]?\s*[`\'\"]?([A-Za-z0-9_./-]+)', body, re.I):
-        if re.search(r'(?:新建|创建|新增|生成)\s*$', body[:match.start()]): continue
-        branch = match.group(1)
-        rc, _, _ = sh(["git", "-C", LOCAL, "merge-base", "--is-ancestor", branch, "origin/main"])
-        if rc: return f"分支不存在于 main: {branch}"
-    for line in body.splitlines():
-        if executable(line) or '://' in line: continue
-        for match in re.finditer(r'(?<![A-Za-z0-9_./-])(?:[A-Za-z0-9_.-]+/)+[A-Za-z0-9_.-]+|(?<![A-Za-z0-9_./-])[A-Za-z0-9_-]+\.[A-Za-z0-9]+', line):
-            verbs = list(re.finditer(r'新建|创建|新增|生成|读取|修改|查看|引用|编辑|分支|branch', line[:match.start()], re.I))
-            if verbs and verbs[-1].group().lower() in ('新建', '创建', '新增', '生成', '分支', 'branch'): continue
-            path = match.group()
-            rc, _, _ = sh(["git", "-C", LOCAL, "cat-file", "-e", f"origin/main:{path}"])
-            if rc: return f"main 文件不存在: {path}"
+    # An acceptance statement must itself be a command or be followed directly by one:
+    # a command elsewhere in the card cannot cover a vague criterion.
+    for index, line in enumerate(lines):
+        match = ACCEPT_LINE_RE.match(line)
+        if not match or is_command(line): continue
+        following = next((l for l in lines[index + 1:] if l.strip()), "")
+        if following.strip().startswith("```"):
+            inner = next((l for l in lines[lines.index(following, index + 1) + 1:] if l.strip()), "")
+            if is_command(inner): continue
+        elif is_command(following): continue
+        return "验收含糊: 验收条目未紧跟可执行命令"
+    created = set()
+    for line in lines:
+        if is_command(line): continue
+        for m in FILE_TOKEN_RE.finditer(line):
+            if re.search("(?:" + "|".join(CREATE_VERBS) + r")[^，。,;；\n]*$", line[:m.start()]): created.add(m.group())
+    branches = []
+    for m in re.finditer(r"(?:分支|branch)\s*[:：]?\s*[`'\"]?([A-Za-z0-9_./-]+)", body, re.I):
+        if re.search(r"(?:新建|创建|新增|生成)\s*$", body[:m.start()]): continue
+        branches.append(m.group(1))
+    branches += [m.group(1) for m in re.finditer(r"基于\s*[`'\"]?([A-Za-z0-9_./-]+)[`'\"]?\s*分支", body)]
+    for branch in branches:
+        if branch_missing(branch): return f"分支不存在: {branch}"
+    for index, line in enumerate(lines):
+        if index in command_lines:
+            # the path arguments of a verification command must exist unless the card creates them
+            for m in COMMAND_FILE_RE.finditer(command_text(line)):
+                path = m.group()
+                if path in created or path.startswith("-"): continue
+                if main_path_missing(path): return f"main 文件不存在: {path}"
+            continue
+        if "://" in line: continue
+        for m in FILE_TOKEN_RE.finditer(line):
+            verbs = list(re.finditer(r"新建|创建|新增|生成|读取|修改|查看|引用|编辑|分支|branch", line[:m.start()], re.I))
+            if verbs and verbs[-1].group().lower() in ("新建", "创建", "新增", "生成", "分支", "branch"): continue
+            if m.group() in created: continue
+            if main_path_missing(m.group()): return f"main 文件不存在: {m.group()}"
     return None
 
 def queue(state=None):
@@ -1556,12 +1608,9 @@ def queue(state=None):
         if not verify:
             defect = card_quality(body)
             if defect:
-                # New cards already accepted by #1732 keep their preflight contract.
-                try: preflight_card(body)
-                except RuntimeError:
-                    rc, _, err = gh(["issue", "edit", str(i["number"]), "--remove-label", "lane-ready"])
-                    log(f"卡 #{i['number']} 退回: {defect}" + (f"; 标签移除失败: {err.strip()}" if rc else ""))
-                    continue
+                rc, _, err = gh(["issue", "edit", str(i["number"]), "--remove-label", "lane-ready"])
+                log(f"卡 #{i['number']} 退回: {defect}" + (f"; 标签移除失败: {err.strip()}" if rc else ""))
+                continue
         match = re.search(r"(?im)(?:budget(?:[_ -]minutes)?|预算)\s*[:：]\s*(\d+(?:\.\d+)?)", body)
         budget = float(match.group(1)) if match else float(BUDGET)
         item = {"n": i["number"], "title": i["title"], "body": body, "labels": sorted(labels), "prio": pr, "backend": be, "strict": "strict-backend" in labels, "verify": verify,
