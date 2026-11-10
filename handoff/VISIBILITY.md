@@ -16,13 +16,15 @@
 
 - 推送前：确认目标可见性，扫描待推送的差异、路径、提交信息和 author/committer 的名称与邮箱。
 - 写入前：确认目标及接收方，扫描标题、正文和评论；未声明时拒绝。
-- 合并前：要求 `public-verify` 检查成功，并由仓库管理员在分支保护或 ruleset 中设置为必需检查；工作流文件本身不会启用分支保护。
+- 合并前：门禁启用需另行配置词表，并由仓库管理员在分支保护或 ruleset 中设置必需检查；本次仅交付扫描器与工作流，不启用必需检查。
 - 事后巡检：按私有控制面的计划检查历史、当前树及外部对象；发现问题按泄露响应流程处置。
 
 扫描器使用 `PUBLIC_VERIFY_DENYLIST` 或 `--denylist` 指定私有词表；缺失或为空时失败。`--generic-only` 仅供明确接受不检查私有词表的本地诊断，不用于必需检查。扫描结果只输出类别、位置标识和命中哈希前八位。规则不提供豁免机制，命中需移除或改写源内容。
 
-其他公开仓可通过 `workflow_call` 按本仓库的固定提交 SHA 引用 `.github/workflows/public-verify-reusable.yml`，并提供同名 secret；调用仓库需要配置相应的必需检查。调用时通过 `scanner_ref` 同样指定扫描器所在的完整提交 SHA，避免工作流和扫描器版本漂移。
+工作流先检查 `PUBLIC_VERIFY_DENYLIST` secret：缺失、空白或仅有注释时，在日志、步骤摘要和 warning 注解中明确输出 `SKIPPED: denylist not configured`，并将扫描 job `public-verify` 标为 skipped（中性，未通过扫描）。非空配置继续执行扫描，格式错误仍失败；未配置时的 skipped 不能作为扫描通过的证明。
 
-本仓库在 PR 的合并预览提交（`github.sha`）上检出扫描器，保证首次引入扫描器时检查也能运行；完整检出的合并引用包含 fork PR 的两个父提交，无需从主仓库按 fork head SHA 抓取。跨仓调用必须显式提供本仓扫描器的固定 SHA；默认值只适用于本仓库。PR 工作流不执行被扫描树中的项目脚本，不使用 `pull_request_target`；fork PR 缺少词表 secret 时仍按缺失配置失败，需在受信任且可访问词表的 CI 环境完成检查。
+其他公开仓可通过 `workflow_call` 按本仓库的固定提交 SHA 引用 `.github/workflows/public-verify-reusable.yml`，并提供同名 secret；门禁启用时另行配置相应的必需检查。调用时通过 `scanner_ref` 同样指定扫描器所在的完整提交 SHA，避免工作流和扫描器版本漂移。
+
+本仓库在 PR 的合并预览提交（`github.sha`）上检出扫描器，保证首次引入扫描器时检查也能运行；完整检出的合并引用包含 fork PR 的两个父提交，无需从主仓库按 fork head SHA 抓取。跨仓调用必须显式提供本仓扫描器的固定 SHA；默认值只适用于本仓库。PR 工作流不执行被扫描树中的项目脚本，不使用 `pull_request_target`；fork PR 缺少词表 secret 时明确提示并跳过扫描，需在受信任且可访问词表的 CI 环境完成检查。
 
 `history` 只读遍历所有引用的历史，按 blob ID 去重扫描内容，并单独检查历史路径和提交身份；`tree` 检查指定提交的完整树。私有词表复用 `public_verify_denylist.py` 的格式与边界规则，支持空行及 `#` 注释，正则始终不区分大小写。

@@ -311,6 +311,33 @@ TEST_GENERIC_CLEAN_VALUES = [
 class PublicVerifyAdditionalTests(unittest.TestCase):
     setUp = PublicVerifyScannerTests.setUp
 
+    def test_denylist_configuration_reporting(self):
+        for value in (None, "", " \t\r\n", "# fixture comment\n  # another\n",
+                      "account\tunused-fixture", "unknown\tfixture", "host\tre:["):
+            with self.subTest(value=value):
+                output = self.root / "output"
+                summary = self.root / "summary"
+                output.write_text("prior-output\n", encoding="utf-8")
+                summary.write_text("prior-summary\n", encoding="utf-8")
+                env = dict(os.environ, GITHUB_OUTPUT=str(output),
+                           GITHUB_STEP_SUMMARY=str(summary))
+                env.pop("PUBLIC_VERIFY_DENYLIST", None)
+                if value is not None:
+                    env["PUBLIC_VERIFY_DENYLIST"] = value
+                result = subprocess.run(
+                    [sys.executable, str(SCRIPT.with_name("public_verify_config.py"))],
+                    env=env, capture_output=True, text=True)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                configured = value in ("account\tunused-fixture", "unknown\tfixture", "host\tre:[")
+                self.assertEqual(output.read_text(encoding="utf-8"),
+                                 "prior-output\nconfigured=" + str(configured).lower() + "\n")
+                message = "SKIPPED: denylist not configured"
+                self.assertEqual(result.stdout, "" if configured else
+                                 message + "\n::warning::" + message + "\n")
+                self.assertEqual(result.stderr, "")
+                self.assertEqual(summary.read_text(encoding="utf-8"),
+                                 "prior-summary\n" + ("" if configured else message + "\n"))
+
     def test_generic_findings_are_redacted(self):
         for value in TEST_GENERIC_FINDINGS_ARE_REDACTED_VALUES:
             with self.subTest(value=value):
@@ -463,6 +490,19 @@ class PublicVerifyAdditionalTests(unittest.TestCase):
         import shutil
 
         workflow = yaml.safe_load(REUSABLE_WORKFLOW.read_text(encoding="utf-8"))
+        trigger = workflow.get("on", workflow.get(True))
+        self.assertFalse(trigger["workflow_call"]["secrets"]["PUBLIC_VERIFY_DENYLIST"]["required"])
+        config = workflow["jobs"]["denylist-config"]
+        self.assertEqual(config["outputs"]["configured"], "${{ steps.config.outputs.configured }}")
+        config_checkout, config_step = config["steps"]
+        self.assertEqual(config_checkout["with"]["ref"], "${{ inputs.scanner_ref || github.sha }}")
+        self.assertFalse(config_checkout["with"]["persist-credentials"])
+        self.assertEqual(config_step["id"], "config")
+        self.assertEqual(config_step["env"]["PUBLIC_VERIFY_DENYLIST"], "${{ secrets.PUBLIC_VERIFY_DENYLIST }}")
+        self.assertEqual(config_step["run"], "python3 .public-verify-scanner/tools/ci/public_verify_config.py")
+        self.assertEqual(workflow["jobs"]["public-verify"]["needs"], "denylist-config")
+        self.assertEqual(workflow["jobs"]["public-verify"]["if"],
+                         "needs.denylist-config.outputs.configured == 'true'")
         steps = workflow["jobs"]["public-verify"]["steps"]
         self.assertEqual(steps[0]["with"]["ref"], "${{ github.sha }}")
         self.assertEqual(steps[0]["with"]["fetch-depth"], 0)

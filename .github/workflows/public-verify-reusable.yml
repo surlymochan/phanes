@@ -9,13 +9,32 @@ on:
         type: string
     secrets:
       PUBLIC_VERIFY_DENYLIST:
-        required: true
+        required: false
 
 permissions:
   contents: read
 
 jobs:
+  denylist-config:
+    runs-on: ubuntu-latest
+    outputs:
+      configured: ${{ steps.config.outputs.configured }}
+    steps:
+      - name: Checkout configuration detector at fixed revision
+        uses: actions/checkout@v4
+        with:
+          repository: surlymochan/phanes
+          ref: ${{ inputs.scanner_ref || github.sha }}
+          path: .public-verify-scanner
+          persist-credentials: false
+      - name: Check denylist configuration
+        id: config
+        env:
+          PUBLIC_VERIFY_DENYLIST: ${{ secrets.PUBLIC_VERIFY_DENYLIST }}
+        run: python3 .public-verify-scanner/tools/ci/public_verify_config.py
   public-verify:
+    needs: denylist-config
+    if: needs.denylist-config.outputs.configured == 'true'
     runs-on: ubuntu-latest
     steps:
       - name: Checkout event revision and full history
