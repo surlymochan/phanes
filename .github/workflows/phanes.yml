@@ -4,8 +4,8 @@ on:
     branches: [main, codex/phanes-unification]
   pull_request:
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+  group: phanes-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 permissions:
   contents: read
 jobs:
@@ -115,9 +115,7 @@ jobs:
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
-      matrix:
-        os: [ubuntu-24.04, macos-latest]
-        python: ["3.9", "3.11", "3.13"]
+      matrix: ${{ github.event_name == 'pull_request' && fromJSON('{"include":[{"os":"macos-latest","python":"3.9"},{"os":"ubuntu-24.04","python":"3.12"}]}') || fromJSON('{"os":["ubuntu-24.04","macos-latest"],"python":["3.9","3.12","3.14"]}') }}
     steps:
       - uses: actions/checkout@v4
         with:
