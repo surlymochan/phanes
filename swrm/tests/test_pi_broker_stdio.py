@@ -9,6 +9,8 @@ import tempfile
 import threading
 import unittest
 
+from _broker_wait import short_tmp_root
+
 SCRIPT = pathlib.Path(__file__).resolve().parents[1] / 'bin' / 'pi-broker-stdio'
 SOCKET_REL = pathlib.Path('Library') / 'Caches' / 'swrm-pi-broker' / 'broker.sock'
 
@@ -19,7 +21,7 @@ def _temp_home():
     once Library/Caches/swrm-pi-broker/broker.sock is appended."""
     if os.name == 'nt':
         return tempfile.TemporaryDirectory(prefix='os-')
-    return tempfile.TemporaryDirectory(prefix='os-', dir='/tmp')
+    return tempfile.TemporaryDirectory(prefix='os-', dir=short_tmp_root())
 
 
 def _socket_path(home):
