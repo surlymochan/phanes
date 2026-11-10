@@ -138,6 +138,59 @@ MM_BURN_MAX_AGE_S = env_number("MM_BURN_MAX_AGE_S", 900, int)
 MM_BURN_WARN_SEC = env_number("MM_BURN_WARN_SEC", 600, int)
 BURN_WARN_AT = 0.0  # epoch second of the last burn warning
 
+# --- dispatch priority (Refs #1705) -------------------------------------------------------
+# Scores deliberately use time in the *dispatchable pool*, not issue creation time.
+PRIORITY_WAIT_STEP_S = max(1.0, env_number("AD_PRIORITY_WAIT_STEP_S", 900.0))
+PRIORITY_WAIT_WEIGHT = env_number("AD_PRIORITY_WAIT_WEIGHT", 1.0)
+PRIORITY_LARGE_BUDGET_MINUTES = env_number("AD_PRIORITY_LARGE_BUDGET_MINUTES", 90.0)
+PRIORITY_LARGE_BONUS = env_number("AD_PRIORITY_LARGE_BONUS", 8.0)
+PRIORITY_BACKEND_EXACT = env_number("AD_PRIORITY_BACKEND_EXACT", 4.0)
+PRIORITY_BACKEND_UNPINNED = env_number("AD_PRIORITY_BACKEND_UNPINNED", 2.0)
+PRIORITY_STARVATION_S = max(0.0, env_number("AD_PRIORITY_STARVATION_S", 3600.0))
+PRIORITY_STARVATION_BONUS = env_number("AD_PRIORITY_STARVATION_BONUS", 16.0)
+
+def timestamp(value):
+    """Return an epoch timestamp for a numeric or ISO-8601 value, else None."""
+    if isinstance(value, bool) or value is None: return None
+    if isinstance(value, (int, float)): return float(value)
+    text = str(value).strip()
+    if not text: return None
+    for pattern, candidate in (("%Y-%m-%dT%H:%M:%SZ", text), ("%Y-%m-%dT%H:%M:%S", text[:19])):
+        try: return time.mktime(time.strptime(candidate, pattern))
+        except ValueError: pass
+    return None
+
+def budget_minutes(item):
+    """Read the dispatch budget populated by queue(), accepting legacy spellings."""
+    for key in ("budget_minutes", "budgetMinutes", "budget"):
+        try: return float(item.get(key))
+        except (TypeError, ValueError): pass
+    return 0.0
+
+def pool_wait_seconds(item, now=None):
+    """How long the card has actually been dispatchable, never its issue age."""
+    now = time.time() if now is None else now
+    entered = timestamp(item.get("pool_entered_at"))
+    if entered is None: entered = timestamp(item.get("poolEnteredAt"))
+    if entered is None: entered = now
+    return max(0.0, now - entered)
+
+def priority_score(backend, item, now=None):
+    """Return the score and auditable components used by dispatch ordering."""
+    waited = pool_wait_seconds(item, now)
+    wait_score = math.floor(waited / PRIORITY_WAIT_STEP_S) * PRIORITY_WAIT_WEIGHT
+    budget = budget_minutes(item)
+    large = budget >= PRIORITY_LARGE_BUDGET_MINUTES
+    size_score = PRIORITY_LARGE_BONUS if large else 0.0
+    if item.get("backend") == backend: backend_score = PRIORITY_BACKEND_EXACT
+    elif item.get("backend") is None: backend_score = PRIORITY_BACKEND_UNPINNED
+    else: backend_score = 0.0
+    starvation_score = PRIORITY_STARVATION_BONUS if not large and waited >= PRIORITY_STARVATION_S else 0.0
+    components = {"wait_s": round(waited, 3), "wait": wait_score, "size": size_score,
+                  "backend": backend_score, "starvation": starvation_score,
+                  "budget_minutes": budget}
+    return sum(components[k] for k in ("wait", "size", "backend", "starvation")), components
+
 def ctl_state_dir():
     directory = os.path.expanduser(os.environ.get("OPENSWARM_CTL_STATE_DIR", f"{HOME}/phanes-ctl/state"))
     os.makedirs(directory, mode=0o700, exist_ok=True)
@@ -1219,11 +1272,25 @@ def remote(lane, cfg, run=""):
     try: return json.loads(out.strip().splitlines()[-1])
     except Exception: return {"error": out[-200:]}
 
-def queue():
-    rc, out, err = gh(["issue", "list", "--state", "open", "--label", "lane-ready", "--limit", "100", "--json", "number,title,labels,body,createdAt"])
-    if rc: raise RuntimeError(err)
+def queue(state=None):
+    """Track admission clocks in tick's persisted state, keyed by JSON issue numbers.
+
+    Only a successful, complete pool read replaces the clocks. Missing/invalid cards
+    lose their clock so a later admission cannot inherit an earlier pool visit.
+    """
+    limit = 100
+    while True:
+        rc, out, err = gh(["issue", "list", "--state", "open", "--label", "lane-ready", "--limit", str(limit), "--json", "number,title,labels,body,createdAt"])
+        if rc: raise RuntimeError(err)
+        issues = json.loads(out)
+        if len(issues) < limit: break
+        # gh paginates up to --limit. A full result may omit an older waiting
+        # card, so expand until exhaustion before replacing any admission clocks.
+        limit *= 2
+    state = {} if state is None else state
+    entered_at = state.get("_pool_entered_at", {})
     items = []
-    for i in json.loads(out):
+    for i in issues:
         labels = label_names(i)
         if not dispatchable_issue(i): continue
         pr = min([PRIO[l] for l in labels if l in PRIO] or [3])
@@ -1239,7 +1306,16 @@ def queue():
             valid, missing = verify_requirements(body)
             if not valid:
                 log_verify_rejected(i["number"], missing); continue
-        items.append({"n": i["number"], "title": i["title"], "body": body, "labels": sorted(labels), "prio": pr, "backend": be, "strict": "strict-backend" in labels, "verify": verify, "queued": to_epoch(i.get("createdAt"))})
+        match = re.search(r"(?im)(?:budget(?:[_ -]minutes)?|预算)\s*[:：]\s*(\d+(?:\.\d+)?)", body)
+        budget = float(match.group(1)) if match else float(BUDGET)
+        item = {"n": i["number"], "title": i["title"], "body": body, "labels": sorted(labels), "prio": pr, "backend": be, "strict": "strict-backend" in labels, "verify": verify,
+                "queued": to_epoch(i.get("createdAt")), "created_at": i.get("createdAt"), "budget_minutes": budget}
+        item["deps_ok"] = deps_met(item)
+        if item["deps_ok"]:
+            entered = timestamp(entered_at.get(str(i["number"])))
+            item["pool_entered_at"] = time.time() if entered is None else entered
+        items.append(item)
+    state["_pool_entered_at"] = {str(item["n"]): item["pool_entered_at"] for item in items if item["deps_ok"]}
     return sorted(items, key=lambda x: (x["prio"], x["n"]))
 
 VERIFY_HEADING_RE = re.compile(r"(?mi)^##[^\S\r\n]*Verify[^\S\r\n]*Intent[^\S\r\n]*$")
@@ -1321,8 +1397,10 @@ def memory_preflight(lane, cfg, item, cache):
 def is_review_lane(lane):
     """The review lanes a verify card may be dispatched to (CX2/CX4/CX5)."""
     return bool(re.fullmatch(r"CX(?:2|4|5)(?:[-_].*)?", str(lane), re.I))
-def rank(backend, item):  # own pin first, then unpinned, then cross-pinned; within each by priority, work before verify, number
-    return (0 if item["backend"] == backend else 1 if item["backend"] is None else 2, item["prio"], bool(item.get("verify")), item["n"])
+def rank(backend, item):
+    """Highest score first; stable legacy fields break equal-score ties."""
+    score, _ = priority_score(backend, item)
+    return (-score, item["prio"], bool(item.get("verify")), item["n"])
 
 def queue_class_limits(lanes, state, idle):
     """Reserve review-capable capacity using available lanes and active runs only."""
@@ -2862,20 +2940,22 @@ def tick(lanes, state, last_warn):
         nonlocal q, queue_failed, queue_error
         if q is not None: return True
         if queue_failed: return False
-        try: q = queue()
+        try: q = queue(state)
         except Exception as e:
             queue_failed = True; queue_error = str(e)
             log(f"queue error: {e}", brain=False)
             return False
-        for i in q: i["deps_ok"] = deps_met(i)
+        save_state(state)  # admission clocks survive --once and failures later in the tick
+        for i in q:
+            if "deps_ok" not in i: i["deps_ok"] = deps_met(i)
         metrics = verify_metrics(state)
         for item in q:
             if item.get("verify"):
                 # Use the order time, including time spent waiting while AD was stopped.
                 queued = item.get("queued")
                 metrics["cards"].setdefault(str(item["n"]), {"issue": item["n"], "queued": now if queued is None else queued})
-        # one authoritative read per issue per tick, shared by all dispatches and the count
-        prefetch_labels([i["n"] for i in q])
+        # Dispatch reads labels in score order before freshen_queue uses the remaining
+        # read budget. Prefetching by issue number can starve a high-scoring old card.
         return True
 
     def base_commit():
@@ -2957,6 +3037,7 @@ def tick(lanes, state, last_warn):
             dispatch_failed(L, cfg, pick, e, busy=bool(LANE_BUSY_RE.search(str(e))))
             return "no-capacity"
         q.remove(pick); state[L] = {"issue": pick["n"], "run": run, "host": cfg["host"], "base": commit, "at": time.strftime("%F %T"), "verify": ver, "class": "verify" if pick.get("verify") else "work"}
+        state["_pool_entered_at"].pop(str(pick["n"]), None)
         metrics = verify_metrics(state)
         # The snapshot and saved state must reflect the slot just occupied.
         if AD_VERIFY_SHARE_ENABLED: metrics["deficit"] = queue_class_limits(lanes, state, idle)[0]
@@ -2972,7 +3053,9 @@ def tick(lanes, state, last_warn):
             if idle_s > IDLE_LOG_MIN_S:
                 log(f"{L} idle {idle_s:.0f}s before dispatch (reason: {reason})", brain=True)
         if AD_VERIFY_SHARE_ENABLED: log(f"queue share: dispatched {state[L]['class']} #{pick['n']} on {L}", brain=False)
-        save_state(state); log(f"dispatched #{pick['n']} → {L} ({cfg['host']}) run {run} base {commit[:8]}")
+        score, basis = priority_score(cfg["backend"], pick)
+        save_state(state); log(f"dispatched #{pick['n']} → {L} ({cfg['host']}) run {run} base {commit[:8]} "
+                               f"priority={score:g} basis={json.dumps(basis, sort_keys=True)}")
         return "dispatched"
 
     # 1) Re-dispatch each freed lane before harvesting the next one (Refs #1688).
@@ -3025,6 +3108,7 @@ def tick(lanes, state, last_warn):
         idle_account(state, L, window, now, outcomes.get(L, "no-capacity"), last_alive)
     # stale search rows are not dispatchable: drop them (and log the skip) before counting
     q = freshen_queue(q, state)
+    state["_pool_entered_at"] = {str(item["n"]): item["pool_entered_at"] for item in q if item.get("deps_ok", True) and "pool_entered_at" in item}
     blocked = sum(not i["deps_ok"] for i in q)
     memory_blocks = {}
     for item in q:
