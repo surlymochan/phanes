@@ -173,11 +173,11 @@ class DispatchPauseTests(DispatchPauseHarness):
 
 
 class QueueFailureTests(DispatchPauseHarness):
-    def run_tick(self, state, queue):
+    def run_tick(self, state, queue, *, lanes=None, brain_log=None):
         with patch.object(DISPATCH, "audit_switches"), \
              patch.object(DISPATCH, "queue", queue), \
-             patch.object(DISPATCH, "BRAIN_LOG", str(self.tmp / "brain.log")):
-            return DISPATCH.tick({}, state, 0)
+             patch.object(DISPATCH, "BRAIN_LOG", str(brain_log or self.tmp / "brain.log")):
+            return DISPATCH.tick(lanes or {}, state, 0)
 
     def test_old_queue_signature_raises_and_records_traceback(self):
         state = {"_pool_entered_at": {"42": 123}}
@@ -200,6 +200,41 @@ class QueueFailureTests(DispatchPauseHarness):
         self.run_tick(state, lambda _state: [])
         self.assertEqual(state["_queue_failures"], 0)
         self.assertEqual(json.loads((self.state / "state.json").read_text())["_queue_failures"], 0)
+
+    def test_broken_brain_log_does_not_stop_harvesting_after_queue_outage(self):
+        for brain_log in (self.tmp / "missing" / "brain.log", self.tmp):
+            with self.subTest(brain_log=brain_log):
+                state = {lane: {"issue": issue, "run": f"run-{lane}"}
+                         for issue, lane in enumerate(self.LANES, 1)}
+                def unavailable(_state):
+                    raise OSError("offline")
+                with patch.object(DISPATCH, "host_ok", return_value=True), \
+                     patch.object(DISPATCH, "host_good"), \
+                     patch.object(DISPATCH, "remote", return_value={"run": {"ended_at": time.time()}}), \
+                     patch.object(DISPATCH, "finish", return_value={"done": True}) as finish, \
+                     patch.object(DISPATCH, "queue", side_effect=unavailable) as queue:
+                    self.assertEqual(self.run_tick(state, queue, lanes=self.LANES, brain_log=brain_log), 0)
+                self.assertEqual([call.args[0] for call in finish.call_args_list], list(self.LANES))
+                queue.assert_called_once_with(state)
+                saved = json.loads((self.state / "state.json").read_text())
+                self.assertEqual(saved["_queue_failures"], 1)
+                for lane in self.LANES:
+                    self.assertNotIn(lane, state)
+                    self.assertNotIn(lane, saved)
+                status = json.loads((self.state / "lanes-status.json").read_text())
+                self.assertEqual(status["_queue_error"], "offline")
+
+    def test_broken_brain_log_preserves_original_program_error(self):
+        for brain_log in (self.tmp / "missing" / "brain.log", self.tmp):
+            with self.subTest(brain_log=brain_log):
+                state = {}
+                original = TypeError("queue programming error")
+                def broken(_state):
+                    raise original
+                with self.assertRaises(TypeError) as raised:
+                    self.run_tick(state, broken, brain_log=brain_log)
+                self.assertIs(raised.exception, original)
+                self.assertEqual(json.loads((self.state / "state.json").read_text())["_queue_failures"], 1)
 
 
 class GlobalPauseStatusTests(DispatchPauseHarness):
