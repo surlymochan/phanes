@@ -34,7 +34,7 @@ import { type DynamicRecord, isNumber, isOneOf, isString } from "@volto/contract
 import { QueueEditRejectedError } from "@volto/contracts/team-protocol/queue-edit-v1";
 import { sourceText } from "@volto/i18n/source";
 import { redactText } from "@volto/logging";
-import { Effect, Result } from "effect";
+import { Effect, Result, Semaphore } from "effect";
 import {
   AttachmentFiles,
   type ExportedAttachmentFile,
@@ -70,6 +70,7 @@ export interface MessagingOrigin {
 }
 
 interface StoredMessage {
+  a2a?: { taskId: string };
   /** Private `message_json` routing metadata. The released queue sender stays `user`. */
   dispatch?: DispatchDeliverySource;
   channelId?: string | undefined;
@@ -171,6 +172,7 @@ interface StoredReaction {
 }
 
 interface EnqueueInput {
+  a2a?: { taskId: string };
   dispatch?: DispatchDeliverySource;
   channelId?: string;
   messaging?: MessagingOrigin;
@@ -205,6 +207,7 @@ export interface MailboxStoredFile {
 }
 
 export interface DeliveryContext {
+  a2a?: { taskId: string };
   dispatch?: DispatchDeliverySource;
   delivery: QueueDelivery;
   managedAttachments: Array<AttachmentSummary & { path: string }>;
@@ -251,6 +254,7 @@ export class MailboxStore {
   /** Queued deliveries the user ran now: each starts while its queue is paused. Not persisted. */
   readonly #runNow = new Set<string>();
   readonly #deliveryGate = new MailboxDeliveryGate();
+  readonly #idempotentEnqueue = Semaphore.makeUnsafe(1);
   readonly #stagedGeneratedAttachments = new Map<string, StoredGeneratedAttachment>();
   #state: StoredState = structuredClone(EMPTY_STATE);
   /** The rows changed, added or removed, since the last committed write. `#persist` writes only these. */
@@ -489,7 +493,12 @@ export class MailboxStore {
     );
   }
 
-  enqueue = Effect.fn("MailboxStore.enqueue")(function* (
+  enqueue(input: EnqueueInput): Effect.Effect<QueuedMessageReceipt, StoredStateFailure> {
+    const operation = this.#enqueue(input);
+    return input.idempotencyKey ? this.#idempotentEnqueue.withPermit(operation) : operation;
+  }
+
+  #enqueue = Effect.fn("MailboxStore.enqueue")(function* (
     this: MailboxStore,
     input: EnqueueInput,
   ): Effect.fn.Return<QueuedMessageReceipt, StoredStateFailure> {
@@ -577,6 +586,7 @@ export class MailboxStore {
       const committedByDraftId = new Map(drafts.map((draft, index) => [draft.id, attachments[index]] as const));
       const messaging = input.messaging ?? this.#answerReturn(input, recipients);
       const message: StoredMessage = {
+        ...(input.a2a ? { a2a: input.a2a } : {}),
         ...(input.dispatch ? { dispatch: input.dispatch } : {}),
         ...(input.channelId === undefined ? {} : { channelId: input.channelId }),
         ...(messaging ? { messaging } : {}),
@@ -2681,6 +2691,7 @@ export class MailboxStore {
   ): DeliveryContext {
     const message = this.#requireMessage(delivery.messageId, messages);
     return {
+      ...(message.a2a ? { a2a: message.a2a } : {}),
       ...(message.dispatch ? { dispatch: message.dispatch } : {}),
       delivery: this.#publicDelivery(delivery, positions, message),
       ...(delivery.resumeAfterUsageLimit ? { resumeAfterUsageLimit: delivery.resumeAfterUsageLimit } : {}),
@@ -3062,6 +3073,7 @@ function messageFiles(message: StoredMessage): StoredAttachment[] {
 function isStoredMessage(value: unknown): value is StoredMessage {
   return (
     isRecord(value) &&
+    (value.a2a === undefined || (isRecord(value.a2a) && isString(value.a2a.taskId))) &&
     (value.dispatch === undefined ||
       (isRecord(value.dispatch) &&
         isString(value.dispatch.runId) &&
