@@ -557,7 +557,7 @@ class DispatchTickTests(unittest.TestCase):
                      "CX9": {"host": "other-host", "backend": "pi"}}
             # the outside world is faked: no ssh, no gh, no planner backlog
             dispatcher.remote = lambda lane, cfg, run="": {"lane": "idle"}
-            dispatcher.queue = lambda: [dict(card)]
+            dispatcher.queue = lambda *args, **kwargs: [dict(card)]
             dispatcher.label_state = lambda number, cache=None: ("fresh", "")
             dispatcher.prefetch_labels = lambda numbers, cache=None: {}
             dispatcher.replenish = lambda count, state: []
@@ -565,7 +565,7 @@ class DispatchTickTests(unittest.TestCase):
             dispatcher.sh = lambda *args, **kwargs: (0, "base-sha\n", "")
             dispatcher.dispatch = (lambda lane, cfg, item, base:
                                     (dispatched.append(lane) or "run-1", False))
-            state = {}
+            state = {"_pool_entered_at": {}}
             dispatcher.tick(lanes, state, time.time())
             self.assertNotIn("CX2", state,
                              "the dispatch tick must not give a card to a host the disk "
@@ -604,7 +604,7 @@ class DispatchTickTests(unittest.TestCase):
             lanes = {"CX2": {"host": HOST, "backend": "pi"},
                      "CX9": {"host": "other-host", "backend": "pi"}}
             dispatcher.remote = lambda lane, cfg, run="": {"lane": "idle"}
-            dispatcher.queue = lambda: [dict(card)]
+            dispatcher.queue = lambda *args, **kwargs: [dict(card)]
             dispatcher.label_state = lambda number, cache=None: ("fresh", "")
             dispatcher.prefetch_labels = lambda numbers, cache=None: {}
             dispatcher.replenish = lambda count, state: []
@@ -612,7 +612,7 @@ class DispatchTickTests(unittest.TestCase):
             dispatcher.sh = lambda *args, **kwargs: (0, "base-sha\n", "")
             dispatcher.dispatch = (lambda lane, cfg, item, base:
                                     (dispatched.append(lane) or "run-1", False))
-            state = {}
+            state = {"_pool_entered_at": {}}
             dispatcher.tick(lanes, state, time.time())
             self.assertNotIn("CX2", state,
                              "the tick must not give a card to a blocked host whose pause "
