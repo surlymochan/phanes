@@ -12,9 +12,24 @@ PAUSE-HOST-<HOST>, PAUSE-BACKEND-<BACKEND> and PAUSE-MINT (no new issue minted).
 A hold that a program keeps under a scope of its own (`host:<host>@health`) holds the host as well (Refs #1367).
 A legacy marker with an `until=<epoch|ISO>` deadline stops holding after that deadline, while the file stays as evidence (Refs #1592).
 """
-import base64, hashlib, importlib.util, json, math, os, re, shlex, stat, subprocess, sys, time, tempfile, traceback, concurrent.futures as cf
+import base64, hashlib, importlib.util, json, math, os, re, shlex, stat, subprocess, sys, threading, time, traceback, tempfile, concurrent.futures as cf
 from datetime import datetime, timezone
-HOME = os.path.expanduser("~"); D = f"{HOME}/phanes-ctl/autodispatch"
+HOME = os.path.expanduser("~")
+# The state dir holds the snapshot, the heartbeat and the log. It can be moved for a test or a
+# second deployment (Refs #1697): the reader (tools/check-lanes-status-stall.py) resolves the
+# same variables, so both sides always name the same file.
+D = os.path.expanduser(os.environ.get("OPENSWARM_AD_STATE_DIR") or os.environ.get("XSWARM_AD_STATE_DIR")
+                        or f"{HOME}/phanes-ctl/autodispatch")
+# The snapshot file itself can be named explicitly (the control plane reads the same path).
+LANES_STATUS_FILE_ENVS = ("OPENSWARM_LANES_STATUS_FILE", "XSWARM_LANES_STATUS_FILE")
+# The knobs that name the refresh cadence of the snapshot publisher: while a slow step of the
+# tick runs, the snapshot is republished so `_at` follows the dispatch rhythm (Refs #1697).
+STATUS_REFRESH_ENVS = ("AD_STATUS_REFRESH", "AD_STATUS_REFRESH_SECONDS", "AD_SNAPSHOT_REFRESH",
+                        "AD_REFRESH_SECONDS", "LANES_STATUS_REFRESH")
+try:  # a typo in the configuration must not kill the dispatcher at import time
+    STATUS_REFRESH_SECONDS = float(next(os.environ[name] for name in STATUS_REFRESH_ENVS if os.environ.get(name)))
+except (StopIteration, TypeError, ValueError):
+    STATUS_REFRESH_SECONDS = 30.0
 REPO = "surlymochan/phanes"; LOCAL = "/workspace/phanes-repo"; BRAIN_LOG = "/workspace/phanes/brain/log.md"
 TICK = int(os.environ.get("AD_TICK", "60")); BUDGET = os.environ.get("AD_BUDGET", "45"); LOW = int(os.environ.get("AD_LOW", "10"))
 RULES = ("Rules: work only inside this repository worktree (the current directory). Never create, modify, move or delete "
@@ -1226,6 +1241,74 @@ def log(msg, brain=True):
     with open(f"{D}/autodispatch.log", "a") as f: f.write(line + "\n")
     if brain:
         with open(BRAIN_LOG, "a") as f: f.write(f"- {now()} UTC+8 autodispatch: {msg}\n")
+
+def safe_log(msg, brain=True):
+    """log() that never raises: a broken log file must not kill the dispatcher."""
+    try:
+        log(msg, brain=brain)
+    except Exception:
+        print(f"{time.strftime('%F %T')} {msg}", flush=True)
+
+def lanes_status_path():
+    """The snapshot file the dispatcher publishes and the control plane reads (Refs #1697).
+
+    ``OPENSWARM_LANES_STATUS_FILE`` names the file itself, ``OPENSWARM_AD_STATE_DIR`` the
+    directory that holds it.  The reader (``tools/check-lanes-status-stall.py``) resolves the
+    very same variables, so a configured deployment reads the file that is actually written."""
+    for name in LANES_STATUS_FILE_ENVS:
+        explicit = os.environ.get(name)
+        if explicit: return os.path.abspath(os.path.expanduser(explicit))
+    for name in ("OPENSWARM_AD_STATE_DIR", "XSWARM_AD_STATE_DIR"):
+        directory = os.environ.get(name)
+        if directory: return os.path.join(os.path.expanduser(directory), "lanes-status.json")
+    return os.path.join(D, "lanes-status.json")
+
+def lanes_status_heartbeat_path():
+    """The heartbeat of the dispatcher loop: it lives in the state dir, with the other runtime files."""
+    return os.path.join(D, "heartbeat")
+
+def write_heartbeat(path=None):
+    """Refresh the heartbeat file: the health check reads it to tell a live writer from a stalled one."""
+    target = path or lanes_status_heartbeat_path()
+    try:
+        with open(target, "w") as stream:
+            stream.write(time.strftime("%F %T") + "\n")
+        return True
+    except OSError as error:
+        safe_log(f"ERROR heartbeat write failed ({target}): {error!r}", brain=False)
+        return False
+
+def write_status_snapshot(path, status, logger=print):
+    """Atomically publish the complete snapshot; report failures to the dispatcher log.
+
+    The snapshot is written to a temporary file in the same directory and renamed into place,
+    so a reader never sees a half-written file (Refs #1697).  A failed write is logged, never
+    swallowed, and the previous snapshot is kept.
+    """
+    directory = os.path.dirname(path) or "."
+    temporary = None
+    try:
+        fd, temporary = tempfile.mkstemp(prefix=".lanes-status-", suffix=".tmp", dir=directory)
+        with os.fdopen(fd, "w", encoding="utf-8") as stream:
+            json.dump(status, stream, ensure_ascii=False, indent=1)
+            stream.write("\n")
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, path)
+        temporary = None
+        return True
+    except Exception as error:
+        message = f"ERROR lanes-status write failed ({path}): {error!r}"
+        try:
+            logger(message)
+        except Exception:
+            print(message, flush=True)
+        return False
+    finally:
+        if temporary and os.path.exists(temporary):
+            try: os.unlink(temporary)
+            except OSError: pass
+
 def sh(cmd, timeout=120, inp=None):
     p = subprocess.run(cmd, shell=isinstance(cmd, str), capture_output=True, text=True, timeout=timeout, input=inp)
     return p.returncode, p.stdout, p.stderr
@@ -1994,6 +2077,11 @@ def status_snapshot(lanes, state, res, ready, blocked, records=None):
     status["_idle_open_s"] = idle_open_s    # the gap the idle lanes are in right now
     status["_idle_worst_s"] = max(idle_open_s.values(), default=0.0)
     status["_at"] = time.strftime("%F %T")
+    # The phase and the tick start tell the reader how far the current tick got (Refs #1697):
+    # a snapshot whose phase does not change while `_at` advances means a slow step is running.
+    # The publisher names the phase of the running tick; outside a tick the snapshot is idle.
+    status["_phase"] = "idle"
+    status["_tick_at"] = status["_at"]
     # The burn watchdog measures the real MiniMax token burn of the hour; the
     # lane status shows its reading, so an operator compares it with the
     # MiniMax console instead of watching the dispatch count (Refs #1671).
@@ -2006,6 +2094,130 @@ def status_snapshot(lanes, state, res, ready, blocked, records=None):
     status["_verify_share"] = (dispatches["verify"] / dispatches["all"] if dispatches["all"] else 0.0)
     status["_work_cap_hits"] = metrics["work_cap_hits"]
     return status
+
+class StatusPublisher:
+    """Publishes the lanes-status snapshot and refreshes `_at` on every publish.
+
+    The snapshot used to be written once, at the very end of the tick, so a slow harvest, a
+    hung `gh` call or a long refill froze `_at` while the dispatcher kept dispatching
+    (Refs #1697).  The publisher is called at every step of the tick and a refresher thread
+    republishes it while a slow step runs, so `_at` follows the dispatch rhythm; the queue
+    counters keep their last known value until the current tick measured them again,
+    then every successful assignment updates the busy and ready counts together.
+    """
+
+    def __init__(self, lanes, state, path=None, logger=None, heartbeat=None, refresh=None):
+        self.lanes = lanes
+        self.state = state
+        self.path = path or lanes_status_path()
+        self.heartbeat = heartbeat or lanes_status_heartbeat_path()
+        self.logger = logger or safe_log
+        self.res = {}
+        self.records = None
+        self.ready = self.previous("_ready")
+        self.blocked = self.previous("_blocked")
+        self.memory_blocks = {}
+        self.blocked_details = None
+        self.rows = self.previous_rows()
+        self.refresh = STATUS_REFRESH_SECONDS if refresh is None else float(refresh)
+        self.phase = "start"
+        self.tick_at = None  # the stamp of the first publish: the start of the running tick
+        self._lock = threading.RLock()
+        self._stop = threading.Event()
+        self._thread = None
+
+    def previous(self, key):
+        """The counter of the last published snapshot (an early publish must not report a false 0)."""
+        try:
+            with open(self.path, encoding="utf-8") as stream:
+                published = json.load(stream)
+        except (OSError, ValueError):
+            return None
+        value = published.get(key) if isinstance(published, dict) else None
+        return value if isinstance(value, int) and not isinstance(value, bool) else None
+
+    def previous_rows(self):
+        """The lane rows of the last published snapshot (a publish before the probe keeps them)."""
+        try:
+            with open(self.path, encoding="utf-8") as stream:
+                published = json.load(stream)
+        except (OSError, ValueError):
+            return {}
+        if not isinstance(published, dict): return {}
+        return {lane: row for lane, row in published.items()
+                if not lane.startswith("_") and isinstance(row, str)}
+
+    def snapshot(self, res=None, ready=None, blocked=None):
+        """The snapshot body with the latest known values."""
+        if res is not None: self.res = res
+        if ready is not None: self.ready = ready
+        if blocked is not None: self.blocked = blocked
+        rows = {L: self.res.get(L) or {"lane": self.rows.get(L, "?")} for L in self.lanes}
+        # status_snapshot() keeps the argument shape it always had: a caller that replaces it
+        # (the tick tests do) must keep working. The phase of the tick is added below.
+        snapshot = status_snapshot(self.lanes, self.state, rows, self.ready or 0, self.blocked or 0,
+                                   self.records)
+        if isinstance(snapshot, dict):
+            snapshot["_memory_blocks"] = self.memory_blocks
+            if self.blocked_details is not None:
+                snapshot["_blocked_details"] = self.blocked_details
+                snapshot["_blocked_reasons"] = {reason: sum(d["reason"] == reason for d in self.blocked_details)
+                                                for reason in ("deps", "hot_file", "memory")}
+            # The phase and the tick start tell the reader how far the current tick got
+            # (Refs #1697): a snapshot whose phase does not change while `_at` advances
+            # means a slow step is running.
+            if self.tick_at is None: self.tick_at = snapshot.get("_at")
+            snapshot["_phase"] = self.phase
+            snapshot["_tick_at"] = self.tick_at
+        return snapshot
+
+    def publish(self, res=None, ready=None, blocked=None, phase=None, heartbeat=True):
+        """Write the snapshot now; a failed write is logged, never swallowed.
+
+        The publish is serialized: the refresher thread and the tick itself must never
+        overwrite a newer snapshot with an older one (Refs #1697)."""
+        with self._lock:
+            if phase is not None: self.phase = phase
+            snapshot = self.snapshot(res=res, ready=ready, blocked=blocked)
+            write_status_snapshot(self.path, snapshot, self.logger)
+            if heartbeat: write_heartbeat(self.heartbeat)
+            return snapshot
+
+    def start(self):
+        """Republish the snapshot while the tick works: a slow step must not freeze `_at`.
+
+        The refresher does not touch the heartbeat: the heartbeat is the signal that the
+        dispatcher loop itself is alive, so a tick stuck in one operation is still reported
+        as a stalled writer by the health check (Refs #1697)."""
+        if self.refresh <= 0 or self._thread is not None: return self
+        self._stop.clear()
+        self._thread = threading.Thread(target=self._refresh, args=(self.refresh,),
+                                        name="lanes-status-refresh", daemon=True)
+        self._thread.start()
+        return self
+
+    def record_dispatch(self, lane, record):
+        """Publish an assignment and its queue decrement before any slow save or logging.
+
+        The refresher shares this lock, so it cannot publish a new busy lane with the
+        ready count from before the assignment.
+        """
+        with self._lock:
+            self.state[lane] = record
+            return self.publish(ready=max(0, (self.ready or 0) - 1), phase="dispatch")
+
+    def _refresh(self, every):
+        while not self._stop.wait(every):
+            try:
+                self.publish(heartbeat=False)
+            except Exception as error:
+                safe_log(f"ERROR lanes-status refresh failed: {error!r}", brain=False)
+
+    def stop(self):
+        """Stop the refresher thread."""
+        self._stop.set()
+        thread, self._thread = self._thread, None
+        if thread is not None: thread.join(timeout=5)
 
 def classify_dispatch_fetch_error(error):
     """Return a useful network failure category for dispatch fetch diagnostics."""
@@ -2366,6 +2578,7 @@ def clear_budget_history(state, issue):
 def release_recovered_budget_holds(state, lanes):
     """Return held cards to lane-ready only after the window query confirms recovery."""
     holds, _ = budget_holds(state)
+    if not holds: return  # nothing held: no state write before the queue is measured
     for issue, hold in list(holds.items()):
         if not isinstance(hold, dict): continue
         lane = hold.get("lane")
@@ -2898,12 +3111,6 @@ def to_epoch(value, fmt=None):
 
 def heartbeat_path(): return f"{D}/heartbeat"
 
-def write_heartbeat():
-    """Mark the dispatcher as alive (the heartbeat is the stamp of its last life)."""
-    try:
-        with open(heartbeat_path(), "w") as stream: stream.write(time.strftime("%F %T") + "\n")
-    except OSError: pass
-
 def dispatcher_last_alive():
     """When the dispatcher was last alive (epoch seconds), or None when unknown.
 
@@ -3037,31 +3244,32 @@ def idle_metrics(state, now=None):
     return idle_s, reasons, open_s
 
 def tick(lanes, state, last_warn):
+    # The snapshot is published at every step of the tick, not only at its end, and a refresher
+    # thread republishes it while a slow step runs: a slow harvest, a hung `gh` call or a long
+    # refill must not freeze `_at` while the dispatcher keeps working (Refs #1697).
+    publisher = StatusPublisher(lanes, state)
+    publisher.start()
+    try:
+        return run_tick(lanes, state, last_warn, publisher)
+    finally:
+        publisher.stop()
+
+def run_tick(lanes, state, last_warn, publisher):
+    """One tick; every step refreshes the snapshot (Refs #1697)."""
     audit_switches()  # the switch audit runs every tick, also when the loop itself is paused (Refs #1827)
     records = pause_records()  # the swrm pause store and the legacy PAUSE markers (Refs #1366, #1592)
+    publisher.records = records
     scopes = paused_scopes(records=records)
     if "all" in scopes:
-        # Keep the pause visible even though this tick does no remote or queue work.
-        # Queue counts remain the last observed values while dispatch is stopped.
-        path = f"{D}/lanes-status.json"
-        try:
-            with open(path) as stream: previous = json.load(stream)
-        except (OSError, ValueError): previous = {}
-        if not isinstance(previous, dict): previous = {}
-        res = {L: {"lane": "paused"} for L in lanes}
-        st = status_snapshot(lanes, state, res, previous.get("_ready", 0), previous.get("_blocked", 0), records)
-        for key in ("_blocked_details", "_blocked_reasons"):
-            if key in previous: st[key] = previous[key]
-        with open(path, "w") as stream: json.dump(st, stream, ensure_ascii=False, indent=1)
+        publisher.publish(res={L: {"lane": "paused"} for L in lanes}, phase="paused")
         return last_warn
     label_cache_reset()  # authoritative label reads are cached for one tick only
     state.setdefault("_done", [])
     idle_books(state)  # the idle bookkeeping of the state exists from the first tick on
     now = time.time()
-    # the heartbeat is the stamp of the dispatcher's last life: the gap to now is its
-    # downtime, and it is read before the dispatcher marks itself alive again (Refs #1688)
+    # Read the previous heartbeat before publishing marks this tick alive (Refs #1688).
     last_alive = dispatcher_last_alive()
-    write_heartbeat()
+    publisher.publish(phase="probe")
     live = [L for L in lanes if host_ok(lanes[L]["host"])]
     with cf.ThreadPoolExecutor(4) as ex:
         res = dict(zip(live, ex.map(lambda L: remote(L, lanes[L], (state.get(L) or {}).get("run", "")), live)))
@@ -3087,6 +3295,7 @@ def tick(lanes, state, last_warn):
         mark_recovery_runs(state, h, lanes)
         scopes = paused_scopes()  # the released pause opens the host again
     release_recovered_budget_holds(state, lanes)
+    publisher.publish(res=res, phase="harvest")  # the remote probe of every lane is done
     q = None
     queue_failed = False
     queue_error = ""
@@ -3115,17 +3324,25 @@ def tick(lanes, state, last_warn):
                 return False
             raise
         state["_queue_failures"] = 0
-        save_state(state)  # admission clocks survive --once and failures later in the tick
-        for i in q:
-            if "deps_ok" not in i: i["deps_ok"] = deps_met(i)
-        metrics = verify_metrics(state)
-        for item in q:
-            if item.get("verify"):
-                # Use the order time, including time spent waiting while AD was stopped.
-                queued = item.get("queued")
-                metrics["cards"].setdefault(str(item["n"]), {"issue": item["n"], "queued": now if queued is None else queued})
-        # Dispatch reads labels in score order before freshen_queue uses the remaining
-        # read budget. Prefetching by issue number can starve a high-scoring old card.
+        try:
+            for i in q:
+                if "deps_ok" not in i: i["deps_ok"] = deps_met(i)
+            metrics = verify_metrics(state)
+            for item in q:
+                if item.get("verify"):
+                    # Use the order time, including time spent waiting while AD was stopped.
+                    queued = item.get("queued")
+                    metrics["cards"].setdefault(str(item["n"]), {"issue": item["n"], "queued": now if queued is None else queued})
+            # Dispatch reads labels in score order before freshen_queue uses the remaining
+            # read budget. Prefetching by issue number can starve a high-scoring old card,
+            # so the early snapshot counts the rows as read; the authoritative freshen_queue
+            # pass runs after the dispatches.
+            blocked = sum(not i["deps_ok"] for i in q)
+            publisher.publish(res=res, ready=len(q) - blocked, blocked=blocked, phase="deps")
+        finally:
+            # persist right after a successful read even if the steps above raise; the normal path
+            # stamps the fresh counts first so the snapshot is never staler than the saved state
+            save_state(state)
         return True
 
     def base_commit():
@@ -3202,21 +3419,27 @@ def tick(lanes, state, last_warn):
             # never count it as a stale skip and never dispatch on unverified labels
             log_unverified(c["n"], status, detail, "kept in queue (not dispatched this tick)")
         if not pick: return "no-card"
+        blocked = sum(not i["deps_ok"] for i in q)
+        publisher.publish(res=res, ready=len(q) - blocked, blocked=blocked, phase="dispatch")
         commit = base_commit()
         gh(["issue", "edit", str(pick["n"]), "--add-label", "in-progress"])
         try: run, ver = dispatch(L, cfg, pick, commit)
         except Exception as e:
             dispatch_failed(L, cfg, pick, e, busy=bool(LANE_BUSY_RE.search(str(e))))
             return "no-capacity"
-        q.remove(pick); state[L] = {"issue": pick["n"], "run": run, "host": cfg["host"], "base": commit, "at": time.strftime("%F %T"), "verify": ver, "class": "verify" if pick.get("verify") else "work", "hot": hot_files(pick.get("body", ""))}
-        state.get("_pool_entered_at", {}).pop(str(pick["n"]), None)
-        metrics = verify_metrics(state)
-        # The snapshot and saved state must reflect the slot just occupied.
-        if AD_VERIFY_SHARE_ENABLED: metrics["deficit"] = queue_class_limits(lanes, state, idle)[0]
-        metrics["dispatches"]["all"] += 1
-        if pick.get("verify"):
-            metrics["dispatches"]["verify"] += 1
-            record_verify_time(state, pick["n"], "dispatched", time.time())
+        q.remove(pick)
+        record = {"issue": pick["n"], "run": run, "host": cfg["host"], "base": commit, "at": time.strftime("%F %T"), "verify": ver, "class": "verify" if pick.get("verify") else "work", "hot": hot_files(pick.get("body", ""))}
+        with publisher._lock:
+            state[L] = record
+            state.setdefault("_pool_entered_at", {}).pop(str(pick["n"]), None)
+            metrics = verify_metrics(state)
+            # The snapshot and saved state must reflect the slot just occupied.
+            if AD_VERIFY_SHARE_ENABLED: metrics["deficit"] = queue_class_limits(lanes, state, idle)[0]
+            metrics["dispatches"]["all"] += 1
+            if pick.get("verify"):
+                metrics["dispatches"]["verify"] += 1
+                record_verify_time(state, pick["n"], "dispatched", time.time())
+            publisher.record_dispatch(L, record)
         # Stop this lane's gap at its own successful dispatch. Later lanes may take
         # minutes to assign; their work cannot extend an already occupied lane's gap.
         closed = idle_close(state, L, time.time(), last_alive, tick_started_at=now)
@@ -3258,12 +3481,18 @@ def tick(lanes, state, last_warn):
         if freed:
             freed_lanes.add(L)
             outcomes[L] = give_card(L, lanes[L], remote_idle=False)
+        # The harvest of one lane can take minutes: refresh after every lane.
+        publisher.publish(res=res, phase="harvest")
+    queue_ok = tick_queue()
     update_busy_stale(lanes, state, res)
-    if not tick_queue():
-        st = status_snapshot(lanes, state, res, None, None)
-        st["_queue_error"] = queue_error or "queue unavailable"
-        with open(f"{D}/lanes-status.json", "w") as stream:
-            json.dump(st, stream, ensure_ascii=False, indent=1)
+    if not queue_ok:
+        with publisher._lock:
+            st = status_snapshot(lanes, state, res, None, None, records)
+            if isinstance(st, dict):
+                st["_phase"] = "queue"
+                st["_tick_at"] = publisher.tick_at or st.get("_at")
+            st["_queue_error"] = queue_error or "queue unavailable"
+            write_status_snapshot(publisher.path, st, publisher.logger)
         return last_warn
     # 2) the lanes that were idle before this tick
     for L, cfg in lanes.items():
@@ -3298,11 +3527,13 @@ def tick(lanes, state, last_warn):
     details = blocked_details(q, hot_blocked, memory_blocks, state)
     blocked = len(details)
     ready = len(q) - blocked
+    publisher.publish(res=res, ready=ready, blocked=blocked, phase="queue")  # the queue counters are measured
     # refill when the queue is short, or when some backend's lanes could not all be fed (counting cross-pin fallback)
     short = {b: sum(c["backend"] == b for c in lanes.values()) - sum(1 for i in q if i.get("deps_ok", True) and i["n"] not in hot_blocked and i["n"] not in memory_blocks and can_take(b, i, verify_gate=False))
              for b in {c["backend"] for c in lanes.values()}}
     starve = max(short.values(), default=0)
     if ready < LOW or starve > 0:
+        publisher.publish(res=res, ready=ready, blocked=blocked, phase="refill")
         why = f"queue low ({ready} < {LOW})" if ready < LOW else f"backend starved ({', '.join(f'{b} short {k}' for b, k in short.items() if k > 0)})"
         if mint_paused(scopes):
             if time.time() - last_warn > 600:
@@ -3312,16 +3543,15 @@ def tick(lanes, state, last_warn):
             if filed: log(f"{why}: filed {len(filed)} issue(s) from backlog: {' '.join(filed)}")
             elif time.time() - last_warn > 600:
                 log(f"WARNING queue low: {ready} dispatchable lane-ready issue(s) left (+{blocked} waiting on 依赖), backlog/ empty (threshold {LOW})"); last_warn = time.time()
+        publisher.publish(res=res, ready=ready, blocked=blocked, phase="refill")  # the (slow) refill is done
     state["_tick_at"] = now
     observe_verify_verdicts(state)
     save_state(state)
     refresh_minimax_burn()  # the burn watchdog refreshes the reading the status shows (Refs #1671)
-    st = status_snapshot(lanes, state, res, ready, blocked, records)
-    st["_memory_blocks"] = memory_blocks
-    st["_blocked_details"] = details
-    st["_blocked_reasons"] = {reason: sum(d["reason"] == reason for d in details) for reason in ("deps", "hot_file", "memory")}
-    with open(f"{D}/lanes-status.json", "w") as stream:
-        json.dump(st, stream, ensure_ascii=False, indent=1)
+    with publisher._lock:
+        publisher.memory_blocks = memory_blocks
+        publisher.blocked_details = details
+        publisher.publish(res=res, ready=ready, blocked=blocked, phase="idle")
     return last_warn
 
 def file_issue(text, extra=()):
@@ -3439,14 +3669,14 @@ def sleep_chunk(total=TICK, chunk=5):
     """Sleep between ticks in chunks <= 5s, refreshing heartbeat on each step to prevent suspend freeze (Refs #906)."""
     rem = max(0, total)
     if rem == 0:
-        open(f"{D}/heartbeat", "w").write(time.strftime("%F %T") + "\n")
+        write_heartbeat()
         return
     while rem > 0:
-        open(f"{D}/heartbeat", "w").write(time.strftime("%F %T") + "\n")
+        write_heartbeat()
         step = min(rem, chunk)
         time.sleep(step)
         rem -= step
-    open(f"{D}/heartbeat", "w").write(time.strftime("%F %T") + "\n")
+    write_heartbeat()
 
 
 SHADOW_VERDICT_LOG = f"{D}/shadow-verdicts.jsonl"  # append-only tester shadow log (Refs #1986)
