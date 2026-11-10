@@ -1519,7 +1519,7 @@ COMMAND_RE = re.compile(r"(?:^|[;&]\s*)(?:\./" + SCRIPT_WORD + r"|(?:bash|sh|pyt
 FILE_TOKEN_RE = re.compile(r"(?<![A-Za-z0-9_./-])(?:[A-Za-z0-9_.-]+/)+[A-Za-z0-9_.-]+|(?<![A-Za-z0-9_./-])[A-Za-z0-9_-]+\.[A-Za-z0-9]+")
 COMMAND_FILE_RE = re.compile(r"(?:[A-Za-z0-9_.-]+/)+[A-Za-z0-9_.-]+|[A-Za-z0-9_-]+\.(?:py|sh|ts|js|json|md|toml|yml|yaml)\b")
 
-VAGUE_ACCEPTANCE_RE = re.compile(r"功能正常|正常工作|人工|手工|手动|确认|或|至少|酌情|视情况|大致|基本|可能|\bor\b", re.I)
+VAGUE_ACCEPTANCE_RE = re.compile(r"功能正常|正常工作|人工|手工|手动|或|至少|酌情|视情况|大致|可能|\bor\b", re.I)
 
 def command_text(line):
     return re.sub(r"^(?:验收|acceptance)\s*[:：]\s*", "", line.strip(), flags=re.I).strip("`").lstrip("$").strip()

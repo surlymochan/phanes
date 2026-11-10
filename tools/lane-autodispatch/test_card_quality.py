@@ -117,6 +117,11 @@ class CardQualityTickTests(unittest.TestCase):
         with mock.patch.object(AD, "sh", side_effect=lambda cmd, **k: (128, "", "fatal: transient")):
             self.assertIsNone(AD.card_quality(body))
 
+    def test_a_confirming_acceptance_with_a_command_reaches_dispatch(self):
+        dispatched, edits = self.run_tick("验收：确认所有测试通过\n```sh\npytest -q\n```")
+        self.assertEqual(len(dispatched), 1)
+        self.assertFalse(any("--remove-label" in e and "lane-ready" in e for e in edits))
+
     def test_valid_card_reaches_dispatch_without_review_round_mutation(self):
         body = ("基于分支 `feature/foo`，新增 `new_file.py`。验收：所有测试通过。\n\n"
                 "```sh\npython3 -m unittest tools.tests.test_sample\n```")

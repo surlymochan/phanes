@@ -53,6 +53,8 @@ class CardQualityTest(TestCase):
         for body in ('验收：功能正常\n```sh\npytest -q\n```', '验收：pytest -q 或人工确认', '验收：\n```sh\npytest --help\n```', '验收：\n```sh\npytest --collect-only\n```', '验收：通过或人工确认', '验收：功能正常', 'git status', 'python', '```json\n{"test":true}\n```', '```text\npytest tests\n```', './scripts/deploy.sh', 'bash deploy.sh'):
             with self.subTest(body=body):
                 self.assertIsNotNone(ad.card_quality(body))
+        self.assertIsNone(ad.card_quality('验收：确认所有测试通过\n```sh\npytest -q\n```'))
+        self.assertIsNone(ad.card_quality('验收：基本功能的测试全部通过\n```sh\npytest -q\n```'))
         for body in ('./scripts/test.sh', 'python3 -m unittest tests', 'bash test.sh', 'pytest tests', '验收：`python3 -m unittest`'):
             self.assertIsNone(ad.card_quality(body))
 
