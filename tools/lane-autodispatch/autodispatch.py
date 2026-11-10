@@ -1603,6 +1603,52 @@ def is_review_lane(lane):
     """The review lanes a verify card may be dispatched to (CX2/CX4/CX5)."""
     return bool(re.fullmatch(r"CX(?:2|4|5)(?:[-_].*)?", str(lane), re.I))
 
+# --- pi fix rounds run at the thinking level of their round (Refs #1847) -------------------
+# The thinking level a pi fix round runs at, by fix round: the first fix round runs at "high", a
+# later round only has to apply the reviewer's notes, so the level steps down; the last entry
+# covers every further round. A review card keeps the lane's own level.
+FIX_THINKING_LEVELS = ("high", "medium", "low")
+# The marker the review flow writes into the issue body when a review asks for changes
+# ("Review round N (...) on PR #x head ... returned CHANGES"). It names the fix round a card
+# belongs to, so the dispatcher can pick the thinking level of that round (Refs #1847).
+FIX_ROUND_RE = re.compile(
+    r"^Review round ([1-9]\d*) \([^\r\n]+\) on PR #\d+ head `[^`\r\n]+` "
+    r"returned (CHANGES|APPROVED)\.", re.M)
+
+def fix_round_of(body):
+    """Use the latest review result; only a CHANGES result requests a fix round."""
+    # Only a formal result counts: examples inside fenced code blocks (an unclosed fence runs to the
+    # end) and quoted lines are not results of the review. Fences follow CommonMark: the closing
+    # fence uses the opening character, is at least as long, and carries only whitespace after it.
+    kept, fence = [], None
+    for line in (body or "").splitlines():
+        if fence is None:
+            opening = re.match(r"^ {0,3}(`{3,}|~{3,})", line)
+            if opening and not (opening[1][0] == "`" and "`" in line[opening.end():]):
+                fence = opening[1]
+                continue
+            if not re.match(r"^ {0,3}>", line): kept.append(line)
+        elif re.match(r"^ {0,3}" + re.escape(fence[0]) + "{" + str(len(fence)) + r",}[ \t]*$", line):
+            fence = None
+    text = "\n".join(kept)
+    rounds = FIX_ROUND_RE.findall(text)
+    if not rounds or rounds[-1][1] != "CHANGES": return None
+    return int(rounds[-1][0])
+
+def fix_thinking(cfg, item):
+    """The thinking level a pi fix round runs at, or None (Refs #1847).
+
+    The Nth fix round takes the Nth level of FIX_THINKING_LEVELS (the first fix round runs at
+    "high"). Only pi lanes get a level: the other executors have no such flag, and a review card
+    keeps the lane's own level, so the review rules stay untouched.
+    """
+    if (cfg or {}).get("backend") != "pi": return None
+    if item.get("verify"): return None
+    round_no = fix_round_of(item.get("body") or "")
+    if not round_no: return None
+    return FIX_THINKING_LEVELS[min(round_no, len(FIX_THINKING_LEVELS)) - 1]
+
+
 def review_lanes(lanes):
     """The review lanes of a lane set, in the caller's order (CX2/CX4/CX5)."""
     return [lane for lane in lanes if is_review_lane(lane)]
@@ -2607,6 +2653,10 @@ def dispatch(lane, cfg, item, base):
     ver = verify_of(item["body"]); title = f"#{n} {item['title']}"[:120]
     assign = (f"{F} lane assign {lane} --task-file /tmp/task-{lane}.md --base {base} --budget-minutes {BUDGET} --title {shlex.quote(title)}"
               + (f" --verify {shlex.quote(ver)}" if ver else ""))
+    # A pi fix round must carry its level even when the host runs an older swrm. A
+    # rejected flag fails dispatch; retrying without it would silently change the level.
+    thinking = fix_thinking(cfg, item)
+    if thinking: assign += f" --thinking {shlex.quote(thinking)}"
     # Refs #1810: the base commit must exist in the target repo before the lane is assigned. The
     # target repo lags behind upstream, so a missing base is fetched and the check is repeated; the
     # check itself is not relaxed (a base that stays missing is still an error).

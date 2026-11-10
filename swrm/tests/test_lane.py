@@ -183,7 +183,7 @@ class LaneTests(unittest.TestCase):
                 pass
         self.tmp.cleanup()
 
-    def set_config(self, backend=None, model=None, fallback_models=None):
+    def set_config(self, backend=None, model=None, fallback_models=None, thinking=None):
         if backend:
             self.backend = backend
         fixture = {"codex": "fake_app_server.py", "cursor": "fake_cursor_acp.py",
@@ -199,6 +199,7 @@ class LaneTests(unittest.TestCase):
             **({"fallback_models": fallback_models} if fallback_models is not None else {}),
             **({"effort": "xhigh"} if self.backend == "codex" else
                ({"provider": "fake-provider"} if self.backend == "pi" else {})),
+            **({"thinking": thinking} if thinking is not None else {}),
             "repo": str(self.repo), "binary": str(binary),
         }]}))
         if self.backend in ("cursor", "hermes", "copilot"):
@@ -386,6 +387,54 @@ class LaneTests(unittest.TestCase):
         result = json.loads((self.data / "runs" / run_id / "result.json").read_text())
         self.assertEqual(result["workspace"]["base"], expected_head)
         self.assertTrue(wt.is_dir())
+
+    def child_command(self, pid=None):
+        """The command line of a lane process (what `ps` shows)."""
+        pid = pid or self.lane_state().get("child_pid")
+        self.assertTrue(pid, "the lane has no resident executor process")
+        # `ps` cuts the command line at 80 columns when its output is not a terminal, so the wide
+        # form is the one that shows the whole command line of a lane process.
+        command = subprocess.run(["ps", "-ww", "-o", "command=", "-p", str(pid)], text=True,
+                                 capture_output=True, check=False).stdout
+        self.assertTrue(command.strip(), f"no process command line for pid {pid}")
+        return command
+
+    def pi_commands(self, level=None):
+        """The command lines of the pi processes of this lane - what `ps` shows on the host."""
+        listing = subprocess.run(["ps", "-ww", "-eo", "pid=,command="], text=True, capture_output=True,
+                                 check=False).stdout
+        binary = str(FIXTURES / "fake_pi_rpc.py")
+        found = []
+        for line in listing.splitlines():
+            # The pi process is the one whose second argument is the fixture itself: the pid, the
+            # interpreter and the binary are the first three fields of the line.
+            fields = line.split()
+            if len(fields) < 3 or fields[2] != binary:
+                continue
+            if level is None or f"--thinking {level}" in line:
+                found.append(line.strip())
+        return found
+
+    def test_pi_lane_starts_pi_at_the_thinking_level_of_its_lane(self):
+        """A lane with a thinking level starts pi with it (Refs #1847)."""
+        self.set_config("pi", thinking="high")
+        self.start_lane()
+        self.wait_for(lambda: self.lane_state().get("child_pid"), description="the lane child to start")
+        self.assertIn("--thinking high", self.child_command())
+
+    def test_pi_run_uses_the_thinking_level_of_the_run(self):
+        """A run that asks for a thinking level starts pi with it (Refs #1847)."""
+        self.set_config("pi")
+        self.start_lane()
+        # The prompt keeps the turn open, so the process of the run stays visible.
+        self.assign("LANE_TEST_WAIT pi thinking level", "--thinking", "high")
+        # pi reads its thinking level once, at start-up: the level of the run is in the command
+        # line of the process the run uses.
+        self.wait_for(lambda: self.pi_commands("high") or None, timeout=15,
+                      description="a pi process started with --thinking high")
+        # The lane keeps its own level: the resident child of the lane runs without one, so the
+        # review tasks of the same lane are not touched by the fix round.
+        self.assertNotIn("--thinking", self.child_command())
 
     def test_serve_restart_resumes_the_in_flight_run(self):
         self.set_config("pi")
@@ -1016,7 +1065,7 @@ class LaneTests(unittest.TestCase):
                  "fs sandbox helper failed: bwrap: Can't mkdir /var/lib/gorelay-codex/control: Permission denied")
         self.env["FAKE_APP_SERVER_THREAD_START_ERROR"] = error
         self.start_lane()
-        run_id = self.assign("reproduce gorelay codex sandbox initialization failure")
+        run_id = self.assign("reproduce <host> codex sandbox initialization failure")
         state = self.wait_run(run_id)
         result = json.loads((self.data / "runs" / run_id / "result.json").read_text())
         self.assertEqual(state["status"], "failed")
