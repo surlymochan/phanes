@@ -254,6 +254,46 @@ class FleetHealthIntegrationTest(unittest.TestCase):
                     self.assertIn("stale", output.getvalue())
                     self.assertIn(STALLED_AT, output.getvalue())
 
+    def health_report(self, as_json):
+        """Run `fleet health` for one healthy host so only the control plane can fail it."""
+        row = {"host": "h1", "status": "ok", "decision": "none", "reason": "ok", "metrics": {}, "triggers": []}
+        args = argparse.Namespace(fleet_cmd="health", json=as_json, hosts="h1", apply=False)
+        with mock.patch.object(self.swrm, "fleet_config", return_value={"h1": {}}), \
+                mock.patch.object(self.swrm, "fleet_health_check", return_value=dict(row)), \
+                mock.patch.object(self.swrm, "fleet_health_state_save"), \
+                mock.patch.object(self.swrm, "fleet_health_pause_records", return_value={}), \
+                mock.patch.object(self.swrm, "fleet_health_holds", return_value={"health": False, "foreign": False}), \
+                contextlib.redirect_stdout(io.StringIO()) as output:
+            self.swrm.cmd_fleet(args)
+        return output.getvalue()
+
+    def test_fleet_health_reports_a_stale_snapshot_in_text_and_json(self):
+        """A healthy host list must not hide a frozen snapshot (Refs #1697)."""
+        report = json.loads(self.health_report(True))
+        self.assertFalse(report["ok"])
+        self.assertEqual(report["status"], "degraded")
+        self.assertEqual(report["control_plane"]["snapshot"]["at"], STALLED_AT)
+        self.assertEqual(report["control_plane"]["alerts"][0]["kind"], "lanes-snapshot-stale")
+        text = self.health_report(False)
+        self.assertIn("stale", text)
+        self.assertIn(STALLED_AT, text)
+        self.assertIn("status=degraded", text)
+
+    def test_fleet_health_reports_a_dead_writer_with_a_fresh_snapshot(self):
+        self.snapshot.write_text(json.dumps({"_at": time.strftime("%F %T")}))
+        (self.state / "autodispatch.pid").write_text(json.dumps({"pid": dead_pid()}))
+        report = json.loads(self.health_report(True))
+        self.assertFalse(report["ok"])
+        self.assertEqual(report["control_plane"]["writer"]["status"], "dead")
+
+    def test_fleet_health_stays_ok_with_a_fresh_snapshot_and_live_writer(self):
+        self.snapshot.write_text(json.dumps({"_at": time.strftime("%F %T")}))
+        (self.state / "autodispatch.pid").write_text(json.dumps({"pid": os.getpid()}))
+        (self.state / "heartbeat").write_text(str(time.time()))
+        report = json.loads(self.health_report(True))
+        self.assertTrue(report["ok"], report)
+        self.assertEqual(report["status"], "ok")
+
     def test_health_cli_detects_dead_writer_with_fresh_heartbeat(self):
         self.snapshot.write_text(json.dumps({"_at": time.strftime("%F %T")}))
         (self.state / "autodispatch.pid").write_text(json.dumps({"pid": dead_pid()}))

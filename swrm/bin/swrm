@@ -11280,12 +11280,26 @@ def cmd_fleet_health(args):
                             "status": row["status"], "updated_at": now}
         rows.append(row)
     fleet_health_state_save(remembered)
-    report = {"ok": all(row["status"] == "ok" for row in rows),
-              "status": fleet_health_status(rows), "applied": bool(args.apply),
+    # The control plane (lanes-status snapshot and its dispatcher) is part of fleet health: a
+    # frozen snapshot or a dead writer must not read as healthy (Refs #1697).  A host without
+    # a control plane at all (no snapshot, writer unknown) has nothing to judge.
+    probe = lanes_health_probe()
+    control_plane = lanes_health_report(probe)
+    judged = control_plane["snapshot"]["status"] != "missing" or control_plane["writer"]["status"] != "unknown"
+    plane_ok = control_plane["ok"] or not judged
+    status = fleet_health_status(rows)
+    if not plane_ok and status == "ok":
+        status = "degraded"
+    report = {"ok": all(row["status"] == "ok" for row in rows) and plane_ok,
+              "status": status, "applied": bool(args.apply),
               "thresholds": limits, "hosts": rows}
+    if judged:
+        report["control_plane"] = control_plane
     if args.json:
         print(json.dumps(report, indent=2, ensure_ascii=False))
         return report
+    if judged:
+        print(probe.render(control_plane["snapshot"], control_plane["writer"], control_plane["alerts"]))
     for row in rows:
         print(f"{row['host']}  {row['status']:<11}  {row['reason']}")
         metrics = " ".join(f"{key}={value}" for key, value in row["metrics"].items())
