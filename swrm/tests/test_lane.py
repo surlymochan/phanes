@@ -1831,6 +1831,23 @@ class CodexHealthProbeTests(unittest.TestCase):
                 self.assertIn("thread/unsubscribe failed", "".join(
                     call.args[0] for call in stderr.write.call_args_list))
                 self.assertFalse(child.health_waiters)
+                for attempt in range(49):
+                    self.state["server_probe_at"] = 0
+                    with mock.patch("sys.stderr"):
+                        self.assertIs(self.xs.lane_codex_health_probe(self.lane, child, self.policy), child)
+                    self.assertEqual(self.state["server_alive"], attempt == 0)
+                self.assertEqual(self.state["server_release_failures"], 50)
+                self.assertIn("session release failing", self.state["server_probe_error"])
+                self.assertEqual(self.session_stats(child)["created"], 1)
+                child.send({"id": "recover", "method": "fixture/release-recover"})
+                child.wait_response("recover", 2)
+                self.state["server_probe_at"] = 0
+                self.xs.lane_codex_health_probe(self.lane, child, self.policy)
+                self.assertEqual(self.state["server_release_failures"], 0)
+                self.assertTrue(self.state["server_alive"])
+                self.state["server_probe_at"] = 0
+                self.xs.lane_codex_health_probe(self.lane, child, self.policy)
+                self.assertEqual(self.session_stats(child), {"created": 2, "released": 2, "live": 0})
 
     def test_failed_validation_stays_paused_and_alerts(self):
         marker = self.root / "first-server"

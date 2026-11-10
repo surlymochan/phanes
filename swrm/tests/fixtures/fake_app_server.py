@@ -71,6 +71,10 @@ def start_thread(req):
 def session_control(req):
     global released
     method = req.get("method")
+    if method == "fixture/release-recover":
+        os.environ.pop("FAKE_APP_SERVER_RELEASE_FAILURE", None)
+        response(req)
+        return True
     if method == "fixture/session-stats":
         response(req, {"created": created, "released": released,
                        "live": len(live_threads)})
