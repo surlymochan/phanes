@@ -145,21 +145,21 @@ parameterized value (`composer-2.5[fast=true]`). Ambiguity fails with the matche
 
 ### Fleet, batch, and remote verification
 
-Configure `$OPENSWARM_HOME/fleet.json` with `hosts`: each has `name`, `kind` (`local`, `ssh`, `instabox`),
-`ssh` alias or `box` when remote, optional `swrm` executable, and `repos: {"project":"~/work/project"}`.
+Configure `$OPENSWARM_HOME/fleet.json` with `hosts`: each has `name`, `kind` (`local`, `ssh`),
+`ssh` alias when remote, optional `swrm` executable, and `repos: {"project":"~/work/project"}`.
 Use the same logical repo name on all hosts; local defaults to the current checkout. Install the same CLI version
 and authenticated executors on the hosts. Full config example: [README](README.md#fleet-and-batch-dispatch).
 
 ```bash
-$XS fleet status --json                  # never wakes paused instaboxes
+$XS fleet status --json                  # fleet reachability and capacity
 $XS fleet exec worker -- lane status     # arbitrary swrm arguments, stdout/rc forwarded
-$XS batch --repo project --cards ./cards --hosts worker,sandbox --per-host 1 \
+$XS batch --repo project --cards ./cards --hosts worker --per-host 1 \
   --backend pi --model cheap-model --budget-minutes 20 --detach
 $XS batch status <batch-id>
 $XS verify-remote --from worker --run <run-id> --on local --verify 'pytest -q'
 ```
 
-Batch wakes each chosen instabox once, checks repos, syncs `--base` (default local HEAD), queues sorted cards
+Batch checks repos, syncs `--base` (default local HEAD), queues sorted cards
 round-robin, polls without Monitor, and fetches each result branch before deleting it on the executor host.
 Bundles travel over the transport; no pushes or git remotes. Optional backend/model/effort/verify flags pass to runs.
 Read `batches/<id>/summary.json` or `summary.md`; detached progress is in `batch.out`. Failed runs with commits
@@ -289,7 +289,7 @@ Grouped by what the command does. `swrm <command> --help` lists every flag.
 | `lane down` | Stop lane turns, children, and supervisors. | `$XS lane down C1 K1` |
 | `lane launchd-plist` | Print an uninstalled LaunchAgent plist for a lane. | `$XS lane launchd-plist C1` |
 | `lane systemd-unit` | Print an uninstalled systemd unit for a lane. | `$XS lane systemd-unit K1` |
-| `batch` | Queue task cards across fleet hosts and collect their branches. | `$XS batch --repo project --cards ./cards --hosts worker,sandbox --per-host 1 --backend pi --budget-minutes 20 --detach` |
+| `batch` | Queue task cards across fleet hosts and collect their branches. | `$XS batch --repo project --cards ./cards --hosts worker --per-host 1 --backend pi --budget-minutes 20 --detach` |
 | `batch status` | Show the state of one batch. | `$XS batch status <batch-id>` |
 | `bus init` | Create the bus labels, issue template, and protocol README. | `$XS bus init acme/swrm-bus` |
 | `bus status` | Show open bus issues with their executor and age. | `$XS bus status --json` |
@@ -312,7 +312,7 @@ Grouped by what the command does. `swrm <command> --help` lists every flag.
 | `ingest-claude` | Record Claude plan usage from the statusline hook or from flags. | `$XS ingest-claude --five-hour 80 --seven-day 40` |
 | `fleet status` | Show reachability, paused hosts, lanes, and active runs. | `$XS fleet status --json` |
 | `fleet exec` | Run an swrm command on another host; stdout and the exit code are forwarded. | `$XS fleet exec worker -- lane status` |
-| `fleet ledger pull` | Merge the host ledgers into one fleet ledger file. | `$XS fleet ledger pull --hosts worker,sandbox` |
+| `fleet ledger pull` | Merge the host ledgers into one fleet ledger file. | `$XS fleet ledger pull --hosts worker` |
 
 ### Learn
 
@@ -357,7 +357,7 @@ the lesson or pattern catalog.
    accept or reject decision.
 
    ```bash
-   $XS fleet ledger pull --hosts worker,sandbox
+   $XS fleet ledger pull --hosts worker
    $XS ledger ingest --repo acme/project --since 30
    $XS ledger accept <run-id> --reason "Verified on host"
    ```
