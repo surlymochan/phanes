@@ -9,18 +9,18 @@ BLOCKER mapping (lane review of PR #1778, round 2).  The line numbers are the
 ones of the delivered files; the results are the ones of the local run.
 
 * B1 — a dead broker is really restarted and the dispatch continues:
-  ``swrm/policy.json:238`` names the restart command of the deployment
+  ``swrm/policy.json:250`` names the restart command of the deployment
   (``pi.broker.restart_cmd`` = ``bin/pi-broker-restart``),
   ``swrm/bin/pi-broker-restart:90`` starts the broker again on the probed
-  socket, and ``swrm/bin/swrm:3671`` (``pi_broker_settings``),
-  ``swrm/bin/swrm:3707`` (``pi_broker_restart_argv``) and
-  ``swrm/bin/swrm:3747`` (``pi_broker_restart``) run it detached, hand it the
+  socket, and ``swrm/bin/swrm:3739`` (``pi_broker_settings``),
+  ``swrm/bin/swrm:3775`` (``pi_broker_restart_argv``) and
+  ``swrm/bin/swrm:3815`` (``pi_broker_restart``) run it detached, hand it the
   socket and report the reason of a failed restart.  The recovery itself runs
-  before every dispatch (``swrm/bin/swrm:3804`` ``pi_broker_ensure_ready``,
-  ``swrm/bin/swrm:5282`` ``exec_pi``, ``swrm/bin/swrm:8302`` ``lane_run_turn``)
+  before every dispatch (``swrm/bin/swrm:3872`` ``pi_broker_ensure_ready``,
+  ``swrm/bin/swrm:5606`` ``exec_pi``, ``swrm/bin/swrm:9175`` ``lane_run_turn``)
   and the interrupted host reaches the health output
-  (``swrm/bin/swrm:3846`` ``pi_broker_channel_status``,
-  ``swrm/bin/swrm:10033`` ``fleet_pi_channel_alert``).  Tests:
+  (``swrm/bin/swrm:3917`` ``pi_broker_channel_status``,
+  ``swrm/bin/swrm:11158`` ``fleet_pi_channel_alert``).  Tests:
   ``DefaultBrokerRestartTests.test_the_default_restart_command_brings_the_broker_back``,
   ``DefaultBrokerRestartTests.test_the_default_restart_command_is_the_one_of_the_deployment``,
   ``DefaultBrokerRestartTests.test_the_restart_command_reports_why_it_failed``,
@@ -799,7 +799,9 @@ class BrokerDispatchIntegrationTests(unittest.TestCase):
 
     def git(self, *args):
         return subprocess.run(["git", *args], cwd=self.repo, check=True,
-                              capture_output=True, text=True).stdout.strip()
+                              capture_output=True, text=True, env=dict(os.environ,
+                                  GIT_AUTHOR_NAME="Broker Test", GIT_AUTHOR_EMAIL="broker-test@example.invalid",
+                                  GIT_COMMITTER_NAME="Broker Test", GIT_COMMITTER_EMAIL="broker-test@example.invalid")).stdout.strip()
 
     def write_policy(self, broker):
         # The lane uses a fake executor, so the isolation of a Pi lane is off; the
@@ -878,11 +880,9 @@ class BrokerDispatchIntegrationTests(unittest.TestCase):
         # with a vague error.
         self.write_policy({"restart_cmd": self.start_broker_script(500), "attempts": 2,
                            "socket_wait_s": 5, "restart_grace_s": 5, "backoff_base_s": 0.01})
-        self.start_lane()
-        run_id = self.assign()
-        result = self.wait_run(run_id)
-        self.assertEqual(result["status"], "failed", result)
-        self.assertEqual(result["error_class"], "broker_unavailable")
+        result = self.cli("lane", "up", "P1")
+        self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("pi broker unavailable", result.stdout + result.stderr)
         self.assertEqual(self.prompts(), [], "no prompt reached the executor")
 
     def test_a_dead_broker_without_a_restart_keeps_the_dispatch_blocked(self):
@@ -890,11 +890,9 @@ class BrokerDispatchIntegrationTests(unittest.TestCase):
         # the lane is blocked with the error class of the broker.
         self.write_policy({"restart_cmd": "false", "attempts": 1, "socket_wait_s": 0.2,
                            "restart_grace_s": 0.5, "backoff_base_s": 0.01})
-        self.start_lane()
-        run_id = self.assign()
-        result = self.wait_run(run_id)
-        self.assertEqual(result["status"], "failed", result)
-        self.assertEqual(result["error_class"], "broker_unavailable")
+        result = self.cli("lane", "up", "P1")
+        self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("pi broker unavailable", result.stdout + result.stderr)
         self.assertEqual(self.prompts(), [], "no prompt reached the executor")
 
 
@@ -991,6 +989,67 @@ class SandboxRecoveryTests(unittest.TestCase):
                 self.assertFalse(thread.is_alive())
             self.assertEqual(len(results), 2)
             self.assertTrue(all(not result["ok"] for result in results))
+
+    def test_concurrent_dispatches_are_released_after_one_validation(self):
+        with tempfile.TemporaryDirectory() as directory:
+            state = os.path.join(directory, "state.json")
+            entered, release = threading.Event(), threading.Event()
+            results = []
+            recovery.write_state(state, {"hosts": {"host": {"socket": "/a", "interrupted": True}}})
+            def validate():
+                self.assertTrue(recovery.host_state(recovery.read_state(state), "host", "/a")["interrupted"])
+                entered.set()
+                self.assertTrue(release.wait(5))
+                return True, "remote ready"
+            validation = mock.Mock(side_effect=validate)
+            def dispatch():
+                results.append(recovery.BrokerRecovery(
+                    "/a", host="host", state_path=state, attempts=1,
+                    probe=lambda: True, validate=validation).ensure_ready())
+            threads = [threading.Thread(target=dispatch) for _ in range(4)]
+            try:
+                threads[0].start()
+                self.assertTrue(entered.wait(5))
+                for thread in threads[1:]:
+                    thread.start()
+                self.assertEqual(results, [])
+            finally:
+                release.set()
+                for thread in threads:
+                    if thread.ident is not None:
+                        thread.join(5)
+            self.assertTrue(all(not thread.is_alive() for thread in threads))
+            validation.assert_called_once_with()
+            self.assertEqual(len(results), 4)
+            self.assertTrue(all(result["ok"] and not result["interrupted"] for result in results))
+            self.assertFalse(recovery.host_state(recovery.read_state(state), "host", "/a")["interrupted"])
+
+    def test_proxy_restart_never_starts_a_local_broker(self):
+        loader = importlib.machinery.SourceFileLoader("broker_restart_test", str(ROOT / "bin" / "pi-broker-restart"))
+        spec = importlib.util.spec_from_loader(loader.name, loader)
+        restart = importlib.util.module_from_spec(spec)
+        loader.exec_module(restart)
+        with tempfile.TemporaryDirectory() as directory:
+            path = pathlib.Path(directory) / "broker.sock"
+            pathlib.Path(str(path) + ".proxy").touch()
+            for connected in (True, False):
+                with self.subTest(connected=connected), \
+                     mock.patch.object(restart.pathlib.Path, "home", return_value=pathlib.Path(directory)), \
+                     mock.patch.object(restart.socket, "socket") as socket_factory, \
+                     mock.patch.object(restart, "node_binary") as node, \
+                     mock.patch.object(restart, "clear_stale_socket") as clear, \
+                     mock.patch.object(restart.os, "execv") as execute, \
+                     mock.patch.dict(os.environ):
+                    if not connected:
+                        socket_factory.return_value.connect.side_effect = OSError("remote unavailable")
+                    restart.main(["pi-broker-restart", str(path)])
+                    node.assert_not_called()
+                    clear.assert_not_called()
+                    if connected:
+                        execute.assert_not_called()
+                    else:
+                        execute.assert_called_once_with(sys.executable, [sys.executable, str(ROOT / "bin" / "pi-worker-proxy")])
+                        self.assertEqual(os.environ["OPENSWARM_PI_WORKER_SOCKET"], str(path))
 
     def test_lane_child_recovers_before_launch_and_passes_socket(self):
         calls = []
