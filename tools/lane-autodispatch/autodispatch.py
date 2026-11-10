@@ -36,6 +36,30 @@ RULES = ("Rules: work only inside this repository worktree (the current director
 IMPL_CARD_TASK_BOOK = ("## Impl card delivery requirements\n"
                        "1. 交付说明必须对每个新增函数列出入口→调用链→数据结构来源：由谁调用、输入来自哪个真实数据结构、每个字段由谁填写。\n"
                        "2. 至少补一个 tick/集成级测试：从真实入口（tick 或等价入口）驱动到可观测结果；只测函数加 mock 不算。\n")
+# The brief of a fix round (rubric F1..F6, Refs #1851): a fix round card asks a lane to redo a
+# rejected PR, so the task book has to force the six checklist items of the rubric. The `{pr}`
+# placeholder is the PR of the round (the `rebase-pr-<N>` branch to continue from); it is replaced
+# with the number the card names, or with `<N>` when the card names none.
+FIX_ROUND_TASK_BOOK = ("## Fix round checklist (rubric F1-F6)\n"
+                       "F1 续改基点：从 `rebase-pr-{pr}` 续改（上一轮 PR 的头），先做祖先校验 "
+                       "`git merge-base --is-ancestor <base> rebase-pr-{pr}`；校验不过就停下报告，不要另起分支重写。\n"
+                       "F2 先枚举同类点：先把同类问题全部枚举出来（同样的写法、同样的调用点），再逐个修，不要只修眼前这一处。\n"
+                       "F3 逐条 BLOCKER 勾选并附证据：上一轮每条 BLOCKER 都要在交付说明里逐条勾选（`- [x]`），"
+                       "并附证据（文件:行号 + 测试名或命令输出）。\n"
+                       "F4 先写失败测试：先写能复现上一轮问题的失败测试，跑一次确认是红的，再改实现让它转绿。\n"
+                       "F5 不删既有集成测试：不得删除或跳过既有的集成测试；要改断言就改断言并写明理由。\n"
+                       "F6 复跑 A4/A2：修完复跑 A4/A2 两项验收（同一条命令、同一个环境），把结果贴进交付说明。\n")
+# The markers of a fix round card: a fix label (`fix`, `card:fix`, `type:fix`, `review-fix`…) or a
+# `## Fix Round` heading, review request or rebase branch in the body, or a fix round title.
+# An ordinary work card that merely fixes a bug is not a fix round.
+FIX_ROUND_CARD_LABELS = {"fix", "fix-round", "review-fix", "rework",
+                         "card:fix", "card:fix-round", "card:review-fix", "card:rework",
+                         "type:fix", "type:fix-round", "type:review-fix", "type:rework"}
+FIX_ROUND_HEADING_RE = re.compile(r"(?mi)^##[^\S\r\n]*(?:fix[^\S\r\n]*round|review[^\S\r\n]*fix|rework|修复轮|返修轮)[^\S\r\n]*$")
+FIX_ROUND_TITLE_RE = re.compile(r"(?i)^(?:fix[ _-]?round|review[ _-]?fix|rework|修复轮|返修轮)(?:\s*[:：]|\s+|$)")
+# The PR of the round: the branch the card names, or its `目标 PR` field.
+FIX_ROUND_PR_BRANCH_RE = re.compile(r"(?i)rebase-pr-(\d+)")
+FIX_ROUND_PR_FIELD_RE = re.compile(r"(?i)(?:目标[^\S\r\n]*PR|PR)[^\S\r\n]*[:：]?[^\S\r\n]*#?[^\S\r\n]*(\d+)")
 NON_IMPL_CARD_TYPES = {"upstream", "ops", "follow-up", "planner", "verify-intent"}
 PRIO = {"p0": 0, "p1": 1, "p2": 2}
 DISPATCH_EXCLUDING_LABELS = {"in-progress", "lane-pr", "lane-failed"}
@@ -1846,6 +1870,28 @@ def dispatch_failed(lane, cfg, item, error, busy=False):
         return
     host_fail(cfg["host"], f"dispatch #{item['n']}: {error}")
 
+def is_fix_round_card(labels, title, body):
+    """True when the card asks a lane to redo a rejected PR (rubric F1..F6, Refs #1851).
+
+    The marker is explicit: a fix label (`fix`, `card:fix`, `type:fix`, `review-fix`…), a
+    `## Fix Round` heading, review request or rebase branch in the body, or a fix round title prefix.
+    An ordinary work card that merely fixes a bug stays an ordinary work card."""
+    if set(labels) & FIX_ROUND_CARD_LABELS: return True
+    if FIX_ROUND_HEADING_RE.search(body or ""): return True
+    if "审查要求修改" in (body or "") or FIX_ROUND_PR_BRANCH_RE.search(body or ""): return True
+    return bool(FIX_ROUND_TITLE_RE.match(title or ""))
+
+def fix_round_pr(body, title=""):
+    """The PR number of the round: the `rebase-pr-<N>` branch or the `目标 PR` field of the card."""
+    for text in (body or "", title or ""):
+        match = FIX_ROUND_PR_BRANCH_RE.search(text) or FIX_ROUND_PR_FIELD_RE.search(text)
+        if match: return match.group(1)
+    return None
+
+def fix_round_brief(body, title=""):
+    """The fix round brief, with the PR of the round when the card names one."""
+    return FIX_ROUND_TASK_BOOK.replace("{pr}", fix_round_pr(body, title) or "<N>")
+
 LANE_BUSY_RE = re.compile(r"lane \S+ is busy", re.I)  # the host still runs the finished run
 CAPACITY_EXHAUSTED_RE = re.compile(r"\b(?:capacity exhausted|no (?:available )?capacity)\b", re.I)
 
@@ -1891,6 +1937,13 @@ def dispatch(lane, cfg, item, base):
     excluded_labels.add("upstream(swrm)")
     excluded_title = re.match(r"(?i)^(?:upstream|ops|follow-up|planner|verify-intent)(?:\s*[:：]|\s+|$)", item["title"])
     is_impl = not (labels & excluded_labels or excluded_title)
+    # A fix round redoes a rejected PR: its task book forces the six checklist items of the
+    # rubric (F1..F6). Only an implementation card gets them: a planner/follow-up/verify card
+    # asks for no code, so the checklist would be noise there.
+    if is_impl and is_fix_round_card(labels, item["title"], body):
+        brief = fix_round_brief(body, item["title"])
+        if brief.rstrip() not in body and FIX_ROUND_TASK_BOOK.rstrip() not in body:
+            body = f"{body.rstrip()}\n\n{brief}"
     # A heading mention or a partial block must not suppress either requirement.
     if is_impl and IMPL_CARD_TASK_BOOK.rstrip() not in body:
         body = f"{body.rstrip()}\n\n{IMPL_CARD_TASK_BOOK}"
