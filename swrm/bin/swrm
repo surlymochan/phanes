@@ -12769,10 +12769,18 @@ def card_lint_acceptance_commands(text):
     """Return the acceptance commands a card declares."""
     commands = []
     active = False
+    active_level = 0  # heading level of an acceptance section; 0 for an inline acceptance prefix
     for raw in card_lint_unfenced_lines(text):
         line = raw.strip()
-        if re.match(r"^#{1,6}\s+", line):
-            active = bool(re.match(r"^#{1,6}\s*(?:验收|acceptance)(?:\b|\s|$)", line, re.I))
+        heading = re.match(r"^(#{1,6})\s+", line)
+        if heading:
+            level = len(heading.group(1))
+            if re.match(r"^#{1,6}\s*(?:验收|acceptance)(?:\b|\s|$)", line, re.I):
+                active, active_level = True, level
+            elif active and active_level and level > active_level:
+                pass  # a sub-heading stays inside the acceptance section: its items count too
+            else:
+                active, active_level = False, 0
             continue
         prefix = next((p for p in CARD_LINT_ACCEPTANCE_PREFIXES if line.lower().startswith(p.lower())), None)
         if prefix:
@@ -12862,6 +12870,17 @@ def card_lint_weak_acceptance(commands, pattern):
     return all(matcher.match(part) for part in parts)
 
 
+def card_lint_shell_valid(command):
+    """True when the shell can parse the whole command; nothing is executed (bash -n)."""
+    try:
+        result = subprocess.run(["bash", "-n"], input=command, text=True,
+                                capture_output=True, timeout=5)
+        return result.returncode == 0
+    except (OSError, subprocess.SubprocessError):
+        # No shell to ask: at least refuse a command that ends in a dangling operator.
+        return not re.search(r"(?:&&|\|\||\|)\s*$", command.strip())
+
+
 def card_lint_measurable(item):
     """Recognize a shell command or an explicit observable comparison, never execute it.
 
@@ -12889,6 +12908,8 @@ def card_lint_measurable(item):
     except ValueError:
         return False
     if not (tokens and re.fullmatch(r"(?:[\w./+-]+/)?[A-Za-z_][\w.+-]*", tokens[0])):
+        return False
+    if not card_lint_shell_valid(command):
         return False
     # A command with only bare words after the program is prose ("pytest functionality works"):
     # require a flag, a path, a quoted argument or another technical token, except for the

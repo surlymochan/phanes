@@ -212,9 +212,24 @@ class CardPreReviewTests(unittest.TestCase):
     def test_keywords_and_vague_comparisons_do_not_prove_acceptance(self):
         for item in ("pytest 功能正常", "`pytest 功能正常`", "`功能正常`",
                      "pytest functionality works", "`pytest functionality works`",
+                     "`pytest -q &&`", "`ls docs |`", "`bun scripts/check.ts ||`",
                      "功能正常", "pytest", "输出 应为 正常", "`bun 'unfinished`"):
             with self.subTest(item=item):
                 self.assertFalse(xs.card_lint_measurable(item))
+
+    def test_items_under_a_sub_heading_of_the_acceptance_section_are_linted(self):
+        card = ("# T\nlabels: p1\ncache\n## Acceptance (measurable)\n- `bun scripts/check.ts`\n"
+                "### Additional criteria\n- 功能正常\n## 失败模式清单\n参考 docs/defect-patterns.md\n")
+        reasons, _ = xs.card_lint_card(card, xs.card_lint_rules({}))
+        details = [r["detail"] for r in reasons if r["code"] == "untestable_acceptance"]
+        self.assertEqual(len(details), 1)
+        self.assertIn("功能正常", details[0])
+
+    def test_a_same_level_heading_ends_the_acceptance_section(self):
+        card = ("# T\nlabels: p1\ncache\n## Acceptance (measurable)\n- `bun scripts/check.ts`\n"
+                "## Notes\n- 功能正常\n## 失败模式清单\n参考 docs/defect-patterns.md\n")
+        reasons, _ = xs.card_lint_card(card, xs.card_lint_rules({}))
+        self.assertFalse([r for r in reasons if r["code"] == "untestable_acceptance"])
 
     def test_each_bad_item_is_reported_beside_a_valid_command(self):
         card = ("# T\nlabels: p1\ncache\n## Acceptance (measurable)\n"
