@@ -38,7 +38,6 @@ import unittest
 
 BROKER = pathlib.Path(__file__).resolve().parents[1] / 'bin' / 'pi-minimax-broker.mjs'
 WATCHDOG = pathlib.Path(__file__).resolve().parents[2] / 'tools' / 'mm-burn-rate.py'
-SCRATCH = pathlib.Path(__file__).resolve().parents[2] / '.swrm-tmp'
 
 # The provider answer of a normal tool call: the content carries numbers that
 # look like usage, the usage object carries the real ones.
@@ -178,11 +177,12 @@ for (const answer of JSON.parse(readFileSync(0, 'utf8'))) {
                  "pi broker binds a '/'-rooted unix-domain socket by design; no Windows transport")
 class PiBrokerUsageTests(unittest.TestCase):
     def setUp(self):
-        SCRATCH.mkdir(exist_ok=True)
-        self.tmp = tempfile.TemporaryDirectory(dir=SCRATCH)
+        # One private workspace per test, outside the shared repo-local .swrm-tmp: other tests (run in
+        # parallel workers) share and clean that directory, which removed this test's logs, stderr and
+        # sockets mid-run (FileNotFoundError / "wrote no request log").  /tmp keeps the socket path short
+        # (sun_path limit) whatever TMPDIR is.
+        self.tmp = tempfile.TemporaryDirectory(prefix='pb', dir=short_tmp_root())
         self.addCleanup(self.tmp.cleanup)
-        self.sockets = tempfile.TemporaryDirectory(prefix='pb', dir=short_tmp_root())  # short: sun_path limit
-        self.addCleanup(self.sockets.cleanup)
         self.root = pathlib.Path(self.tmp.name)
         self.module = self.root / 'auth.mjs'
         self.module.write_text(
@@ -203,7 +203,7 @@ class PiBrokerUsageTests(unittest.TestCase):
     def _start_broker(self, answer, log=None, chunk_size=0):
         """Start the broker with a stubbed provider and return (socket, log)."""
         log = log or (self.root / 'requests.jsonl')
-        path = pathlib.Path(self.sockets.name) / (log.stem + '.sock')  # short dir: sun_path is limited
+        path = log.with_suffix('.sock')
         env = self._env(PI_BROKER_LOG=str(log),
                         FAKE_UPSTREAM_CHUNK_SIZE=str(chunk_size),
                         FAKE_UPSTREAM_BODY=base64.b64encode(answer).decode('ascii'))
