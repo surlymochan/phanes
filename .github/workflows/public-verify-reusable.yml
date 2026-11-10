@@ -18,17 +18,17 @@ jobs:
   public-verify:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout trusted base for pull requests
+      - name: Checkout event revision and full history
         uses: actions/checkout@v4
         with:
-          ref: ${{ github.event.pull_request.base.sha || github.sha }}
+          ref: ${{ github.sha }}
           fetch-depth: 0
           persist-credentials: false
       - name: Checkout scanner at fixed revision
         uses: actions/checkout@v4
         with:
           repository: surlymochan/phanes
-          ref: ${{ inputs.scanner_ref || github.event.pull_request.base.sha || github.sha }}
+          ref: ${{ inputs.scanner_ref || github.sha }}
           path: .public-verify-scanner
           persist-credentials: false
       - name: Scan changes and public text
@@ -49,7 +49,8 @@ jobs:
           if [[ "$BASE" =~ ^0+$ ]]; then
             BASE="$(git hash-object -w -t tree /dev/null)"
           fi
-          git cat-file -e "${HEAD}^{commit}" 2>/dev/null || git fetch --no-tags origin "$HEAD"
+          # checkout fetches the PR merge ref, including both parents for fork PRs.
+          git cat-file -e "${BASE}^{object}"
           git cat-file -e "${HEAD}^{commit}"
           python3 .public-verify-scanner/tools/ci/public_verify.py diff --base "$BASE" --head "$HEAD"
           python3 .public-verify-scanner/tools/ci/public_verify.py commits --base "$BASE" --head "$HEAD"

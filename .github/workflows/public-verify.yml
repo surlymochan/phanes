@@ -12,5 +12,7 @@ permissions:
 jobs:
   public-verify:
     uses: ./.github/workflows/public-verify-reusable.yml
+    with:
+      scanner_ref: ${{ github.sha }}
     secrets:
       PUBLIC_VERIFY_DENYLIST: ${{ secrets.PUBLIC_VERIFY_DENYLIST }}

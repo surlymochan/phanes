@@ -4,10 +4,14 @@ import argparse
 import hashlib
 import ipaddress
 import json
-import os
 import re
 import subprocess
 import sys
+
+if __package__:
+    from .public_verify_denylist import DenylistError, load
+else:
+    from public_verify_denylist import DenylistError, load
 
 
 IPV4 = re.compile(r'(?<![\w.])(?:\d{1,3}\.){3}\d{1,3}(?![\w.])')
@@ -26,41 +30,14 @@ RULES = (
 
 
 def rules_from_config(args):
-    if args.generic_only:
-        return []
-    if args.denylist:
-        try:
-            with open(args.denylist, encoding='utf-8') as stream:
-                content = stream.read()
-        except (OSError, UnicodeError):
-            raise ValueError('invalid denylist')
-    else:
-        content = os.environ.get('PUBLIC_VERIFY_DENYLIST', '')
-    rules = []
-    for line in content.splitlines():
-        if not line.strip():
-            continue
-        fields = line.split('\t', 1)
-        if len(fields) != 2 or fields[0] not in ('host', 'domain', 'bus', 'account', 'hold' + 'out') or not fields[1]:
-            raise ValueError('invalid denylist')
-        term = fields[1]
-        expression = term[3:] if term.startswith('re:') else re.escape(term)
-        if not expression:
-            raise ValueError('invalid denylist')
-        try:
-            pattern = re.compile(r'(?<!\w)(?:' + expression + r')(?!\w)', re.I)
-        except re.error:
-            raise ValueError('invalid denylist')
-        if pattern.search(''):
-            raise ValueError('invalid denylist')
-        rules.append((fields[0], pattern))
-    if not rules:
-        raise ValueError('missing denylist')
-    return rules
+    matcher = load(denylist_path=args.denylist, generic_only=args.generic_only)
+    return [(rule.category, rule.pattern) for rule in matcher.rules]
 
 
-def scan(value, location, private_rules, findings):
+def scan(value, location, private_rules, findings, categories=None):
     def add(category, match):
+        if categories is not None and category not in categories:
+            return
         digest = hashlib.sha256(match.encode('utf-8', 'surrogateescape')).hexdigest()[:8]
         findings.append({'category': category, 'location': location, 'hash': digest})
 
@@ -82,7 +59,8 @@ def scan(value, location, private_rules, findings):
             add('email', match.group())
     for category, pattern in RULES + tuple(private_rules):
         for match in pattern.finditer(value):
-            add(category, match.group())
+            if match.group():
+                add(category, match.group())
 
 
 def git(*args):
@@ -96,12 +74,13 @@ def decode(raw):
     return raw.decode('utf-8', 'surrogateescape')
 
 
-def tree(head, private, findings):
+def tree(head, private, findings, seen_blobs=None, seen_paths=None):
     process = subprocess.Popen(['git', 'ls-tree', '-rz', '--full-tree', head],
                                stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
     # ls-tree records are NUL-delimited, so paths with newlines remain intact.
     pending = b''
     index = 0
+    label = hashlib.sha256(head.encode('utf-8', 'surrogateescape')).hexdigest()[:8]
     while True:
         chunk = process.stdout.read(65536)
         if not chunk:
@@ -113,8 +92,13 @@ def tree(head, private, findings):
             index += 1
             meta, path = entry.split(b'\t', 1)
             mode, kind, oid = meta.split()
-            scan(decode(path), 'tree:path:' + str(index), private, findings)
-            if kind == b'blob':
+            if seen_paths is None or path not in seen_paths:
+                scan(decode(path), 'tree:path:' + label + ':' + str(index), private, findings)
+                if seen_paths is not None:
+                    seen_paths.add(path)
+            if kind == b'blob' and (seen_blobs is None or oid not in seen_blobs):
+                if seen_blobs is not None:
+                    seen_blobs.add(oid)
                 blob = subprocess.Popen(['git', 'cat-file', 'blob', oid.decode()],
                                         stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
                 for line_no, line in enumerate(blob.stdout, 1):
@@ -155,14 +139,47 @@ def diff(base, head, private, findings):
 
 
 def commits(base, head, private, findings):
-    base_type = git('cat-file', '-t', base).strip()
-    revision = head if base_type == b'tree' else base + '..' + head
-    data = git('log', '--format=%H%x00%B%x00', revision, '--')
-    fields = data.split(b'\0')
-    for i in range(0, len(fields) - 1, 2):
-        oid = fields[i].strip().decode('ascii')
-        for number, line in enumerate(decode(fields[i + 1]).splitlines(), 1):
-            scan(line, 'commit:' + oid + ':' + str(number), private, findings)
+    base_type = git('cat-file', '-t', base).strip() if base is not None else None
+    revision = '--all' if base is None else (head if base_type == b'tree' else base + '..' + head)
+    process = subprocess.Popen(
+        ['git', 'log', '--format=%H%x00%B%x00%an%x00%ae%x00%cn%x00%ce%x00', revision, '--'],
+        stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+    pending = b''
+    fields = []
+    with process.stdout:
+        while True:
+            chunk = process.stdout.read(65536)
+            if not chunk:
+                break
+            records = (pending + chunk).split(b'\0')
+            pending = records.pop()
+            for record in records:
+                fields.append(record)
+                if len(fields) != 6:
+                    continue
+                oid = fields[0].strip().decode('ascii')
+                for number, line in enumerate(decode(fields[1]).splitlines(), 1):
+                    scan(line, 'commit:' + oid + ':' + str(number), private, findings)
+                for field, value in zip(('author-name', 'author-email', 'committer-name', 'committer-email'), fields[2:]):
+                    scan(decode(value), 'commit:' + oid + ':' + field, private, findings,
+                         categories=('email', 'account'))
+                fields = []
+    if process.wait() or fields or pending.strip():
+        raise ValueError('git operation failed')
+
+
+def history(private, findings):
+    # Retain only object IDs and paths: shared blob contents are scanned once,
+    # while a clean blob introduced under a sensitive path is still checked.
+    seen_blobs, seen_paths = set(), set()
+    process = subprocess.Popen(['git', 'rev-list', '--all'], stdout=subprocess.PIPE,
+                               stderr=subprocess.DEVNULL)
+    with process.stdout:
+        for raw in process.stdout:
+            tree(raw.strip().decode('ascii'), private, findings, seen_blobs, seen_paths)
+    if process.wait():
+        raise ValueError('git operation failed')
+    commits(None, None, private, findings)
 
 
 class Findings:
@@ -220,18 +237,10 @@ def main():
         elif args.command == 'tree':
             tree(args.head, private, findings)
         else:
-            process = subprocess.Popen(['git', 'rev-list', '--all'], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
-            for raw in process.stdout:
-                oid = raw.strip().decode('ascii')
-                tree(oid, private, findings)
-                message = git('show', '-s', '--format=%B', oid)
-                for number, line in enumerate(decode(message).splitlines(), 1):
-                    scan(line, 'commit:' + oid + ':' + str(number), private, findings)
-            if process.wait():
-                raise ValueError('git operation failed')
+            history(private, findings)
         findings.finish()
         return int(bool(findings.count))
-    except (OSError, ValueError, UnicodeError, StopIteration):
+    except (DenylistError, OSError, ValueError, UnicodeError, StopIteration):
         print('public-verify: configuration or input error', file=sys.stderr)
         return 2
 
