@@ -5,11 +5,12 @@ Every TICK seconds: finish runs that ended (push branch + open PR, relabel issue
 lane the next open issue labelled `lane-ready` (not `in-progress`), ordered p0 < p1 < p2 < unlabelled,
 then by issue number. Optional `backend:pi|agy|codex` label pins an issue to that executor family.
 State: ~/phanes-ctl/autodispatch/state.json   Log: ~/phanes-ctl/autodispatch/autodispatch.log + brain/log.md
-Pause: the swrm pause store ($OPENSWARM_HOME/pauses, written by `swrm pause <scope>`) and the
-legacy markers ~/phanes-ctl/autodispatch/PAUSE (whole loop), PAUSE-<LANE> (one lane),
-PAUSE-HOST-<HOST>, PAUSE-BACKEND-<BACKEND> and PAUSE-MINT (no new issue minted). Both are read (Refs #1366).
-A legacy marker that carries its own deadline (`until=<epoch|ISO>`) stops holding the lane once that
-deadline passed; the marker file stays on disk as the evidence of the hold (Refs #1592).
+Pause: the swrm pause store ($OPENSWARM_PAUSE_DIR, else $OPENSWARM_HOME/pauses, written by
+`swrm pause <scope>` and by `swrm fleet health --apply`) and the legacy markers
+~/phanes-ctl/autodispatch/PAUSE (whole loop), PAUSE-<LANE> (one lane),
+PAUSE-HOST-<HOST>, PAUSE-BACKEND-<BACKEND> and PAUSE-MINT (no new issue minted). All are read (Refs #1366).
+A hold that a program keeps under a scope of its own (`host:<host>@health`) holds the host as well (Refs #1367).
+A legacy marker with an `until=<epoch|ISO>` deadline stops holding after that deadline, while the file stays as evidence (Refs #1592).
 """
 import base64, hashlib, json, math, os, re, shlex, stat, subprocess, sys, time, tempfile, concurrent.futures as cf
 from datetime import datetime, timezone
@@ -26,6 +27,30 @@ RULES = ("Rules: work only inside this repository worktree (the current director
 IMPL_CARD_TASK_BOOK = ("## Impl card delivery requirements\n"
                        "1. 交付说明必须对每个新增函数列出入口→调用链→数据结构来源：由谁调用、输入来自哪个真实数据结构、每个字段由谁填写。\n"
                        "2. 至少补一个 tick/集成级测试：从真实入口（tick 或等价入口）驱动到可观测结果；只测函数加 mock 不算。\n")
+# The brief of a fix round (rubric F1..F6, Refs #1851): a fix round card asks a lane to redo a
+# rejected PR, so the task book has to force the six checklist items of the rubric. The `{pr}`
+# placeholder is the PR of the round (the `rebase-pr-<N>` branch to continue from); it is replaced
+# with the number the card names, or with `<N>` when the card names none.
+FIX_ROUND_TASK_BOOK = ("## Fix round checklist (rubric F1-F6)\n"
+                       "F1 续改基点：从 `rebase-pr-{pr}` 续改（上一轮 PR 的头），先做祖先校验 "
+                       "`git merge-base --is-ancestor <base> rebase-pr-{pr}`；校验不过就停下报告，不要另起分支重写。\n"
+                       "F2 先枚举同类点：先把同类问题全部枚举出来（同样的写法、同样的调用点），再逐个修，不要只修眼前这一处。\n"
+                       "F3 逐条 BLOCKER 勾选并附证据：上一轮每条 BLOCKER 都要在交付说明里逐条勾选（`- [x]`），"
+                       "并附证据（文件:行号 + 测试名或命令输出）。\n"
+                       "F4 先写失败测试：先写能复现上一轮问题的失败测试，跑一次确认是红的，再改实现让它转绿。\n"
+                       "F5 不删既有集成测试：不得删除或跳过既有的集成测试；要改断言就改断言并写明理由。\n"
+                       "F6 复跑 A4/A2：修完复跑 A4/A2 两项验收（同一条命令、同一个环境），把结果贴进交付说明。\n")
+# The markers of a fix round card: a fix label (`fix`, `card:fix`, `type:fix`, `review-fix`…) or a
+# `## Fix Round` heading, review request or rebase branch in the body, or a fix round title.
+# An ordinary work card that merely fixes a bug is not a fix round.
+FIX_ROUND_CARD_LABELS = {"fix", "fix-round", "review-fix", "rework",
+                         "card:fix", "card:fix-round", "card:review-fix", "card:rework",
+                         "type:fix", "type:fix-round", "type:review-fix", "type:rework"}
+FIX_ROUND_HEADING_RE = re.compile(r"(?mi)^##[^\S\r\n]*(?:fix[^\S\r\n]*round|review[^\S\r\n]*fix|rework|修复轮|返修轮)[^\S\r\n]*$")
+FIX_ROUND_TITLE_RE = re.compile(r"(?i)^(?:fix[ _-]?round|review[ _-]?fix|rework|修复轮|返修轮)(?:\s*[:：]|\s+|$)")
+# The PR of the round: the branch the card names, or its `目标 PR` field.
+FIX_ROUND_PR_BRANCH_RE = re.compile(r"(?i)rebase-pr-(\d+)")
+FIX_ROUND_PR_FIELD_RE = re.compile(r"(?i)(?:目标[^\S\r\n]*PR|PR)[^\S\r\n]*[:：]?[^\S\r\n]*#?[^\S\r\n]*(\d+)")
 NON_IMPL_CARD_TYPES = {"upstream", "ops", "follow-up", "planner", "verify-intent"}
 PRIO = {"p0": 0, "p1": 1, "p2": 2}
 DISPATCH_EXCLUDING_LABELS = {"in-progress", "lane-pr", "lane-failed"}
@@ -105,6 +130,13 @@ def env_number(name, default, cast=float):
 AD_VERIFY_SHARE_ENABLED = os.environ.get("AD_VERIFY_SHARE_ENABLED", "0").lower() in {"1", "true", "yes"}
 VERIFY_SHARE = env_number("AD_VERIFY_SHARE", 0.2)
 VERIFY_MIN = env_number("AD_VERIFY_MIN", 1, int)
+# The MiniMax burn reading the lane status shows (Refs #1671). A reading older than
+# this is not shown: a stopped burn watchdog must not pass the last known burn off
+# as the current one.
+MM_BURN_MAX_AGE_S = env_number("MM_BURN_MAX_AGE_S", 900, int)
+# The burn alert is logged at most every this many seconds (the watchdog runs every tick).
+MM_BURN_WARN_SEC = env_number("MM_BURN_WARN_SEC", 600, int)
+BURN_WARN_AT = 0.0  # epoch second of the last burn warning
 
 def ctl_state_dir():
     directory = os.path.expanduser(os.environ.get("OPENSWARM_CTL_STATE_DIR", f"{HOME}/phanes-ctl/state"))
@@ -112,16 +144,29 @@ def ctl_state_dir():
     return directory
 
 def pause_home(home=None):
-    """The home that holds the pause store ($OPENSWARM_HOME by default).
-
-    An empty $OPENSWARM_HOME is no home at all: the fallback keeps the store path
-    absolute instead of turning it into a relative `pauses` directory."""
+    """The home that holds the pause store ($OPENSWARM_HOME by default)."""
     if home: return os.path.expanduser(home)
     return os.path.expanduser(os.environ.get("OPENSWARM_HOME") or os.environ.get("XSWARM_HOME") or f"{HOME}/.claude/swrm")
 
 def pause_store_dir(home=None):
-    """The swrm pause store ($OPENSWARM_HOME/pauses), the new home of the pause switches."""
+    """The swrm pause store, shared with the fleet health check (Refs #1367)."""
+    configured = os.environ.get("OPENSWARM_PAUSE_DIR") or os.environ.get("XSWARM_PAUSE_DIR")
+    if home is None and configured: return os.path.expanduser(configured)
     return os.path.join(pause_home(home), "pauses")
+
+def pause_executor_start_lane(lane):
+    """Cool down only the failing executor's lane; the card has not had an attempt."""
+    now = time.time()
+    scope = f"lane:{lane}"
+    directory = pause_store_dir()
+    os.makedirs(directory, exist_ok=True)
+    record = {"scope": scope, "reason": "auto:executor_start_failed", "created_at": now,
+              "expires_at": now + 600}
+    # Write atomically so dispatch never observes a partially written pause.
+    with tempfile.NamedTemporaryFile(mode="w", dir=directory, delete=False) as stream:
+        temporary = stream.name
+        json.dump(record, stream)
+    os.replace(temporary, os.path.join(directory, hashlib.sha256(scope.encode()).hexdigest() + ".json"))
 
 def marker_scope(name):
     """The pause scope of a legacy PAUSE marker file name, or None when it is none."""
@@ -131,6 +176,40 @@ def marker_scope(name):
         if name.startswith(prefix) and len(name) > len(prefix): return f"{kind}:{name[len(prefix):]}"
     if name.startswith("PAUSE-") and len(name) > len("PAUSE-"): return f"lane:{name[len('PAUSE-'):]}"
     return None
+
+# The disk watermark guard of the box control plane (Refs #1666) measures a remote lane host and
+# pauses it when the disk is too full. The health sweep can clear the `auto:` host pause, so the
+# dispatcher reads the state file of the guard as well: that is an independent gate that keeps the
+# lane closed for the whole hysteresis band, even between two guard ticks.
+DISK_WATERMARK_STATE_PREFIX = "disk-watermark-"
+
+def disk_watermark_states(now=None):
+    """The disk watermark states of the guard: one record per measured lane host."""
+    # A blocked host stays blocked until the guard records a measured recovery.
+    # A stopped guard and a missing marker are not evidence of free disk space.
+    states = {}
+    try: names = sorted(os.listdir(D))
+    except OSError: return states
+    for name in names:
+        if not name.startswith(DISK_WATERMARK_STATE_PREFIX) or not name.endswith(".json"): continue
+        try:
+            with open(os.path.join(D, name)) as stream: record = json.load(stream)
+        except (OSError, ValueError): continue
+        if not isinstance(record, dict): continue
+        host = record.get("host")
+        if not isinstance(host, str) or not host.strip(): continue
+        updated = record.get("updated_at")
+        if isinstance(updated, bool) or not isinstance(updated, (int, float)): continue
+        states[host.strip()] = record
+    return states
+
+def disk_watermark_blocked(host, states=None):
+    """Whether the disk watermark guard blocks the host (the independent disk gate)."""
+    if not host: return False
+    states = disk_watermark_states() if states is None else states
+    record = states.get(host)
+    if not record: return False
+    return bool(record.get("blocked"))
 
 # The deadline of a legacy pause marker: the health loop writes `auto:cooldown:until=<epoch|ISO>`
 # (`tools/check-health-pause.py`), the quota loop `mm_remains:until=<ISO>`
@@ -156,10 +235,10 @@ def pause_until(body):
     if parsed.tzinfo is None: parsed = parsed.replace(tzinfo=timezone.utc)
     return parsed.timestamp()
 
-def marker_body(name):
+def marker_body(name, directory=None):
     """The body of a legacy pause marker (empty when the file cannot be read)."""
     try:
-        with open(os.path.join(D, name)) as stream: return stream.read()
+        with open(os.path.join(D if directory is None else directory, name)) as stream: return stream.read()
     except OSError: return ""
 
 def marker_reason(name, body):
@@ -188,6 +267,7 @@ def pause_records(now=None, home=None):
     removal). The result is sorted by scope."""
     now = time.time() if now is None else now
     records = []
+    disk_states = disk_watermark_states(now)
     store = pause_store_dir(home)
     try: names = sorted(os.listdir(store))
     except OSError: names = []
@@ -221,12 +301,50 @@ def pause_records(now=None, home=None):
         scope = marker_scope(name)
         if scope is None: continue
         body = marker_body(name)
+        # Version 2 stopped writing shared host markers. Retain old files
+        # untouched, but use its independent state instead of its legacy marker.
+        # Other writers do not share a lock with the guard; deleting the legacy
+        # file after reading its body could delete a concurrent manual pause.
+        if name.startswith("PAUSE-HOST-"):
+            host = name[len("PAUSE-HOST-"):]
+            version = disk_states.get(host, {}).get("guard", 0)
+            if isinstance(version, int) and version >= 2:
+                if body.startswith(f"auto:disk-watermark host={host} "): continue
         deadline = pause_until(body)
         if deadline is not None and deadline <= now:
-            log_expired_pause(name, deadline)  # the hold ends here, the marker file stays
+            log_expired_pause(name, deadline)
             continue
         records.append({"scope": scope, "reason": marker_reason(name, body), "created_at": 0.0,
                         "expires_at": deadline, "source": "marker"})
+    # Fleet health also writes legacy markers in the pause store.
+    if os.path.abspath(store) != os.path.abspath(D):
+        try: names = sorted(os.listdir(store))
+        except OSError: names = []
+        for name in names:
+            scope = marker_scope(name)
+            if scope is None: continue
+            body = marker_body(name, store)
+            deadline = pause_until(body)
+            if deadline is not None and deadline <= now:
+                log_expired_pause(name, deadline)
+                continue
+            records.append({"scope": scope, "reason": marker_reason(name, body), "created_at": 0.0,
+                            "expires_at": deadline, "source": "marker"})
+    # The private marker also gates dispatch if writing the state failed.
+    try: disk_markers = os.listdir(os.path.join(D, ".disk-watermark"))
+    except OSError: disk_markers = []
+    for name in disk_markers:
+        scope = marker_scope(name)
+        if scope and scope.startswith("host:"):
+            records.append({"scope": scope, "reason": "disk watermark marker",
+                            "created_at": 0.0, "expires_at": None, "source": "marker"})
+    # The disk watermark gate (Refs #1666): a blocked lane host stays blocked even when the
+    # health sweep removed its pause marker, as long as the guard reports the block.
+    for host, record in disk_states.items():
+        if not record.get("blocked"): continue
+        records.append({"scope": f"host:{host}", "reason": f"disk watermark guard: {record.get('state')}",
+                        "created_at": record.get("updated_at"), "expires_at": None,
+                        "source": "disk-watermark"})
     return sorted(records, key=lambda row: row["scope"])
 
 def paused_scopes(now=None, records=None):
@@ -240,10 +358,20 @@ def lane_paused(lane, cfg=None, scopes=None):
     if "all" in scopes: return True
     if f"lane:{lane}" in scopes: return True
     cfg = cfg or {}
-    if cfg.get("host") and f"host:{cfg['host']}" in scopes: return True
-    if cfg.get("backend") and f"backend:{cfg['backend']}" in scopes: return True
+    if cfg.get("host") and holds_target(scopes, "host", cfg["host"]): return True
+    if cfg.get("backend") and holds_target(scopes, "backend", cfg["backend"]): return True
     return False
 
+def holds_target(scopes, kind, value):
+    """Whether a scope holds the dispatch target `kind:value`.
+
+    A hold that a program keeps under a scope of its own (`host:<host>@health`) holds the
+    target as well: the fleet health check never overwrites the pause of an operator, and
+    the release of the operator never frees the host (Refs #1367).
+    """
+    base = f"{kind}:{value}"
+    if base in scopes: return True
+    return any(str(scope).startswith(base + "@") for scope in scopes)
 def pause_priority(row):
     """The order in which the switches are read: the global PAUSE, then the pause store,
     then the remaining legacy markers (Refs #1592)."""
@@ -266,7 +394,9 @@ def pause_reason(lane, cfg=None, records=None, now=None):
     if cfg.get("backend"): wanted.append(f"backend:{cfg['backend']}")
     for row in sorted(records, key=pause_priority):
         scope = row.get("scope")
-        if scope != "all" and scope not in wanted: continue
+        if scope != "all" and scope not in wanted and not (
+            cfg.get("host") and holds_target({scope}, "host", cfg["host"]) or
+            cfg.get("backend") and holds_target({scope}, "backend", cfg["backend"])): continue
         expires = row.get("expires_at")
         remaining = None if expires is None else max(0, int(round(expires - now)))
         return {"scope": scope, "source": row.get("source"), "reason": row.get("reason"),
@@ -281,6 +411,7 @@ def pause_reasons(lanes, records=None, now=None):
         reason = pause_reason(lane, cfg, records, now)
         if reason: reasons[lane] = reason
     return reasons
+
 
 def mint_paused(scopes=None):
     """Whether the minting of new issues is paused (the PAUSE-MINT marker / the mint scope)."""
@@ -1144,6 +1275,49 @@ def can_take(backend, item, lane=None, verify_gate=True):
     if item.get("strict"): return False
     if backend == "codex" and SOCKET_RE.search(item["title"] + "\n" + item["body"]): return False
     return True
+
+DEFAULT_CODEX_MIN_MEMORY_MB = 400
+
+def available_memory_mb(host):
+    """Read available memory on a Linux or macOS executor through the normal SSH shim."""
+    # vm_stat reports pages, with the host's page size in its header (4K or 16K).
+    # Count free/reclaimable pages without adding purgeable pages a second time.
+    # Both platform branches emit KiB; a missing/incomplete probe stays unavailable.
+    command = """case "$(uname -s)" in
+Linux)
+    awk '/^MemAvailable:/ {print $2; found=1} END {if (!found) exit 1}' /proc/meminfo ;;
+Darwin)
+    vm_stat | awk '
+        /^Mach Virtual Memory Statistics:/ {
+            for (i=1; i<NF; i++) if ($i == "of") pagesize=$(i+1)
+        }
+        /^(Pages free|Pages inactive|Pages speculative):/ {
+            sub(/\\.$/, "", $NF)
+            if ($NF !~ /^[0-9]+$/) exit 1
+            pages+=$NF; found++
+        }
+        END {if (pagesize > 0 && found == 3) printf "%.0f\\n", pages*pagesize/1024; else exit 1}' ;;
+*) exit 1 ;;
+esac"""
+    # SSH joins remote arguments with spaces; keep the entire script as one -c argument.
+    try: rc, out, _ = sh(ssh_argv(ssh_opts(host), host, "sh", "-lc", shlex.quote(command)), timeout=30)
+    except (OSError, subprocess.TimeoutExpired): return None
+    if rc: return None
+    try: return int(out.strip().splitlines()[-1]) // 1024
+    except (ValueError, IndexError): return None
+
+def memory_preflight(lane, cfg, item, cache):
+    """Return the codex host's memory rejection detail, or None when it can run."""
+    if cfg.get("backend") != "codex": return None
+    threshold = cfg.get("min_available_memory_mb", DEFAULT_CODEX_MIN_MEMORY_MB)
+    try: threshold = max(0, int(threshold))
+    except (TypeError, ValueError): threshold = DEFAULT_CODEX_MIN_MEMORY_MB
+    host = cfg["host"]
+    if host not in cache: cache[host] = available_memory_mb(host)
+    available = cache[host]
+    if available is not None and available >= threshold: return None
+    return {"host": host, "available_mb": available, "threshold_mb": threshold, "reason": "blocked-by-host-memory"}
+
 def is_review_lane(lane):
     """The review lanes a verify card may be dispatched to (CX2/CX4/CX5)."""
     return bool(re.fullmatch(r"CX(?:2|4|5)(?:[-_].*)?", str(lane), re.I))
@@ -1430,8 +1604,149 @@ def update_busy_stale(lanes, state, res):
             log(f"{lane} #{st['issue']} run {st['run']} stale: no trusted activity; review required", brain=False)
     save_state(state)
 
+def minimax_burn_path():
+    """The path of the MiniMax burn snapshot the status surface shows (Refs #1671)."""
+    return os.environ.get("MM_BURN_STATUS") or os.path.join(D, "minimax-burn.json")
+
+def minimax_burn_tool():
+    """The burn watchdog of the repository: ``tools/mm-burn-rate.py``.
+
+    The dispatcher lives in ``tools/lane-autodispatch/`` and the watchdog one
+    directory above it (``tools/``), so the watchdog is found without any
+    configuration (Refs #1671).
+    """
+    here = os.path.dirname(os.path.abspath(__file__))
+    candidates = (os.path.join(os.path.dirname(here), "mm-burn-rate.py"),
+                  os.path.join(here, "mm-burn-rate.py"))
+    for candidate in candidates:
+        if os.path.exists(candidate): return candidate
+    return candidates[0]
+
+def minimax_burn_health():
+    """The health snapshot of the box, when it carries the MiniMax quota object.
+
+    The quota history of the burn watchdog is fed from the health snapshot. A
+    snapshot without a quota object is not fed at all: the box health loop
+    probes the hosts, and a missing quota is not an error of every tick.
+    """
+    path = os.path.join(D, "health.json")
+    try:
+        with open(path, encoding="utf-8") as stream:
+            health = json.load(stream)
+    except (OSError, ValueError, TypeError):
+        return None
+    return path if isinstance(health, dict) and "minimax" in health else None
+
+def minimax_burn_command():
+    """The command that refreshes the MiniMax burn snapshot (Refs #1671).
+
+    ``MM_BURN_CMD`` overrides it. The default runs the burn watchdog of the
+    repository: it reads the MiniMax provider request log (the log of the
+    running broker, found without configuration) and writes the snapshot the
+    lane status shows. Without the watchdog on the box there is no reading and
+    the status stays as it was.
+    """
+    override = os.environ.get("MM_BURN_CMD")
+    if override: return shlex.split(override)
+    tool = os.environ.get("MM_BURN_TOOL") or minimax_burn_tool()
+    if not os.path.exists(tool): return []
+    cmd = [sys.executable, tool, "--history", os.path.join(D, "minimax-burn-history.jsonl"),
+           "--status-file", minimax_burn_path()]
+    broker = os.environ.get("MM_BROKER_LOG") or os.environ.get("PI_BROKER_LOG")
+    if broker: cmd += ["--broker-log", broker]
+    health = minimax_burn_health()
+    if health: cmd += ["--append", health]
+    return cmd
+
+def refresh_minimax_burn():
+    """Refresh the MiniMax burn snapshot the lane status shows (Refs #1671).
+
+    The watchdog exits 1 while it alerts (a collapsed token burn) and 2 when
+    the quota collection is broken; both are logged, so the dispatcher log
+    carries the burn alert too. A failing watchdog never stops the dispatcher.
+    """
+    global BURN_WARN_AT
+    cmd = minimax_burn_command()
+    if not cmd: return
+    try: rc, out, err = sh(cmd, timeout=60)
+    except (OSError, subprocess.SubprocessError) as e:
+        log(f"minimax burn watchdog failed: {e!r}", brain=False); return
+    if not rc: return
+    if time.time() - BURN_WARN_AT < MM_BURN_WARN_SEC: return
+    BURN_WARN_AT = time.time()
+    log(f"minimax burn watchdog rc={rc}: {(err or out).strip()[-160:]}", brain=False)
+
+def minimax_burn_status(now=None, max_age_s=MM_BURN_MAX_AGE_S):
+    """The MiniMax burn reading of the watchdog snapshot (Refs #1671).
+
+    The snapshot is only shown while the reading is fresh: the watchdog writes
+    ``token_observed_at`` (the moment the reading was taken). A snapshot whose
+    reading is older than the freshness window is dropped, so a stopped
+    watchdog cannot pass the last known burn off as the current one.
+    ``token_sample_at`` (the newest MiniMax provider request the reading is
+    based on) is reported with it; a genuine zero burn has no request at all
+    and is still a reading of this hour.
+    A snapshot without a reading is a collection failure (the collector is
+    gone, the log lost rows): the state is shown, but no token count -- a
+    broken collection is never read as a fleet that burned nothing.
+    """
+    try:
+        with open(minimax_burn_path(), encoding="utf-8") as stream:
+            burn = json.load(stream)
+    except (OSError, ValueError, TypeError):
+        return {}  # a missing or malformed snapshot must not break the dispatch
+    if not isinstance(burn, dict): return {}
+    stamp = burn.get("token_observed_at")
+    if not isinstance(stamp, str): return {}
+    try: observed = datetime.fromisoformat(stamp.replace("Z", "+00:00"))
+    except ValueError: return {}
+    if observed.tzinfo is None: observed = observed.replace(tzinfo=timezone.utc)
+    age = ((now or datetime.now(timezone.utc)) - observed).total_seconds()
+    if age < -60 or age > max_age_s: return {}
+    fields = {}
+    tokens = burn.get("hourly_tokens")
+    if burn.get("token_state") in ("ok", "idle") and not isinstance(tokens, bool) and isinstance(tokens, (int, float)):
+        fields["_minimax_hourly_tokens"] = int(tokens)
+        fields["_minimax_token_alert"] = bool(burn.get("token_alert"))
+        fields["_minimax_usage_at"] = burn.get("token_sample_at") or stamp
+        fields["_minimax_token_state"] = str(burn.get("token_state") or "unknown")
+    elif burn.get("token_state"):
+        # A collection failure is no reading, but it is not a zero burn either:
+        # the state says which one it is.
+        fields["_minimax_token_state"] = str(burn.get("token_state"))
+    collector = burn.get("token_collector")
+    if isinstance(collector, str):
+        # "alive" is a verified reading, the other states are collection failures.
+        fields["_minimax_collector_state"] = collector
+    interval = burn.get("interval_tokens")
+    if not isinstance(interval, bool) and isinstance(interval, (int, float)):
+        # The total of the current Token Plan window: the figure the MiniMax
+        # console shows for the current plan (Refs #1671).
+        fields["_minimax_interval_tokens"] = int(interval)
+        requests = burn.get("interval_requests")
+        if not isinstance(requests, bool) and isinstance(requests, (int, float)):
+            fields["_minimax_interval_requests"] = int(requests)
+        reset = burn.get("interval_reset_at")
+        if isinstance(reset, str):
+            fields["_minimax_interval_reset_at"] = reset
+    buckets = burn.get("hourly_buckets")
+    if isinstance(buckets, list):
+        # The clock hours of the MiniMax console: an operator samples the console
+        # and compares one hour with it (Refs #1671).
+        rows = []
+        for bucket in buckets:
+            if not isinstance(bucket, dict): continue
+            hour = bucket.get("hour")
+            total = bucket.get("tokens")
+            if not isinstance(hour, str): continue
+            if isinstance(total, bool) or not isinstance(total, (int, float)): continue
+            rows.append({"hour": hour, "tokens": int(total)})
+        if rows: fields["_minimax_hourly_buckets"] = rows
+    return fields
+
 def status_snapshot(lanes, state, res, ready, blocked, records=None):
     """Build the observable lane status row, including this process's stale skips."""
+    lanes = lanes or {}
     status = {L: (("stale #%s (review required)" if "stale_since" in state[L] else "busy #%s") % state[L]["issue"]) if state.get(L) else (res[L].get("error") or res[L].get("lane") or "?") for L in lanes}
     status["_busy"] = sum(1 for L in lanes if state.get(L) and "stale_since" not in state[L])
     status["_stale"] = sum(1 for L in lanes if state.get(L) and "stale_since" in state[L])
@@ -1448,6 +1763,10 @@ def status_snapshot(lanes, state, res, ready, blocked, records=None):
     status["_idle_open_s"] = idle_open_s    # the gap the idle lanes are in right now
     status["_idle_worst_s"] = max(idle_open_s.values(), default=0.0)
     status["_at"] = time.strftime("%F %T")
+    # The burn watchdog measures the real MiniMax token burn of the hour; the
+    # lane status shows its reading, so an operator compares it with the
+    # MiniMax console instead of watching the dispatch count (Refs #1671).
+    status.update(minimax_burn_status())
     metrics = verify_metrics(state)
     status["_verify_wait_histogram"] = verify_histogram(state, "dispatched")
     status["_verify_cycle_histogram"] = verify_histogram(state, "verdict")
@@ -1582,6 +1901,28 @@ def dispatch_failed(lane, cfg, item, error, busy=False):
         return
     host_fail(cfg["host"], f"dispatch #{item['n']}: {error}")
 
+def is_fix_round_card(labels, title, body):
+    """True when the card asks a lane to redo a rejected PR (rubric F1..F6, Refs #1851).
+
+    The marker is explicit: a fix label (`fix`, `card:fix`, `type:fix`, `review-fix`…), a
+    `## Fix Round` heading, review request or rebase branch in the body, or a fix round title prefix.
+    An ordinary work card that merely fixes a bug stays an ordinary work card."""
+    if set(labels) & FIX_ROUND_CARD_LABELS: return True
+    if FIX_ROUND_HEADING_RE.search(body or ""): return True
+    if "审查要求修改" in (body or "") or FIX_ROUND_PR_BRANCH_RE.search(body or ""): return True
+    return bool(FIX_ROUND_TITLE_RE.match(title or ""))
+
+def fix_round_pr(body, title=""):
+    """The PR number of the round: the `rebase-pr-<N>` branch or the `目标 PR` field of the card."""
+    for text in (body or "", title or ""):
+        match = FIX_ROUND_PR_BRANCH_RE.search(text) or FIX_ROUND_PR_FIELD_RE.search(text)
+        if match: return match.group(1)
+    return None
+
+def fix_round_brief(body, title=""):
+    """The fix round brief, with the PR of the round when the card names one."""
+    return FIX_ROUND_TASK_BOOK.replace("{pr}", fix_round_pr(body, title) or "<N>")
+
 LANE_BUSY_RE = re.compile(r"lane \S+ is busy", re.I)  # the host still runs the finished run
 CAPACITY_EXHAUSTED_RE = re.compile(r"\b(?:capacity exhausted|no (?:available )?capacity)\b", re.I)
 
@@ -1596,6 +1937,13 @@ def dispatch(lane, cfg, item, base):
     excluded_labels.add("upstream(swrm)")
     excluded_title = re.match(r"(?i)^(?:upstream|ops|follow-up|planner|verify-intent)(?:\s*[:：]|\s+|$)", item["title"])
     is_impl = not (labels & excluded_labels or excluded_title)
+    # A fix round redoes a rejected PR: its task book forces the six checklist items of the
+    # rubric (F1..F6). Only an implementation card gets them: a planner/follow-up/verify card
+    # asks for no code, so the checklist would be noise there.
+    if is_impl and is_fix_round_card(labels, item["title"], body):
+        brief = fix_round_brief(body, item["title"])
+        if brief.rstrip() not in body and FIX_ROUND_TASK_BOOK.rstrip() not in body:
+            body = f"{body.rstrip()}\n\n{brief}"
     # A heading mention or a partial block must not suppress either requirement.
     if is_impl and IMPL_CARD_TASK_BOOK.rstrip() not in body:
         body = f"{body.rstrip()}\n\n{IMPL_CARD_TASK_BOOK}"
@@ -1693,6 +2041,190 @@ def label_lane_failed(n, body):
     gh(["issue", "edit", str(n), "--remove-label", "in-progress", "--remove-label", "lane-ready", "--add-label", "lane-failed"])
     gh(["issue", "comment", str(n), "--body", body])
 
+def budget_window_open(lane, cfg, info):
+    """Confirm recovery from a scoped probe, or the health-loop quota snapshot.
+
+    The default source is health.json in the AD state directory. Its MiniMax
+    remains observation applies to pi (the provider's consumer in swrm/policy.json).
+    Snapshots must be newer than the hold; old snapshots and unknown windows keep
+    the hold. Elapsed time alone never establishes recovery. An operator probe
+    overrides the snapshot.
+    """
+    command = os.environ.get("AD_BUDGET_PROBE_CMD", "").strip()
+    try:
+        if command:
+            proc = subprocess.run(shlex.split(command), shell=False, capture_output=True, text=True, timeout=20)
+            if proc.returncode: return False
+            payload = json.loads(proc.stdout)
+        else:
+            path = os.path.join(D, "health.json")
+            held_at = info.get("at")
+            if (not isinstance(held_at, (int, float)) or isinstance(held_at, bool)
+                    or not math.isfinite(held_at)): return False
+            with open(path) as stream:
+                payload = json.load(stream)
+    except (OSError, subprocess.SubprocessError, ValueError):
+        return False
+    backend = cfg.get("backend")
+    if not backend or not isinstance(payload, dict): return False
+    # Select the target before inspecting any windows. Never search other lanes
+    # or backends for an available window when the target has unknown quota.
+    if "lanes" in payload:
+        rows = payload["lanes"]
+        payload = rows.get(lane) if isinstance(rows, dict) else None
+    elif "backends" in payload:
+        rows = payload["backends"]
+        payload = rows.get(backend) if isinstance(rows, dict) else None
+    elif backend in payload:
+        payload = payload[backend]
+    elif not command:
+        provider = cfg.get("provider")
+        if backend != "pi" or provider not in (None, "minimax", "minimax-cn"): return False
+        payload = payload.get("minimax")
+        if isinstance(payload, dict) and any(key in payload for key in ("interval_pct", "weekly_pct")):
+            # health-loop's coding_plan/remains percentages are quota remaining,
+            # not usage. Both the short and weekly window must have headroom.
+            payload = dict(payload, five_hour={"remaining_pct": payload.get("interval_pct")},
+                           seven_day={"remaining_pct": payload.get("weekly_pct")})
+    elif any(key in payload for key in ("pi", "codex", "claude", "agy", "ocgo", "deepseek")):
+        return False
+
+    if not command:
+        observed_at = payload.get("observed_at") if isinstance(payload, dict) else None
+        if (not isinstance(observed_at, (int, float)) or isinstance(observed_at, bool)
+                or not math.isfinite(observed_at) or observed_at <= held_at
+                or not 0 <= time.time() - observed_at <= 900): return False
+
+    def available(row):
+        if not isinstance(row, dict): return False
+        if row.get("lane", lane) != lane or row.get("backend", backend) != backend: return False
+        if row.get("stale") is True: return False
+        states = []
+        exhausted = row.get("exhausted")
+        if isinstance(exhausted, bool): states.append(not exhausted)
+        for key, limit, remaining in (("used_percentage", 100, False), ("used_percent", 100, False),
+                                      ("remaining_pct", 100, True), ("used", 1, False)):
+            value = row.get(key)
+            if isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value):
+                states.append(0 < value <= limit if remaining else 0 <= value < limit)
+        # Only defined quota containers are inspected; metadata and sibling
+        # backends cannot establish availability. A null advertised window is unknown.
+        for key in ("five_hour", "seven_day", "window", "windows", "quota", "quotas", "rate_limits"):
+            if key in row:
+                child = row[key]
+                if key == "windows" and isinstance(child, dict):
+                    states.append(bool(child) and all(available(value) for value in child.values()))
+                else:
+                    states.append(available(child))
+        return bool(states) and all(states)
+
+    return available(payload)
+
+def budget_holds(state):
+    holds = state.get("_budget_requeue")
+    if not isinstance(holds, dict): holds = {}; state["_budget_requeue"] = holds
+    counts = state.get("_budget_failures")
+    if not isinstance(counts, dict): counts = {}; state["_budget_failures"] = counts
+    return holds, counts
+
+def clear_budget_history(state, issue):
+    """Forget the consecutive budget failures when a card reaches another terminal flow."""
+    holds, counts = budget_holds(state)
+    holds.pop(str(issue), None); counts.pop(str(issue), None)
+
+def release_recovered_budget_holds(state, lanes):
+    """Return held cards to lane-ready only after the window query confirms recovery."""
+    holds, _ = budget_holds(state)
+    for issue, hold in list(holds.items()):
+        if not isinstance(hold, dict): continue
+        lane = hold.get("lane")
+        cfg = lanes.get(lane, {})
+        if not hold.get("terminal_pending"):
+            recovered = budget_window_open(lane, cfg, hold)
+            held_at = hold.get("at")
+            if (not isinstance(held_at, (int, float)) or isinstance(held_at, bool)
+                    or not math.isfinite(held_at) or held_at > time.time()):
+                held_at = hold["at"] = time.time()
+            try:
+                max_hours = max(1, int(os.environ.get("AD_BUDGET_HOLD_MAX_HOURS", "6")))
+            except ValueError:
+                max_hours = 6
+            elapsed = time.time() - held_at
+            if not recovered and elapsed > max_hours * 3600:
+                hold["terminal_pending"] = True
+                hold["terminal_reason"] = "hold_expired"
+                hold["hold_hours"] = elapsed / 3600
+                save_state(state)
+            elif not recovered:
+                continue
+        if hold.get("terminal_pending"):
+            lane = hold.get("lane", "lane")
+            host = (lanes.get(lane) or {}).get("host", "unknown")
+            body = (f"Lane {lane} ({host}, run `{hold.get('run')}`) ended `{hold.get('status')}` without a commit "
+                    f"after {hold.get('tries')} budget-window failures (error_class `{hold.get('error_class')}`).\n\n"
+                    f"Executor summary: {hold.get('summary', '')}\n\nLabel `lane-failed`; re-add `lane-ready` to retry.")
+            rc, _, err = gh(["issue", "edit", str(issue), "--remove-label", "in-progress",
+                             "--remove-label", "lane-ready", "--add-label", "lane-failed"])
+            if rc:
+                log(f"budget failure #{issue}: terminal label write failed ({err.strip()[-120:]}); retaining hold", brain=False)
+                continue
+            if hold.get("terminal_reason") == "hold_expired":
+                body = (f"Budget hold expired after {hold['hold_hours']:.2f} hours without confirmed recovery "
+                        f"(hold_expired). Label `lane-failed`; re-add `lane-ready` to retry.")
+                log(f"budget hold #{issue}: {hold['hold_hours']:.2f} hours reason=hold_expired", brain=False)
+            gh(["issue", "comment", str(issue), "--body", body])
+            _, counts = budget_holds(state)
+            holds.pop(issue, None); counts.pop(str(issue), None)
+            mark_done(state, int(issue))
+            continue
+        rc, _, err = gh(["issue", "edit", str(issue), "--remove-label", "in-progress"])
+        if rc:
+            log(f"budget hold #{issue}: window recovered but labels could not be updated ({err.strip()[-120:]})", brain=False)
+            continue
+        holds.pop(issue, None)
+        log(f"budget hold #{issue}: backend window recovered; returned to lane-ready", brain=False)
+    save_state(state)
+
+def budget_failure(info):
+    """Recognize an executor budget death without classifying quota or real failures.
+
+    An explicit `error_class` is authoritative: a run the executor classified as a
+    real failure (or as a quota problem) keeps the ordinary failure flow, whatever
+    its status or its summary text says.  Only a run without an error class is
+    judged by the status and the summary.
+    """
+    error_class = str(info.get("error_class") or "").strip().lower()
+    if error_class: return error_class == "budget_exceeded"
+    if str(info.get("status") or "").strip().lower() == "budget_exceeded": return True
+    return bool(re.search(r"\b(?:budget_exceeded|token plan.{0,40}(?:limit|quota)|budget window exhausted)\b",
+                          str(info.get("summary") or ""), re.I))
+
+def terminal_budget_failure(n, lane, cfg, st, info, state, tries):
+    """Schedule the terminal label on the next tick; retain the durable count meanwhile."""
+    holds, _ = budget_holds(state)
+    holds[str(n)] = {"issue": n, "lane": lane, "run": st["run"], "tries": tries,
+                     "terminal_pending": True, "status": info.get("status"),
+                     "error_class": info.get("error_class"), "summary": info.get("summary", ""),
+                     "at": time.time()}
+    save_state(state)
+    return {"done": True, "status": "budget-terminal-pending", "error": None, "missing": []}
+
+def hold_budget_failure(lane, cfg, st, info, state):
+    """Free the lane while keeping the issue claimed until its backend window recovers."""
+    n = st["issue"]
+    holds, counts = budget_holds(state)
+    key = str(n)
+    tries = int(counts.get(key, 0) or 0) + 1
+    counts[key] = tries
+    maximum = int(os.environ.get("AD_BUDGET_REQUEUE_MAX", "2"))
+    if tries >= max(1, maximum):
+        return terminal_budget_failure(n, lane, cfg, st, info, state, tries)
+    holds[key] = {"issue": n, "lane": lane, "run": st["run"], "tries": tries,
+                  "at": time.time(), "summary": info.get("summary", "")}
+    save_state(state)
+    log(f"{lane} #{n} run {st['run']} budget-exceeded ({tries}/{maximum}); held pending window recovery", brain=False)
+    return {"done": True, "status": "budget-held", "error": None, "missing": []}
+
 def harvest_fetch(lane, n, fetch, st, cfg=None):
     """Fetch a finished lane branch with bounded attempts.
 
@@ -1785,6 +2317,132 @@ def block_pr_validation(lane, cfg, st, info, state, title, body, missing):
 # (.lane-review/PR-N.md).  The rules are a list constant: one more artifact kind is
 # one more pattern. This legacy AD owns its filtering rules.
 HARVEST_EXCLUDE_PATTERNS = [re.compile(r"(^|/)[^/]*\.so$"), re.compile(r"(^|/)\.lane-review/")]
+# The collapse guard of the fix/rebase harvest (Refs #1833).  A fix/rebase round that
+# does not continue on the head the PR had, but only produces an incremental patch,
+# replaces the whole PR when the AD pushes the harvest back (2026-11-03: #1807 8 files/
+# 1780 lines -> 1/11, #1804 6/1401 -> 3/39, #1715 8/868 -> 2/23, #1755 8/746 -> 1/19,
+# #1653 6/200 -> 2/19, #1824 9/835 -> 1/17).  Before such a push the AD checks:
+#   1. the new head contains the head the PR had before the round
+#      (`git merge-base --is-ancestor`), otherwise the harvest replaced the PR;
+#   2. the changed files and the changed lines relative to the base do not collapse:
+#      one of the two dimensions dropping by more than the threshold (50% by default)
+#      refuses the push (the dimensions are independent: "or", not "and");
+#   3. a failing git command refuses the push as well (fail closed);
+#   4. a card whose body cannot be read or parsed is not an empty card: without it the
+#      target PR of the round is unknown, so the harvest is refused.
+# A card that declares an overall rewrite is exempt.
+HARVEST_COLLAPSE_THRESHOLD = float(os.environ.get("AD_HARVEST_COLLAPSE_THRESHOLD", "0.5"))
+# The card of a fix/rebase round names the PR it works on ("重基PR：#1845 fleet/...").
+# Only such a card is compared with a PR head: an ordinary card that mentions a PR
+# must not be harvested against the head of a foreign PR.
+HARVEST_TARGET_PR = re.compile(
+    r"(?:重基\s*PR|(?:fix\s*/\s*rebase|rebase|fix)\s*(?:PR|pull\s+request))\s*[：:# ]+\s*#?(\d+)\b", re.I)
+HARVEST_REWRITE_MARKER = re.compile(r"整体重写\s*[:：]?\s*(?:是|true|yes|允许|豁免)", re.I)
+
+def harvest_card_body(issue):
+    """Read the card of an issue; returns (body, reason).
+
+    A reason means the card could not be read or parsed: that is not an empty card,
+    the caller must not treat it as one (Refs #1833)."""
+    try:
+        rc, out, err = gh(["issue", "view", str(issue), "--json", "body"])
+    except (OSError, subprocess.SubprocessError) as error:
+        return "", f"the card of #{issue} cannot be read: {error!r}"
+    if rc:
+        return "", f"the card of #{issue} cannot be read (gh rc={rc}): {err.strip()[-160:]}"
+    try:
+        payload = json.loads(out)
+    except ValueError as error:
+        return "", f"the card of #{issue} cannot be parsed: {error}"
+    body = payload.get("body") if isinstance(payload, dict) else None
+    if not isinstance(body, str):
+        return "", f"the card of #{issue} carries no body"
+    return body, ""
+
+def harvest_collapse_guard(issue, ref):
+    """Return (allowed, detail) for the harvest of a fix/rebase round (Refs #1833).
+
+    `ref` is the head that would actually be pushed after artifact filtering.
+    Rebuilt commits must also contain the old PR head. Every doubt refuses the push."""
+    body, reason = harvest_card_body(issue)
+    if reason: return False, reason
+    if HARVEST_REWRITE_MARKER.search(body):
+        return True, "the card declares an overall rewrite: the guard is waived"
+    match = HARVEST_TARGET_PR.search(body)
+    if not match:
+        return True, "the card names no target PR: there is nothing to compare with"
+    pr = match.group(1)
+    try:
+        # pr view exposes no baseRefOid. REST provides both SHAs in one response;
+        # call sh directly because gh api has no -R option (the gh helper adds it).
+        rc, out, err = sh(["gh", "api", f"repos/{REPO}/pulls/{pr}"], timeout=60)
+    except (OSError, subprocess.SubprocessError) as error:
+        return False, f"PR #{pr} cannot be read: {error!r}"
+    if rc:
+        return False, f"PR #{pr} cannot be read (gh rc={rc}): {err.strip()[-160:]}"
+    try:
+        pr_data = json.loads(out)
+        old, base = pr_data["head"]["sha"], pr_data["base"]["sha"]
+        if not isinstance(old, str) or not isinstance(base, str) or not old or not base:
+            raise ValueError("missing PR head/base SHA")
+    except (ValueError, KeyError, TypeError) as error:
+        return False, f"PR #{pr} metadata cannot be parsed: {error}"
+
+    def git(*args):
+        code, stdout, stderr = sh(["git", "-C", LOCAL, *args])
+        if code: raise RuntimeError(stderr.strip()[-160:] or f"git {args[0]} failed")
+        return stdout.strip()
+    try:
+        new_sha = git("rev-parse", "--verify", f"{ref}^{{commit}}")
+        before_size = diff_size(base, old)
+        after_size = diff_size(base, ref)
+    except (RuntimeError, OSError, subprocess.SubprocessError) as error:
+        return False, f"PR #{pr} cannot be checked: {error}"
+    ancestry_failure = (f"PR #{pr}: the ancestry check failed, refusing the push "
+                        f"({old[:12]}->{new_sha[:12]}, sizes {before_size}->{after_size})")
+    try:
+        rc, _, err = sh(["git", "-C", LOCAL, "merge-base", "--is-ancestor", old, new_sha])
+    except (OSError, subprocess.SubprocessError) as error:
+        return False, f"{ancestry_failure}: {error}"
+    if rc == 1:
+        return False, (f"PR #{pr}: the new head {new_sha[:12]} does not contain "
+                       f"the head the PR had {old[:12]} (sizes {before_size}->{after_size})")
+    if rc:
+        return False, f"{ancestry_failure}: {err.strip()[-160:]}"
+    reasons = []
+    for name, index in (("files", 0), ("lines", 1)):
+        before, after = before_size[index], after_size[index]
+        if before and after < before * (1 - HARVEST_COLLAPSE_THRESHOLD):
+            reasons.append(f"{name} collapsed {before}->{after}")
+    if reasons:
+        return False, (f"PR #{pr}: the change collapsed ({'; '.join(reasons)}), sizes "
+                       f"{before_size}->{after_size} ({old[:12]}->{new_sha[:12]})")
+    return True, (f"PR #{pr}: the new head {new_sha[:12]} contains the head the PR had {old[:12]} "
+                  f"and the size holds ({before_size}->{after_size})")
+
+def harvest_guard_record(run, detail):
+    """Append the verdict of the guard to the run log: the failure trail of the AD.
+
+    The brain log carries the verdict for the operator, the run log keeps it next to
+    the run the lane produced (Refs #1833)."""
+    try:
+        os.makedirs(f"{D}/runs", exist_ok=True)
+        with open(f"{D}/runs/{run}.log", "a") as f:
+            f.write(f"{time.strftime('%F %T')} harvest-collapse-guard: {detail}\n")
+    except OSError as e:
+        log(f"run {run}: harvest guard record not written ({e!r})", brain=False)
+
+def diff_size(base, head):
+    """Count changed paths and inserted+deleted lines relative to base."""
+    rc, paths, err = sh(["git", "-C", LOCAL, "diff", "--no-renames", "--name-only", base, head])
+    if rc: raise RuntimeError(err.strip()[-160:] or "git diff name-only failed")
+    rc, stats, err = sh(["git", "-C", LOCAL, "diff", "--no-renames", "--numstat", base, head])
+    if rc: raise RuntimeError(err.strip()[-160:] or "git diff numstat failed")
+    lines = 0
+    for row in stats.splitlines():
+        added, deleted, *_ = row.split("\t")
+        if added.isdigit() and deleted.isdigit(): lines += int(added) + int(deleted)
+    return len(paths.splitlines()) if paths else 0, lines
 
 def filter_harvest(ref, base):
     """Rebuild the harvested branch without the artifacts that never enter a PR.
@@ -1839,6 +2497,54 @@ def filter_harvest(ref, base):
             parent = git("commit-tree", tree, "-p", parent, env=commit_env, inp=message).strip().decode()
     return parent, removed, tree_of(parent) == tree_of(base)
 
+def requeue_executor_start_failure(lane, n, run):
+    """Requeue an executor startup failure without counting a task attempt."""
+    rc, _, err = gh(["issue", "edit", str(n), "--remove-label", "in-progress",
+                     "--remove-label", "lane-failed", "--add-label", "lane-ready"])
+    if rc:
+        return {"done": False, "status": "requeue-failed", "error": err, "missing": []}
+    log(f"{lane} executor failed to start #{n} (run {run}) → lane-ready, lane paused 600s")
+    return {"done": True, "status": "lane-ready", "error": None, "missing": []}
+
+def origin_branch_head(branch):
+    """Return the head commit of a branch on origin ("" when the branch is not there).
+
+    The harvest push and this read use the same remote, so the answer describes the
+    branch the PR would be opened from."""
+    rc, out, _ = sh(["git", "-C", LOCAL, "ls-remote", "origin", f"refs/heads/{branch}"], timeout=60)
+    if rc: return ""
+    parts = out.split()
+    return parts[0] if parts else ""
+
+def local_commit(rev):
+    """Return the commit sha of a local revision ("" when it cannot be resolved)."""
+    rc, out, _ = sh(["git", "-C", LOCAL, "rev-parse", "--verify", "--quiet", f"{rev}^{{commit}}"], timeout=60)
+    return out.strip() if not rc else ""
+
+def harvest_push(lane, n, branch, head):
+    """Push the harvested branch to origin and tell whether the harvest may continue.
+
+    Returns (ok, error).  A push that failed without any error output (empty stderr)
+    but whose branch is already on origin at the pushed head means the update reached
+    origin before the failure was reported: the harvest goes on to the PR instead of
+    pushing again on every tick (Refs #1640; the dispatch engine reads the same
+    evidence).  A push that said why it failed, a branch that is not on origin and a
+    branch that carries another head or an unresolved local head all stay push failures."""
+    rc, _, err = sh(["git", "-C", LOCAL, "push", "-q", "origin", f"{head}:refs/heads/{branch}"], timeout=180)
+    if not rc: return True, None
+    reason = err.strip()[-200:]
+    if not reason:
+        remote, pushed = origin_branch_head(branch), local_commit(head)
+        if remote and pushed and remote == pushed:
+            log(f"{lane} #{n} push rc={rc} without error output; branch {branch} is on origin "
+                f"at {remote[:8]}; continuing to PR", brain=False)
+            return True, None
+        reason = ("no error output and the branch is not on origin" if not remote else
+                  f"no error output; cannot resolve the pushed head {head}" if not pushed else
+                  f"no error output; branch {branch} is on origin at {remote[:8]}, "
+                  f"not at the pushed head {pushed[:8]}")
+    return False, f"push failed: {reason}"
+
 def finish(lane, cfg, st, info, state):
     """Harvest a finished lane run: push the branch, open the PR, relabel the issue.
 
@@ -1846,6 +2552,11 @@ def finish(lane, cfg, st, info, state):
     "missing": [...]}. `done` means the lane slot is free again; `error` carries the
     explicit reason back to the caller (Refs #1704)."""
     n, run = st["issue"], st["run"]
+    if info.get("error_class") == "executor_start_failed":
+        pause_executor_start_lane(lane)
+        # Even a commit made during the startup grace period is not a completed
+        # task. Leave the run's work intact and return the card for another attempt.
+        return requeue_executor_start_failure(lane, n, run)
     if st.get("class") == "verify":
         missing = review_evidence_errors(info.get("evidence"))
         if missing:
@@ -1858,18 +2569,39 @@ def finish(lane, cfg, st, info, state):
         try:
             head, removed, empty = filter_harvest(f"refs/fleet/{lane}", st.get("base"))
         except (OSError, subprocess.SubprocessError, RuntimeError) as error:
-            # fail closed: an undecided filter never pushes anything
-            log(f"{lane} #{n} run {run} harvest filter failed: {error}")
-            return {"done": False, "status": "filter-failed", "error": str(error), "missing": []}
+            # Fail closed before the collapse guard as well: record the refusal and
+            # release the lane instead of retrying an uncheckable harvest forever.
+            detail = f"harvest filter failed: {error}"
+            harvest_guard_record(run, detail)
+            log(f"{lane} #{n} run {run} {detail}")
+            label_lane_failed(n, f"Lane {lane} run `{run}` harvest refused: {detail}\n\n"
+                               "Label `lane-failed`; re-add `lane-ready` to retry.")
+            mark_done(state, n)
+            return {"done": True, "status": "filter-failed", "error": str(error), "missing": []}
         if removed:
             log(f"{lane} #{n} run {run} harvest excluded: {json.dumps(removed, ensure_ascii=True)}")
+        # An empty diff can be a fix that undoes the entire PR. Check it before
+        # the empty-harvest exit so the refusal records the PR, heads and sizes.
+        allowed, guard_detail = harvest_collapse_guard(n, head)
+        if not allowed:
+            log(f"{lane} #{n} run {run} harvest collapse guard rejected: {guard_detail}")
+            harvest_guard_record(run, guard_detail)
+            label_lane_failed(n, f"Lane {lane} run `{run}` harvest refused by #1833 collapse guard: {guard_detail}\n\nLabel `lane-failed`; re-add `lane-ready` to retry.")
+            mark_done(state, n)
+            return {"done": True, "status": "harvest-collapse-rejected", "error": guard_detail, "missing": []}
         if empty:
-            label_lane_failed(n, f"Lane {lane} run `{run}` has no effective change after the artifact filter "
-                               f"({len(removed)} excluded path(s)).\n\nLabel `lane-failed`; re-add `lane-ready` to retry.")
+            detail = (f"no effective change after the artifact filter ({len(removed)} excluded path(s)); "
+                      f"{guard_detail}")
+            log(f"{lane} #{n} run {run} harvest refused: {detail}")
+            harvest_guard_record(run, detail)
+            label_lane_failed(n, f"Lane {lane} run `{run}` has {detail}.\n\n"
+                               "Label `lane-failed`; re-add `lane-ready` to retry.")
+            clear_budget_history(state, n)
             mark_done(state, n)
             return {"done": True, "status": "lane-failed", "error": "empty after artifact filtering", "missing": []}
-        rc, _, err = sh(["git", "-C", LOCAL, "push", "-q", "origin", f"{head}:refs/heads/{b}"], timeout=180)
-        if rc: return {"done": False, "status": "push-failed", "error": f"push failed: {err.strip()[-200:]}", "missing": []}
+        log(f"{lane} #{n} run {run} harvest collapse guard: {guard_detail}", brain=False)
+        pushed, push_error = harvest_push(lane, n, b, head)
+        if not pushed: return {"done": False, "status": "push-failed", "error": push_error, "missing": []}
         _, lj, _ = gh(["issue", "view", str(n), "--json", "labels"])
         if "lane-pr" in lj:
             record_verify_time(state, n, "evidence_ready")
@@ -1893,12 +2625,16 @@ def finish(lane, cfg, st, info, state):
         rc, out, err = gh(["pr", "create", "--base", "main", "--head", b, "--title", title, "--body", body])
         url = (out.strip().splitlines() or [""])[-1] if not rc else f"(pr create failed: {err.strip()[-160:]})"
         gh(["issue", "edit", str(n), "--remove-label", "in-progress", "--remove-label", "lane-ready", "--add-label", "lane-pr"])
+        clear_budget_history(state, n)
         record_verify_time(state, n, "evidence_ready")
         log(f"{lane} finished #{n} (run {run}, {info.get('status')}) → {url}"); mark_done(state, n)
         return {"done": True, "status": "pr-created", "error": None, "missing": []}
     else:
+        if budget_failure(info):
+            return hold_budget_failure(lane, cfg, st, info, state)
         label_lane_failed(n, f"Lane {lane} ({cfg['host']}, run `{run}`) ended `{info.get('status')}` without a commit "
             f"(error_class `{info.get('error_class')}`).\n\nExecutor summary: {info.get('summary')}\n\nLabel `lane-failed`; re-add `lane-ready` to retry.")
+        clear_budget_history(state, n)
         mark_done(state, n); log(f"{lane} ended #{n} without a commit (run {run}, {info.get('status')}/{info.get('error_class')}) → labelled lane-failed")
         return {"done": True, "status": "lane-failed", "error": None, "missing": []}
 
@@ -2108,12 +2844,15 @@ def tick(lanes, state, last_warn):
         release_unreachable_pauses(h, host_pause_paths(h, lanes_of_host(lanes, h)))
         mark_recovery_runs(state, h, lanes)
         scopes = paused_scopes()  # the released pause opens the host again
+    release_recovered_budget_holds(state, lanes)
     q = None
     queue_failed = False
     queue_error = ""
     base = None
     outcomes = {}
     freed_lanes = set()
+    memory_rejections = {}
+    dispatch_eligible_lanes = set()
 
     def tick_queue():
         """Load the shared queue on the first dispatch attempt, after that lane's harvest.
@@ -2186,7 +2925,22 @@ def tick(lanes, state, last_warn):
             if preferred and any(bool(i.get("verify")) == preferred for i in candidates):
                 candidates.sort(key=lambda i: bool(i.get("verify")) != preferred)
                 log(f"queue share: {L} prefers verify (verify deficit={verify_slots}, work slots={work_slots}); other class yields", brain=False)
+        if candidates: dispatch_eligible_lanes.add(L)
+        # Share a probe across this lane's candidates only. Another lane on the
+        # same host must recheck after a session starts or memory recovers.
+        memory_cache = {}
+        eligible = []
+        for candidate in candidates:
+            rejection = memory_preflight(L, cfg, candidate, memory_cache)
+            if rejection:
+                memory_rejections.setdefault(candidate["n"], {})[L] = rejection
+                detail = rejection["available_mb"]
+                shown = "unavailable" if detail is None else f"{detail}MB"
+                log(f"{L} #{candidate['n']} skipped: blocked-by-host-memory host={rejection['host']} available={shown} threshold={rejection['threshold_mb']}MB", brain=False)
+                continue
+            eligible.append(candidate)
         for c in candidates:
+            if c not in eligible: continue
             status, detail = label_state(c["n"])
             if status == "fresh": pick = c; break
             if status == "stale":
@@ -2234,6 +2988,9 @@ def tick(lanes, state, last_warn):
             # the run ended: the lane is idle from its own end time on (Refs #1688)
             idle_open(state, L, r["run"].get("ended_at"), now, last_alive)
             result = finish(L, lanes[L], st, r["run"], state)
+            # the harvest may have cooled down a lane (a startup failure pauses its
+            # lane): the pause must be visible to the rest of this tick
+            scopes = paused_scopes()
             if result.get("done"):
                 recovery_runs(state).pop(L, None)
                 state.pop(L); save_state(state); freed = True
@@ -2269,6 +3026,17 @@ def tick(lanes, state, last_warn):
     # stale search rows are not dispatchable: drop them (and log the skip) before counting
     q = freshen_queue(q, state)
     blocked = sum(not i["deps_ok"] for i in q)
+    memory_blocks = {}
+    for item in q:
+        # A lane that took a card (or failed dispatch) no longer offers capacity
+        # to the remaining queue, even though it was eligible earlier this tick.
+        candidates = [L for L in dispatch_eligible_lanes
+                      if outcomes.get(L) == "no-card" and not state.get(L)
+                      and can_take(lanes[L]["backend"], item, L) and item.get("deps_ok", True)]
+        rejections = memory_rejections.get(item["n"], {})
+        if candidates and all(L in rejections for L in candidates):
+            memory_blocks[item["n"]] = list(rejections.values())
+    blocked += len(memory_blocks)
     ready = len(q) - blocked
     # refill when the queue is short, or when some backend's lanes could not all be fed (counting cross-pin fallback)
     short = {b: sum(c["backend"] == b for c in lanes.values()) - sum(1 for i in q if i.get("deps_ok", True) and can_take(b, i, verify_gate=False))
@@ -2287,7 +3055,9 @@ def tick(lanes, state, last_warn):
     state["_tick_at"] = now
     observe_verify_verdicts(state)
     save_state(state)
+    refresh_minimax_burn()  # the burn watchdog refreshes the reading the status shows (Refs #1671)
     st = status_snapshot(lanes, state, res, ready, blocked, records)
+    st["_memory_blocks"] = memory_blocks
     with open(f"{D}/lanes-status.json", "w") as stream:
         json.dump(st, stream, ensure_ascii=False, indent=1)
     return last_warn
@@ -2368,6 +3138,100 @@ def sleep_chunk(total=TICK, chunk=5):
         time.sleep(step)
         rem -= step
     open(f"{D}/heartbeat", "w").write(time.strftime("%F %T") + "\n")
+
+
+SHADOW_VERDICT_LOG = f"{D}/shadow-verdicts.jsonl"  # append-only tester shadow log (Refs #1986)
+
+
+def _validate_shadow(row):
+    verdicts = ("pass", "fail", "insufficient_evidence")
+    if type(row.get("pr")) is not int or row["pr"] <= 0:
+        raise ValueError("shadow PR must be a positive integer")
+    if row.get("lane_verdict") not in verdicts or row.get("tester_verdict") not in verdicts:
+        raise ValueError("invalid shadow verdict")
+    stamp = row.get("timestamp")
+    if not isinstance(stamp, str):
+        raise ValueError("shadow timestamp must be an ISO-8601 string")
+    parsed = datetime.fromisoformat(stamp.replace("Z", "+00:00"))
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        raise ValueError("shadow timestamp requires a timezone")
+    if row.get("final_outcome") not in (None, "pass", "fail"):
+        raise ValueError("final outcome must be pass or fail")
+
+
+def _shadow_samples(stream):
+    samples = {}
+    for line in stream:
+        if not line.endswith("\n"):
+            raise ValueError("incomplete shadow log record")
+        row = json.loads(line)
+        if not isinstance(row, dict):
+            raise ValueError("invalid shadow log record")
+        _validate_shadow(row)
+        old = samples.get(row["pr"])
+        if old:
+            if any(old[k] != row[k] for k in ("lane_verdict", "tester_verdict")):
+                raise ValueError("conflicting shadow verdict")
+            if old.get("final_outcome") not in (None, row.get("final_outcome")):
+                raise ValueError("conflicting final outcome")
+        samples[row["pr"]] = row
+    return samples
+
+
+def record_shadow_verdict(path=None, *, pr, lane_verdict, tester_verdict, timestamp,
+                          final_outcome=None):
+    """Append observational evidence only; never dispatch, merge, or alter gates.
+
+    One immutable pair of opinions per PR. Retries (including a new timestamp)
+    are no-ops; final pass/fail correctness may be filled once. Insufficient
+    evidence is an abstention, never a hit. The log is append-only JSONL; the
+    default path is the control plane shadow log, a caller may pass its own.
+    I/O/corruption errors propagate; callers must not interpret them as approval.
+    """
+    import fcntl
+    path = path or SHADOW_VERDICT_LOG
+    row = dict(pr=pr, lane_verdict=lane_verdict, tester_verdict=tester_verdict,
+               timestamp=timestamp, final_outcome=final_outcome)
+    _validate_shadow(row)
+    with open(path, "a+", encoding="utf-8") as stream:
+        fcntl.flock(stream, fcntl.LOCK_EX)
+        stream.seek(0)
+        old = _shadow_samples(stream).get(pr)
+        if old:
+            if any(old[k] != row[k] for k in ("lane_verdict", "tester_verdict")):
+                raise ValueError("conflicting shadow verdict")
+            if final_outcome is None or final_outcome == old.get("final_outcome"):
+                return False
+            if old.get("final_outcome") is not None:
+                raise ValueError("conflicting final outcome")
+        stream.write(json.dumps(row, sort_keys=True) + "\n")
+        stream.flush()
+        os.fsync(stream.fileno())
+    return True
+
+
+def shadow_verdict_stats(path=None):
+    """Count unique PRs, disagreements and hits; accuracy uses resolved PRs only."""
+    import fcntl
+    path = path or SHADOW_VERDICT_LOG
+    try:
+        stream = open(path, encoding="utf-8")
+    except FileNotFoundError:
+        rows = []
+    else:
+        with stream:
+            fcntl.flock(stream, fcntl.LOCK_SH)
+            rows = list(_shadow_samples(stream).values())
+    resolved = [r for r in rows if r.get("final_outcome") is not None]
+    result = dict(samples=len(rows),
+                  disagreements=sum(r["lane_verdict"] != r["tester_verdict"] for r in rows),
+                  resolved=len(resolved))
+    for side in ("lane", "tester"):
+        hits = sum(r[side + "_verdict"] == r["final_outcome"] for r in resolved)
+        result[side + "_hits"] = hits
+        result[side + "_accuracy"] = hits / len(resolved) if resolved else None
+    return result
+
 
 def main():
     lanes = load(f"{D}/lanes.json", {}); last_warn = 0

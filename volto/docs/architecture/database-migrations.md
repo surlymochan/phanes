@@ -24,7 +24,8 @@ lineages that the runner supports, and the checks that guard an upgrade.
   after the migrations, or after a stop that did not close the file cleanly. The check reads every
   page, so it takes minutes on a large file.
 - A new database does not run the migrations. `createLatestDatabase` execs `LATEST_SCHEMA_SQL` and
-  writes every marker as applied. `volto-database-schema-parity.test.ts` compares the two paths.
+  writes every marker as applied. `src/backend/openbot-database-schema-parity.test.ts` compares
+  the two paths.
 
 ## Two lineages, one version number
 
@@ -49,7 +50,7 @@ for two operations, so the fork appends the upstream operations at the next vers
 
 A marker is a record of the past. It says which operation ran on the computer and when it ran.
 
-- A shipped migration must not change. The file `openbot-database-schema-history.json` records the
+- A shipped migration must not change. The file `volto-database-schema-history.json` records the
   schema change of every version, and the parity test fails when a recorded entry changes. A marker
   with another meaning is a change to a shipped migration.
 - The time of a marker is data about the machine. Rewriting the marker replaces the time of the
@@ -164,11 +165,11 @@ backoff table, so the two paths agree at version 49.
 
 - `src/backend/volto-database-schema.ts` holds the migration registry, the reserved schema check,
   and the two build paths.
-- `src/backend/openbot-database-schema-history.json` holds the recorded schema change of every
+- `src/backend/volto-database-schema-history.json` holds the recorded schema change of every
   version of the fork. Each entry names the objects that the version added, changed or dropped, and
   holds the text of the declaration. A dropped object has the value `null`. The value is the
   declaration itself and not a hash of it.
-- `src/backend/openbot-database-upstream-schema-history.json` holds the recorded schema change of
+- `src/backend/volto-database-upstream-schema-history.json` holds the recorded schema change of
   the upstream versions 45, 46 and 47. The parity test finds each of these changes at the next fork
   version: the upstream 45 at 46, the upstream 46 at 47 and the upstream 47 at 48.
 - `src/backend/routine-backoff-migration.test.ts` covers the backoff table, the fork and the
@@ -178,8 +179,8 @@ backoff table, so the two paths agree at version 49.
 - `src/backend/workflow-migration.test.ts` covers the workflow tables for every released version.
 - `src/backend/agent-thread-migration.test.ts` covers the move of the task rows into the side thread
   table.
-- `src/backend/volto-database.test.ts` covers the upgrade of the whole database.
-- `src/backend/volto-database-schema-parity.test.ts` covers the two build paths and the two
+- `src/backend/openbot-database.test.ts` covers the upgrade of the whole database.
+- `src/backend/openbot-database-schema-parity.test.ts` covers the two build paths and the two
   history files.
 
 ## Limits

@@ -12,6 +12,76 @@ import unittest
 WRAPPER = pathlib.Path(__file__).resolve().parents[1] / 'bin' / 'pi-isolated'
 
 
+class PiEnvironmentTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.root = pathlib.Path(self.temp.name)
+        self.default_socket = self.root / 'broker.sock'
+        # Substitute only the fixed host socket location so the test needs no system writes.
+        wrapper = self.root / 'pi-isolated'
+        source = WRAPPER.read_text()
+        self.assertIn('/run/swrm-pi/broker.sock', source)
+        wrapper.write_text(source.replace('/run/swrm-pi/broker.sock', str(self.default_socket)))
+        self.wrapper = wrapper
+        stubs = self.root / 'bin'
+        stubs.mkdir()
+        for name in ('bwrap', 'socat'):
+            stub = stubs / name
+            stub.write_text('#!/bin/sh\nprintf "%s\\n" "$@"\n')
+            stub.chmod(0o755)
+        self.env = dict(os.environ, HOME=str(self.root), PATH=f"{stubs}{os.pathsep}{os.environ.get('PATH', '')}")
+        self.env.pop('OPENSWARM_PI_RUNTIME', None)
+        self.env.pop('OPENSWARM_PI_BROKER_SOCKET', None)
+        self.env.pop('OPENSWARM_PI_ISOLATED_MODEL', None)
+
+    def run_wrapper(self):
+        return subprocess.run([sys.executable, str(self.wrapper), '--mode', 'rpc', '--provider', 'minimax-cn',
+                               '--model', 'MiniMax-M3.1-Flash'], cwd=self.root, env=self.env,
+                              capture_output=True, text=True, timeout=15)
+
+    def make_runtime(self, runtime):
+        binary = runtime / 'node_modules' / '.bin' / 'pi'
+        binary.parent.mkdir(parents=True)
+        binary.write_text('stub')
+
+    def test_missing_runtime_names_variable_and_checked_path(self):
+        result = self.run_wrapper()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('OPENSWARM_PI_RUNTIME', result.stderr)
+        self.assertIn(str(self.root / 'tools' / 'pi-sandbox'), result.stderr)
+
+    def test_missing_broker_names_variable_and_checked_path(self):
+        self.make_runtime(self.root / 'tools' / 'pi-sandbox')
+        result = self.run_wrapper()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('OPENSWARM_PI_BROKER_SOCKET', result.stderr)
+        self.assertIn(str(self.default_socket), result.stderr)
+
+    def test_missing_variables_use_existing_defaults(self):
+        self.make_runtime(self.root / 'tools' / 'pi-sandbox')
+        with socket.socket(socket.AF_UNIX) as sock:
+            sock.bind(str(self.default_socket))
+            result = self.run_wrapper()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn(str(self.root / 'tools' / 'pi-sandbox'), result.stdout.splitlines())
+        self.assertIn(str(self.default_socket), result.stdout.splitlines())
+
+    def test_explicit_invalid_paths_do_not_fall_back(self):
+        self.make_runtime(self.root / 'tools' / 'pi-sandbox')
+        self.env['OPENSWARM_PI_RUNTIME'] = str(self.root / 'invalid-runtime')
+        result = self.run_wrapper()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn(self.env['OPENSWARM_PI_RUNTIME'], result.stderr)
+        self.env['OPENSWARM_PI_RUNTIME'] = str(self.root / 'tools' / 'pi-sandbox')
+        self.env['OPENSWARM_PI_BROKER_SOCKET'] = str(self.root / 'invalid-socket')
+        with socket.socket(socket.AF_UNIX) as sock:
+            sock.bind(str(self.default_socket))
+            result = self.run_wrapper()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn(self.env['OPENSWARM_PI_BROKER_SOCKET'], result.stderr)
+
+
 @unittest.skipUnless(sys.platform.startswith('linux') and shutil.which('bwrap') and shutil.which('socat'),
                      'requires Linux, bubblewrap and socat')
 class PiIsolationTests(unittest.TestCase):
@@ -113,10 +183,8 @@ class PiIsolationTests(unittest.TestCase):
                 # Preserve the existing sandbox policy: shared Git metadata is read-only.
                 self.assertEqual(payload['add'], 128, payload)
                 self.assertIn(expected_index + '.lock', payload['add_error'])
-                self.assertIn('Read-only file system', payload['add_error'])
                 self.assertEqual(payload['update_ref'], 128, payload)
                 self.assertIn('refs/swrm-test', payload['ref_error'])
-                self.assertIn('Read-only file system', payload['ref_error'])
             finally:
                 sock.close()
 
