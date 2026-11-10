@@ -266,6 +266,12 @@ class ReplenishTriggerTests(unittest.TestCase):
         return text, path, server, answers
 
     @staticmethod
+    def settle(state):
+        """Let the lost request be older than the settle time."""
+        for marker in state["_import_pending"]:
+            state["_import_pending"][marker] -= autodispatch.CREATE_SETTLE_S + 1
+
+    @staticmethod
     def issue_of(args, number):
         return {"number": number, "title": args[3], "body": args[5], "createdAt": "2999-01-01T00:00:00Z"}
 
@@ -292,9 +298,26 @@ class ReplenishTriggerTests(unittest.TestCase):
         answers += [(1, "", "connection refused"), (0, "https://example.com/issues/778", "")]
         state = {}
         self.assertEqual(autodispatch.replenish(1, state), [])
-        self.assertEqual(autodispatch.replenish(1, state), ["#778"])
+        self.assertEqual(autodispatch.replenish(1, state), [])     # inside the settle time: may still be in flight
+        self.settle(state)
+        self.assertEqual(autodispatch.replenish(1, state), [])     # first empty proof after the settle time
+        self.assertEqual(len(server), 1)
+        self.assertEqual(autodispatch.replenish(1, state), ["#778"])  # second one: created again
         self.assertEqual(len(server), 2)
         self.assertEqual(state["_imported"], [path])
+
+    def test_a_create_still_in_flight_is_not_filed_a_second_time(self):
+        """The listing is empty while the lost request is still running; it succeeds afterwards."""
+        text, path, server, answers = self.lost_answer_setup(
+            "In flight", lambda server, args: (0, json.dumps([self.issue_of(server[0], 790)] if len(server) > 1 else []), ""))
+        answers += [(1, "", "timeout")]
+        state = {}
+        self.assertEqual(autodispatch.replenish(1, state), [])
+        self.assertEqual(autodispatch.replenish(1, state), [])     # empty now: the request has not landed
+        server.append(["issue", "create", "x", "In flight", "y", server[0][5]])  # the original request lands
+        server[0], server[1] = server[1], server[0]
+        self.assertEqual(autodispatch.replenish(1, state), ["#790(already filed)"])
+        self.assertEqual(len(server), 2)                           # the lost request + its landing; no retry was sent
 
     def test_a_stop_after_the_create_leaves_a_record_that_prevents_a_second_issue(self):
         """The process stops between the create and the record of the import: the restart finds the issue."""
@@ -343,6 +366,8 @@ class ReplenishTriggerTests(unittest.TestCase):
         answers += [(1, "", "timeout"), (0, "https://example.com/issues/781", "")]
         state = {}
         self.assertEqual(autodispatch.replenish(1, state), [])
+        self.settle(state)
+        self.assertEqual(autodispatch.replenish(1, state), [])
         self.assertEqual(autodispatch.replenish(1, state), ["#781"])
         self.assertEqual(len(server), 2)
 
@@ -351,6 +376,8 @@ class ReplenishTriggerTests(unittest.TestCase):
         text, path, server, answers = self.lost_answer_setup("Same title", lambda server, args: (0, json.dumps([dict(other, createdAt="2999-01-01T00:00:00Z")]), ""))
         answers += [(1, "", "timeout"), (0, "https://example.com/issues/780", "")]
         state = {}
+        self.assertEqual(autodispatch.replenish(1, state), [])
+        self.settle(state)
         self.assertEqual(autodispatch.replenish(1, state), [])
         self.assertEqual(autodispatch.replenish(1, state), ["#780"])
         self.assertEqual(state["_imported"], [path])

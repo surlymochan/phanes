@@ -3290,6 +3290,8 @@ def file_issue(text, extra=()):
     return "#" + o.strip().rsplit("/", 1)[-1]
 
 CARD_MARK = "ad-card:"
+CREATE_SETTLE_S = env_number("AD_CREATE_SETTLE_S", 300.0)  # create timeout + server propagation: a request may still be in flight until then
+CREATE_EMPTY_PROOFS = 2   # consecutive empty listings, all taken after the settle time, before a card is created again
 LOOKBACK_SKEW_S = 300  # clock skew allowed between this host and the server when a listing is used as proof
 
 def card_marker(key, text):
@@ -3328,8 +3330,9 @@ def file_issue_once(text, key, state):
     The body of the issue carries a marker of the card. Before the call the card is persisted as pending;
     after it, in ONE save, the pending record is replaced by a done record, so a stop between the two
     leaves either a pending card (looked up by its marker) or a done one, never nothing. A pending card is
-    created again only when the listing of the newest issues proves that it does not exist; an unknown answer
-    (failed or truncated listing) never retries. Returns the issue, or None when the card must wait for the next tick."""
+    created again only when the request has certainly ended (CREATE_SETTLE_S) and the listing of the newest
+    issues proves twice that it does not exist; an unknown answer (failed or truncated listing, a request that
+    may still be in flight) never retries. Returns the issue, or None when the card must wait for the next tick."""
     pending = state.setdefault("_import_pending", {})
     done = state.setdefault("_import_done", {})
     marker = card_marker(key, text)
@@ -3343,6 +3346,17 @@ def file_issue_once(text, key, state):
             done[marker] = found; pending.pop(marker, None); save_state(state)
             log(f"card {key}: the earlier creation reached the server as {found}; not filed again", brain=False)
             return found + "(already filed)"
+        # An empty listing is not proof: the lost request may still be in flight on the server and
+        # succeed after the listing. Create again only once the request has certainly ended (settle
+        # time passed) and the listing stayed empty twice after that.
+        empties = state.setdefault("_import_empty", {})
+        if time.time() - float(pending[marker]) < CREATE_SETTLE_S:
+            log(f"card {key}: the earlier creation may still be in flight; checked again next tick", brain=False); return None
+        empties[marker] = int(empties.get(marker, 0)) + 1
+        if empties[marker] < CREATE_EMPTY_PROOFS:
+            save_state(state)
+            log(f"card {key}: not found once after the settle time; confirmed again next tick", brain=False); return None
+        empties.pop(marker, None)
     pending[marker] = time.time(); save_state(state)
     issue = file_issue(text.rstrip("\n") + f"\n\n<!-- {CARD_MARK}{marker} -->\n")
     done[marker] = issue; pending.pop(marker, None); save_state(state)
