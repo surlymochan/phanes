@@ -15,10 +15,11 @@ That script starts (if not already running):
 | lane-merge | `lane-merge` → `merge-loop.sh` | merge Linux-green `fleet/*` PRs | `~/phanes-ctl/autodispatch/merge-heartbeat` |
 | bus-worker-loop (`bus-worker`) | `bus-worker-loop` | GitHub issue bus mode 2 | `~/phanes-ctl/bus-worker/heartbeat`, `bus-worker/` |
 | health-loop | `health-loop` → `health-check.py` | disk/mem/ssh/quota probes; auto PAUSE-* | `~/phanes-ctl/autodispatch/health.heartbeat`, `health.json`, `health.alert` |
+| disk-watermark | `disk-watermark-guard.py --loop` | remote lane host disk watermark guard (Refs #1666) | `~/phanes-ctl/autodispatch/disk-watermark-<host>.json`, `/workspace/phanes/brain/log.md` |
 
 ## Key loops: startup commands & heartbeats
 
-The `start-control-plane` suite manages five resident loops (五件套: `ib-refresh-loop`, `lane-autodispatch`, `lane-merge`, `bus-worker-loop`, `health-loop`), with their startup commands and heartbeat/status files:
+The `start-control-plane` suite manages the five core resident loops (五件套: `ib-refresh-loop`, `lane-autodispatch`, `lane-merge`, `bus-worker-loop`, `health-loop`) plus the `disk-watermark` guard loop (Refs #1666), with their startup commands and heartbeat/status files:
 
 1. **`ib-refresh-loop`** / **`ib-refresh`** (instabox SSH certificate preflight & renewal loop):
    - **Startup command**: `~/phanes-ctl/bin/ctl-loop` (supervises `ib-refresh`) or manual preflight `~/phanes-ctl/bin/ib-refresh`  
@@ -105,6 +106,12 @@ The `start-control-plane` suite manages five resident loops (五件套: `ib-refr
      (or background one-shot: `setsid nohup ~/phanes-ctl/bin/health-loop >/dev/null 2>&1 &`; probe: `python3 ~/phanes-ctl/bin/health-check.py`)
    - **Heartbeat path**: `~/phanes-ctl/autodispatch/health.heartbeat`
    - **Status / alert snapshot**: `~/phanes-ctl/autodispatch/health.json`, `health.alert`
+
+6. **`disk-watermark`** (remote lane host disk watermark guard, Refs #1666):
+   - **Startup command**: `~/phanes-ctl/bin/disk-watermark-guard.py --loop --pause-dir ~/phanes-ctl/autodispatch --brain-log /workspace/phanes/brain/log.md --host lane-host-a`
+     (installed by `bash tools/install-disk-watermark-guard.sh`)
+   - **Heartbeat path**: none; the guard writes its state into `~/phanes-ctl/autodispatch/disk-watermark-<host>.json`
+   - **Status / alert snapshot**: `~/phanes-ctl/autodispatch/disk-watermark-<host>.json`, `/workspace/phanes/brain/log.md`
 
 ### Reboot pid-state helper scope (Refs #887)
 
@@ -415,6 +422,74 @@ lane state):
 python3 tools/check-ad-harvest-backoff.py
 ```
 
+### Budget-window failures (Refs #1668)
+
+An executor run that ends without a commit with `error_class` set to
+`budget_exceeded` is held with `in-progress`, which frees its lane without treating
+the card as failed. An explicit non-budget `error_class` keeps the ordinary failure
+flow even if the status or summary mentions budget exhaustion. Only when the error
+class is absent does AD fall back to budget status or summary hints.
+The AD only removes that hold after it positively confirms that
+the backend window is open. By default AD reads the health-loop's `health.json`
+in its state directory (at most 900 seconds old and strictly newer than the held
+card's `at` timestamp). A snapshot taken before or at the budget failure cannot
+prove recovery; a missing or invalid hold timestamp also keeps the card held.
+For the MiniMax-consuming `pi`
+backend, `minimax.interval_pct` and `minimax.weekly_pct` are percentages remaining;
+both must be positive. An explicit `minimax.exhausted`/`remaining_pct` observation
+is also supported. Missing or unknown short-window data cannot be inferred from
+weekly headroom alone.
+The `minimax` entry must carry its own `observed_at` (epoch seconds, set by the
+health loop only when it actually queried MiniMax); the file's modification time is
+not used, so a refresh of other sources cannot revive an old quota reading. Without
+a fresh `observed_at` newer than the hold, the card stays held. Holds without
+confirmed recovery expire into `lane-failed` after `AD_BUDGET_HOLD_MAX_HOURS`
+(default 6 hours, minimum 1), requiring manual attention.
+
+`AD_BUDGET_PROBE_CMD` can override this source with a command that prints JSON
+quota state, for example `{"exhausted": false}` or
+`{"five_hour": {"used_percentage": 0}}`. A shared probe can return
+`{"backends": {"pi": {...}, "codex": {...}}}` or `{"lanes": {"M17": {...}}}`;
+AD selects the held card's lane/backend before inspecting windows. Flat output
+must describe the target; explicit `lane`/`backend` fields must match. Every
+advertised window must be known and open. Missing,
+invalid, failed, stale, or still-exhausted results keep the card held for a later tick;
+there is no fixed-delay requeue. The per-card consecutive failure count survives a
+requeue and the second budget death (`AD_BUDGET_REQUEUE_MAX`, default `2`) closes the
+card through the ordinary `lane-failed` flow. A later tick clears its terminal
+bookkeeping after the label update succeeds.
+
+**B1:** `result.json` has no required top-level reset timestamp, so AD checks the
+health snapshot or configured window probe before releasing a hold and keeps it held
+on unknown state. `test_default_health_source_releases_only_after_both_windows_recover`,
+`test_default_health_source_rejects_stale_or_unknown_windows`, and
+`test_probe_selects_the_target_lane_and_backend` cover default recovery and isolation.
+`test_default_health_source_requires_a_snapshot_after_the_hold` covers persisted
+holds across ticks: snapshots from 300 seconds before or at the hold retain the
+card, and a newer recovered snapshot permits re-dispatch.
+`test_the_card_stays_held_while_the_window_is_exhausted` and
+`test_the_card_returns_to_the_queue_when_the_window_recovered` exercise the real
+harvest-to-requeue ticks. **B2:** `_budget_failures` persists by issue across requeue;
+the terminal label update is retried if it fails, and the next tick removes the hold
+and count only after it succeeds. `test_the_budget_failure_count_survives_a_requeue`
+and `test_the_bookkeeping_of_a_card_is_cleaned_up_when_it_leaves_the_hold` cover that
+flow. `test_terminal_label_failure_is_retried_after_state_reload` covers two failed
+terminal writes, persisted holds/counts across ticks, and cleanup after recovery.
+`test_a_budget_failure_is_not_a_card_failure` also checks that the harvest
+returns the result structure expected by `tick()` and releases the lane; the real
+failure guard is `test_a_real_failure_keeps_the_lane_failed_flow`.
+`test_exec_error_overrides_budget_words_in_the_summary` checks that an explicit
+execution error remains failed across state reload and window recovery;
+`test_non_budget_class_overrides_conflicting_budget_status` covers quota errors
+with conflicting budget hints.
+
+The offline end-to-end regression drives real `tick()` harvesting, hold, window
+recovery, re-dispatch, and terminal cleanup against a fake fleet:
+
+```bash
+cd tools/lane-autodispatch && python3 -m unittest test_budget_requeue -v
+```
+
 ### AD queue share for verify cards (Refs #1794)
 
 The dispatch queue is split into two classes: **verify cards** (`verify-intent` label +
@@ -603,6 +678,119 @@ never read, written or removed):
 python3 tools/check-health-hosts-ok-pause.py
 ```
 
+## Lane host disk watermark guard (Refs #1666)
+
+`<host>` runs the CX2/CX4 review lanes; a full disk there stalls the reviews.  The
+guard is a resident loop of the box control plane that measures the **remote**
+filesystem of the lane host over ssh (the box and `<host>` have very different
+disks, so the local disk says nothing about the lane host) and holds the lanes of
+that host while the disk is too full.
+
+| Artefact | Role |
+| --- | --- |
+| `tools/disk-usage-probe.py` | the usage probe: `used_pct` / `used_bytes` / `free_bytes` and the top directories, ranked by the **allocated** blocks (`st_blocks`), not by the apparent size (a sparse file looks huge but occupies nothing) |
+| `tools/disk-watermark-guard.py` | the guard: measures the host over ssh, applies the watermark policy, writes the alert row into the brain log and owns the pause marker |
+| `tools/install-disk-watermark-guard.sh` | the installer: deploys the guard **and** its probe dependency, wires the resident loop into the live `~/phanes-ctl/bin/start-control-plane`, replaces the guard that is still running and verifies the new version |
+| `tools/check-disk-watermark.py` | the offline contract check (no ssh, no live state) |
+
+Watermark policy (the thresholds are the ones of the lane host):
+
+| Measured usage | State | Effect |
+| --- | --- | --- |
+| `>= 95%` | `block` | the independent disk gate pauses the host and the brain log gets an alert row |
+| `> 87%` and `< 95%`, previously blocked | `hold` | the pause **stays** (hysteresis): the lane is not released before the recovery threshold |
+| `> 87%` and `< 95%`, previously unblocked | `warn` | the brain log gets a warning; dispatch stays open and no pause is created |
+| `<= 87%` | `recovered` | the guard releases **its own** marker only |
+
+Ownership rules: the guard writes its diagnostic marker only in
+`~/phanes-ctl/autodispatch/.disk-watermark/PAUSE-HOST-<host>`. The shared
+`~/phanes-ctl/autodispatch/PAUSE-HOST-<host>` belongs to health checks and
+operators; the guard never writes or deletes it. Checking its body before a
+replace/unlink cannot protect a concurrent independent writer. A removed
+private marker is restored on the next tick; the independent state file below
+holds the gate throughout that interval. A **failed** probe is never a healthy
+host: the guard fails closed (the host stays paused) and says so in the brain log.
+
+The dispatch gate is independent of the pause marker: the dispatcher reads
+`~/phanes-ctl/autodispatch/disk-watermark-<host>.json` (written by the guard) and
+holds every lane of that host (`host:<host>` scope) even in the window where the
+health sweep has just cleared the marker. Blocked records never expire: if the
+guard stops, the host remains blocked until a successful probe records recovery.
+When upgrading from guard version 1, the shared `auto:disk-watermark host=...`
+marker is left untouched. Once a version 2 state exists, the updated dispatcher
+uses that state in place of the legacy disk marker, so recovery can open the
+gate without an unsafe deletion. Manual and other guards' shared markers still
+hold the host, including when they replace the legacy marker during recovery.
+
+Deploy (on the box, from the repository mirror):
+
+```bash
+DISK_WATERMARK_HOST=lane-host-a bash tools/install-disk-watermark-guard.sh  # default: $HOME/phanes-ctl
+```
+
+The installer stops the resident guard that is still running (an old process would
+keep the old code alive), deploys `disk-watermark-guard.py` and
+`disk-usage-probe.py` next to each other into `~/phanes-ctl/bin`, wires the
+resident loop into the live `~/phanes-ctl/bin/start-control-plane`, updates the
+dispatcher that carries the gate and verifies that the resident guard of the new
+version really runs. If a dispatcher is running, the installer checks that its
+restart entry identifies a dispatcher it can update before stopping any process;
+an unknown entry fails installation and preserves the running processes. A
+dispatcher that was stopped must be running again for installation to succeed.
+Alerts go to `/workspace/phanes/brain/log.md`, the same
+brain log used by the dispatcher. Set `DISK_WATERMARK_BRAIN_LOG` during installation
+to override this path for an isolated deployment. The probe counts allocated
+blocks throughout each directory tree by default; `--max-depth` explicitly
+requests a partial scan.
+
+Review fixes and evidence:
+
+- Marker ownership race: private markers separate disk writes/releases from
+  shared host pauses. `check-disk-watermark.py` injects manual and other-guard
+  writes (in-place and atomic replacement) at creation, refresh and unlink,
+  verifies the shared bytes survive, and checks v1 upgrade and manual pauses
+  in the actual dispatcher gate. The regression suite keeps its block/hold/
+  recovery, marker removal and deployment checks against the private marker;
+  foreign ownership checks still exercise the shared host marker.
+- Recovery boundary: the guard and offline check exercise 95% → 91% → 87%;
+  at 87% the own marker is removed, the independent gate opens and recovery is logged.
+- Dispatcher restart: installer tests cover the updated resident dispatcher's
+  heartbeat, an unknown restart entry preserving the old process, and a start
+  script that fails to restart the dispatcher returning an installation error.
+- B1: blocked state has no TTL; the real dispatch tick test removes the marker
+  and ages the state past 30 minutes, then verifies that <host> gets no run.
+- B2: the probe scans all depths by default; a deep 1 MiB payload must be counted
+  and rank above a shallow 64 KiB directory.
+- B3: the installer, startup example and guard default use the dispatcher brain
+  log path; the installation test verifies a block alert at the configured path.
+
+Manual one-shots:
+
+```bash
+python3 ~/phanes-ctl/bin/disk-watermark-guard.py --pause-dir ~/phanes-ctl/autodispatch \
+    --brain-log /workspace/phanes/brain/log.md --host lane-host-a      # measure once and apply the policy
+python3 ~/phanes-ctl/bin/disk-usage-probe.py --path / --top 10   # the usage probe of a host
+```
+
+Offline acceptance (run from the repository root; no remote SSH or live control
+plane state):
+
+```sh
+git diff --check && python3 tools/check-disk-watermark.py && python3 -m unittest tools.tests.test_disk_watermark_guard
+```
+
+Use that complete command in the host verifier, rather than the prose placeholder
+`run the acceptance command(s) named in the issue`. The placeholder is not shell
+syntax and fails before any test runs. The `&&` chain preserves each failing
+check's exit status and stops immediately; a shell parse error is not evidence
+that the disk guard itself failed.
+
+The contract check covers probe allocation, hysteresis, concurrent foreign-marker
+writes, failed probes, the dispatch gate and the paired probe dependency. The
+unittest suite also exercises installation and replacement of the resident guard
+inside an isolated fake control-plane tree. Passing these offline checks does not
+claim a production deployment or a successful SSH probe of the live lane host;
+those remain separate operator verification steps above.
 ### Executor task / zombie watermark probe (Refs #1826)
 
 The executor services of a lane leak: their cgroup fills up with zombie children until
@@ -648,7 +836,7 @@ summary keeps the temporary file's default `0600` permissions.
 
 Rules of the probe:
 
-- a host without systemd (the macOS box `gocc`) is **skipped** - not degraded, and it is
+- a host without systemd (the macOS box `<host>`) is **skipped** - not degraded, and it is
   not sampled at all;
 - a failed sample (ssh error, missing `systemctl show`) is recorded as **not collected**
   (`"level": "uncollected"`) and never alerts;
@@ -674,13 +862,13 @@ health loop is not rewritten by the probe:
 ```json
 {
   "at": "2026-11-03 19:15:00",
-  "hosts": {"gores1.example.invalid": "degraded"},
+  "hosts": {"<host>.example.invalid": "degraded"},
   "hosts_ok": ["m9.example.invalid"],
-  "hosts_degraded": ["gores1.example.invalid"],
+  "hosts_degraded": ["<host>.example.invalid"],
   "executor_tasks": {
-    "gores1.example.invalid": {
+    "<host>.example.invalid": {
       "status": "collected",
-      "host": "gores1.example.invalid",
+      "host": "<host>.example.invalid",
       "at": "2026-11-03 19:15:00",
       "services": [
         {
@@ -703,7 +891,7 @@ health loop is not rewritten by the probe:
         "run_ids": ["20261103-214705-b66c3f"],
         "groups": [
           {
-            "command": "/usr/bin/fleet-capacity --sweep-loop gocc",
+            "command": "/usr/bin/fleet-capacity --sweep-loop <host>",
             "count": 3,
             "limit": 2,
             "pids": [627900, 627901, 627902],
@@ -720,7 +908,7 @@ health loop is not rewritten by the probe:
 The matching alert line (appended to `health.alert`, one line per alerting service):
 
 ```
-2026-11-03 19:15:00 level=hard source=executor-tasks host=gores1.example.invalid service=openswarm-executor-M19.service zombies=844 tasks=869/1552 ratio=0.56 parents=1210977 snapshot=/home/phanes-ctl/autodispatch/executor-task-snapshots/executor-tasks-gores1.example.invalid-20261103-191500-000000.ps
+2026-11-03 19:15:00 level=hard source=executor-tasks host=<host>.example.invalid service=openswarm-executor-M19.service zombies=844 tasks=869/1552 ratio=0.56 parents=<pid> snapshot=<state-dir>/executor-task-snapshots/executor-tasks-<host>.example.invalid-20261103-191500-000000.ps
 ```
 
 Offline proof (a fake fleet host answers the ssh commands of the probe; no network, no
@@ -1008,6 +1196,7 @@ setsid nohup ~/phanes-ctl/bin/bus-worker-loop >/dev/null 2>&1 &
 setsid nohup ~/phanes-ctl/bin/lane-merge >/dev/null 2>&1 &
 setsid nohup ~/phanes-ctl/bin/ctl-loop >/dev/null 2>&1 &
 setsid nohup ~/phanes-ctl/bin/health-loop >/dev/null 2>&1 &
+setsid nohup ~/phanes-ctl/bin/disk-watermark-guard.py --loop --pause-dir ~/phanes-ctl/autodispatch --brain-log /workspace/phanes/brain/log.md --host lane-host-a >/dev/null 2>&1 &
 ~/phanes-ctl/bin/ib-refresh                  # manual certificate refresh preflight
 ```
 

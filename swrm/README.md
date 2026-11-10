@@ -222,7 +222,7 @@ Every subcommand, grouped by what it does. `swrm <command> --help` lists all fla
 | `swrm lane down` | Stop lane turns, children, and supervisors. | `swrm lane down C1 K1` |
 | `swrm lane launchd-plist` | Print an uninstalled LaunchAgent plist for a lane. | `swrm lane launchd-plist C1` |
 | `swrm lane systemd-unit` | Print an uninstalled systemd unit for a lane. | `swrm lane systemd-unit K1` |
-| `swrm batch` | Queue task cards across fleet hosts and collect their branches. | `swrm batch --repo project --cards ./cards --hosts worker,sandbox --per-host 1 --backend pi --budget-minutes 20 --detach` |
+| `swrm batch` | Queue task cards across fleet hosts and collect their branches. | `swrm batch --repo project --cards ./cards --hosts worker --per-host 1 --backend pi --budget-minutes 20 --detach` |
 | `swrm batch status` | Show the state of one batch. | `swrm batch status <batch-id>` |
 | `swrm bus init` | Create the bus labels, issue template, and protocol README. | `swrm bus init acme/swrm-bus` |
 | `swrm bus status` | Show open bus issues with their executor and age. | `swrm bus status --json` |
@@ -245,7 +245,7 @@ Every subcommand, grouped by what it does. `swrm <command> --help` lists all fla
 | `swrm ingest-claude` | Record Claude plan usage from the statusline hook or from flags. | `swrm ingest-claude --five-hour 80 --seven-day 40` |
 | `swrm fleet status` | Show reachability, paused hosts, lanes, and active runs. | `swrm fleet status --json` |
 | `swrm fleet exec` | Run an swrm command on another host; stdout and the exit code are forwarded. | `swrm fleet exec worker -- lane status` |
-| `swrm fleet ledger pull` | Merge the host ledgers into one fleet ledger file. | `swrm fleet ledger pull --hosts worker,sandbox` |
+| `swrm fleet ledger pull` | Merge the host ledgers into one fleet ledger file. | `swrm fleet ledger pull --hosts worker` |
 | `swrm run --rework-of` | Resume an earlier run's task as a rework, linked in the ledger as `rework_of`. | `swrm run --rework-of <run-id> --cwd ~/code/myrepo --task-file /tmp/task.md` |
 
 ### Learn
@@ -291,7 +291,7 @@ reviewable drafts instead of editing the lesson or pattern catalog.
    accept or reject decision:
 
    ```bash
-   swrm fleet ledger pull --hosts worker,sandbox
+   swrm fleet ledger pull --hosts worker
    swrm ledger ingest --repo acme/project --since 30
    swrm ledger accept <run-id> --reason "Verified on host"
    ```
@@ -503,13 +503,11 @@ and an authenticated executor on each host. `repos` maps the same logical repo n
 {"hosts":[
   {"name":"local","kind":"local","repos":{"project":"~/code/project"}},
   {"name":"worker","kind":"ssh","ssh":"worker-alias","swrm":"~/.local/bin/swrm",
-   "repos":{"project":"~/work/project"}},
-  {"name":"sandbox","kind":"instabox","box":"task-box","swrm":"~/.local/bin/swrm",
    "repos":{"project":"~/work/project"}}
 ]}
 ```
 
-Local hosts use subprocesses; remote commands use `ssh <alias> --` or `instabox ssh <box> --`, with timeouts.
+Local hosts use subprocesses; remote commands use `ssh <alias> --`, with timeouts.
 Without a local repo mapping, the planner uses its current checkout. A missing fleet config defaults to local only.
 
 ```bash
@@ -519,19 +517,28 @@ swrm fleet exec worker -- lane status
 swrm fleet exec --timeout 120 worker -- runs --active --json
 ```
 
-Status uses `instabox ls` and never connects to a paused box. Unknown box states also remain uncontacted.
 `fleet exec` forwards stdout, stderr and the exit code; it does not issue a separate wake command.
+
+`swrm fleet health --json` probes disk, inodes, memory and SSH using the watermarks in
+`resources.health` in the policy. Add `--apply` to hold unhealthy hosts until recovery.
+The command uses `lib/dispatch/pause.py`'s `PauseStore` API and shares its directory with
+lane autodispatch: `$OPENSWARM_PAUSE_DIR`, otherwise `$OPENSWARM_HOME/pauses`
+(default `~/.claude/swrm/pauses`; `XSWARM_*` aliases are supported).
+Health records have no expiry and use `host:<host>@health`, preserving manual pauses.
+`PauseStore(home).is_paused(host=host, now=time.time())` recognizes this independent
+hold even after an operator resumes `host:<host>` and before another health check.
+Recovery removes only the health hold; any manual pause remains in force.
 
 Write one self-contained task per regular file in a cards directory, then dispatch:
 
 ```bash
-swrm batch --repo project --cards ./cards --hosts worker,sandbox --per-host 1 \
+swrm batch --repo project --cards ./cards --hosts worker --per-host 1 \
   --backend pi --model cheap-model --verify 'python3 -m unittest discover -s tests' \
   --budget-minutes 20 --detach
 swrm batch status <batch-id>
 ```
 
-The batch wakes each selected instabox once, checks swrm and the checkout, and makes `--base REV` available
+The batch checks swrm and the checkout, and makes `--base REV` available
 on every host (default: the planner checkout's `HEAD`). Sorted cards are assigned round-robin; `--per-host`
 defaults to 1, with remaining cards queued until slots free. Backend, model and effort flags are optional and pass
 through to each `run --detach`. One line is printed per state change; detached output goes to
