@@ -237,6 +237,7 @@ class Scenario:
         # the refill is not part of a dispatch scenario: the tests that need it call
         # `Scenario.replenish()` on purpose
         self.module.replenish = lambda k, state: []
+        self.module.preflight_card = lambda text: None  # these scenarios judge the hot files, not the card lint
         self.lanes = {name: {"host": host, "backend": "pi", "repo": "/tmp/fleet",
                               "fleet": "/tmp/swrm-fleet"} for name, host in lanes}
         self.state = {}

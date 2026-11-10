@@ -12,8 +12,18 @@ PAUSE-HOST-<HOST>, PAUSE-BACKEND-<BACKEND> and PAUSE-MINT (no new issue minted).
 A hold that a program keeps under a scope of its own (`host:<host>@health`) holds the host as well (Refs #1367).
 A legacy marker with an `until=<epoch|ISO>` deadline stops holding after that deadline, while the file stays as evidence (Refs #1592).
 """
-import base64, hashlib, importlib.util, json, math, os, re, shlex, stat, subprocess, sys, threading, time, traceback, tempfile, concurrent.futures as cf
+import base64, hashlib, json, math, os, re, shlex, stat, subprocess, sys, threading, time, traceback, tempfile, concurrent.futures as cf
+import importlib.util
 from datetime import datetime, timezone
+# Resolve the sibling even when the dispatcher is loaded by path from another directory.
+# A deployment that copies only this file must still dispatch: without the
+# classifier every card is read in full (Refs #1988).
+try:
+    _risk_spec = importlib.util.spec_from_file_location("tester_risk", os.path.join(os.path.dirname(__file__), "tester_risk.py"))
+    tester_risk = importlib.util.module_from_spec(_risk_spec)
+    _risk_spec.loader.exec_module(tester_risk)
+except Exception:
+    tester_risk = None
 HOME = os.path.expanduser("~")
 # The state dir holds the snapshot, the heartbeat and the log. It can be moved for a test or a
 # second deployment (Refs #1697): the reader (tools/check-lanes-status-stall.py) resolves the
@@ -32,6 +42,16 @@ except (StopIteration, TypeError, ValueError):
     STATUS_REFRESH_SECONDS = 30.0
 REPO = "surlymochan/phanes"; LOCAL = "/workspace/phanes-repo"; BRAIN_LOG = "/workspace/phanes/brain/log.md"
 TICK = int(os.environ.get("AD_TICK", "60")); BUDGET = os.environ.get("AD_BUDGET", "45"); LOW = int(os.environ.get("AD_LOW", "10"))
+# The pool is topped up to TARGET when it drops below LOW: refilling to LOW only leaves the
+# pool at the threshold, so the lanes starve again before the next refill (Refs #1662).
+TARGET = int(os.environ.get("AD_TARGET", "20"))
+# A queue read that fails leaves the pool level unknown. The refill then works on the last
+# known level plus the cards minted since, and the number of consecutive failures is
+# bounded: past the bound the AD waits for an authoritative read instead of minting a new
+# batch every tick (Refs #1662).
+QUEUE_UNREADABLE_REFILL_MAX = int(os.environ.get("AD_QUEUE_FAIL_REFILL_MAX", "3"))
+MINT_EVIDENCE = {}  # what the last refill attempt did: rejected cards, planner gate (Refs #1662)
+LAST_MINT_LOG = 0.0  # throttle of the repeated "the planner gate blocked a new card" line
 RULES = ("Rules: work only inside this repository worktree (the current directory). Never create, modify, move or delete "
          "files outside it — not the main repo, not $HOME, not /tmp; for scratch files use $TMPDIR (inside the worktree, cleaned "
          "automatically) and leave cleanup to the executor. Do not push, do not open PRs, do not touch credentials, no network "
@@ -152,6 +172,20 @@ MM_BURN_MAX_AGE_S = env_number("MM_BURN_MAX_AGE_S", 900, int)
 # The burn alert is logged at most every this many seconds (the watchdog runs every tick).
 MM_BURN_WARN_SEC = env_number("MM_BURN_WARN_SEC", 600, int)
 BURN_WARN_AT = 0.0  # epoch second of the last burn warning
+
+# --- review lane load balancing (Refs #1701) ---------------------------------------------
+# The review lanes (CX2/CX4/CX5) take the review cards by their in-flight backlog: the
+# lane with the smallest backlog wins, equal backlogs rotate over the review lanes, and a
+# lane that already carries `AD_REVIEW_MAX_IN_FLIGHT` reviews is skipped - the review
+# waits for a free lane instead of piling up on one lane. The decision (the PR, the
+# chosen lane and the backlog of every review lane) goes to the AD log, so the assignment
+# can be reviewed afterwards.
+REVIEW_MAX_IN_FLIGHT = max(1, env_number("AD_REVIEW_MAX_IN_FLIGHT", 1, int))
+# Tie-break rotation for review lanes (#1701 asks only for round-robin among equal backlogs).
+# Deliberately process-local: autodispatch is one long-running loop, and the real selection
+# input (the in-flight review counts) is re-derived every tick, so a restart merely restarts
+# the rotation and can never skew the load balancing or lose a review.
+REVIEW_ROTATION = {}  # review lane set -> {"count": n, "last": {lane: n}}: the turns of the rotation
 
 # --- dispatch priority (Refs #1705) -------------------------------------------------------
 # Scores deliberately use time in the *dispatchable pool*, not issue creation time.
@@ -1568,6 +1602,144 @@ def memory_preflight(lane, cfg, item, cache):
 def is_review_lane(lane):
     """The review lanes a verify card may be dispatched to (CX2/CX4/CX5)."""
     return bool(re.fullmatch(r"CX(?:2|4|5)(?:[-_].*)?", str(lane), re.I))
+
+def review_lanes(lanes):
+    """The review lanes of a lane set, in the caller's order (CX2/CX4/CX5)."""
+    return [lane for lane in lanes if is_review_lane(lane)]
+
+def review_running(lanes, state):
+    """The reviews every review lane runs right now (the in-flight part of its load).
+
+    A lane runs one card at a time, so a lane runs at most one review (Refs #1701)."""
+    state = state or {}
+    return {lane: 1 if (state.get(lane) or {}).get("class") == "verify" else 0 for lane in lanes}
+
+def review_backlog(lanes, state):
+    """Running reviews plus the complete waiting queue from the latest tick."""
+    state = state or {}
+    running = review_running(lanes, state)
+    waiting = state.get("_review_waiting") or {}
+    return {lane: running[lane] + int(waiting.get(lane, 0) or 0) for lane in lanes}
+
+def pick_reviewer(lanes, loads, max_in_flight=None, log=None, pr=None, eligible=None, rotation=None,
+                  in_flight=None):
+    """Pick the review lane with the smallest review load (Refs #1701).
+
+    `lanes` is the ordered list of the review lanes (CX2/CX4/CX5); the order is also the
+    rotation order of the equal backlogs. `loads` maps a lane to the reviews it carries:
+    the reviews it runs plus the reviews already queued for it. The lane with the smallest
+    load wins; equal loads rotate over the review lanes. `in_flight` counts reviews
+    actually admitted to each lane for the cap check; it defaults to `loads` for plans
+    whose queues are already assigned. A forecast of the shared waiting queue affects
+    ranking and logging, but must not consume admission capacity. A lane that already
+    carries `max_in_flight` admitted reviews is skipped. `eligible` restricts the lanes
+    that may take the card (a lane that is busy or whose backend cannot take it).
+
+    The rotation remembers the turn of every review lane (the turn is taken by the lane
+    that had it the longest ago), so a lane that is busy for a moment does not break the
+    rotation: the reviews keep rotating over the review lanes instead of stacking on one
+    lane. The decision is logged with the backlog snapshot (the PR, the chosen lane and
+    the load of every review lane), so it can be reviewed afterwards."""
+    order = [str(lane) for lane in lanes]
+    snapshot = {lane: int((loads or {}).get(lane, 0) or 0) for lane in order}
+    admitted = snapshot if in_flight is None else in_flight
+    backlog = ", ".join(f"{lane}={snapshot[lane]}" for lane in order)
+    allowed = set(order) if eligible is None else {str(lane) for lane in eligible}
+    free = [lane for lane in order if lane in allowed
+            and (max_in_flight is None or int(admitted.get(lane, 0) or 0) < max_in_flight)]
+    if not free:
+        if log:
+            log(f"review plan: PR #{pr} → lane none (backlog: {backlog}); every free review lane is at "
+                f"its cap ({max_in_flight}), the review waits for a free lane")
+        return None, snapshot
+    smallest = min(snapshot[lane] for lane in free)
+    tied = [lane for lane in free if snapshot[lane] == smallest]
+    key = tuple(order)
+    cursor = REVIEW_ROTATION if rotation is None else rotation
+    turns = cursor.setdefault(key, {"count": 0, "last": {}})
+    # the tied lane that had its turn the longest ago (a lane that never had one comes
+    # first): that is the rotation over the review lanes
+    chosen = min(tied, key=lambda lane: (turns["last"].get(lane, -1), order.index(lane)))
+    # Every selection consumes a turn, including a unique minimum. Otherwise that
+    # lane can immediately win the next tie after finishing the current round.
+    turns["count"] += 1
+    turns["last"][chosen] = turns["count"]
+    if log:
+        log(f"review plan: PR #{pr} → lane {chosen} (backlog: {backlog})")
+    return chosen, snapshot
+
+def plan_reviews(idle_review_ids, pending, running, max_in_flight=None, lane_cfgs=None, log=None,
+                 review_ids=None):
+    """Plan the review cards over the review lanes by load (Refs #1701).
+
+    `running` maps a review lane to the reviews it runs right now; the load of a lane is
+    that number plus the cards the plan already gave it (its review queue). The cards
+    are taken by the lane with the smallest load, equal loads rotate. The rotation walks
+    `review_ids` (all the review lanes, the ones that are busy included), so the reviews
+    keep rotating over the review lanes.
+
+    Returns (plan, snapshots): the plan maps a review lane to the cards it takes (the
+    first card is dispatched first), the snapshots hold the load at the moment of the
+    decision (for the log). A lane at its cap is skipped: the review waits for a free
+    lane."""
+    order = [str(lane) for lane in (review_ids or idle_review_ids)]
+    plan, snapshots, counts = {}, {}, dict(running)
+    for card in pending:
+        eligible = [lane for lane in idle_review_ids
+                    if lane_cfgs is None or can_take(lane_cfgs[lane].get("backend"), card, lane)]
+        if not eligible: continue
+        lane, snapshot = pick_reviewer(order, counts, max_in_flight=max_in_flight,
+                                      eligible=eligible, log=log, pr=review_target_pr(card))
+        if lane is None:
+            # every free review lane is at its cap: the review waits for a free lane
+            # (pick_reviewer logged the decision with the backlog snapshot)
+            continue
+        plan.setdefault(lane, []).append(card)
+        snapshots[card["n"]] = snapshot
+        counts[lane] = counts.get(lane, 0) + 1
+    return plan, snapshots
+
+def review_waiting_counts(review_ids, pending, running, max_in_flight=None, head_eligible=None):
+    """Spread the entire waiting queue for backlog accounting, without admitting it.
+
+    The in-flight cap limits admission, not visibility: even when every lane is at
+    capacity, every waiting card must appear in the backlog. This forecast uses a
+    private copy of the current cursor so counting cannot consume an actual
+    assignment's turn. During admission, reserve the queue head's prospective turn
+    before forecasting the other waiting cards; the head itself is not counted in
+    the returned queue. This keeps a fresh forecast from biasing every dispatch
+    against the first lane in the rotation.
+    """
+    counts, current = {}, dict(running)
+    rotation = {key: {"count": turns["count"], "last": dict(turns["last"])}
+                for key, turns in REVIEW_ROTATION.items()}
+    if head_eligible is not None:
+        head, _ = pick_reviewer(review_ids, current, eligible=head_eligible, rotation=rotation)
+        if head is not None: current[head] = current.get(head, 0) + 1
+    for card in pending:
+        lane, _ = pick_reviewer(review_ids, current, rotation=rotation)
+        if lane is None: break
+        counts[lane] = counts.get(lane, 0) + 1
+        current[lane] = current.get(lane, 0) + 1
+    return counts
+
+def review_target_pr(card):
+    """Read the target PR, never substitute the verification issue number."""
+    target = re.search(r"(?mi)^[ \t]*目标 PR[^\S\r\n]*[:：][ \t]*([^\r\n]+)", card.get("body", ""))
+    if not target: return "unknown"
+    number = re.search(r"(?:#|/pull/)([0-9]+)\b", target[1])
+    if not number: number = re.fullmatch(r"[ \t]*([0-9]+)[ \t]*", target[1])
+    return number[1] if number else "unknown"
+
+def idle_lane_names(lanes, state, res, scopes, freed=None):
+    """The lanes that can take a card right now (healthy, not paused and idle).
+
+    A lane that was freed by a finished run in this tick is available even if the remote
+    snapshot still calls it busy (Refs #1688)."""
+    freed = freed or ()
+    return [name for name, c in lanes.items() if not state.get(name) and "error" not in res[name]
+            and (name in freed or res[name].get("lane") == "idle")
+            and host_ok(c["host"]) and not lane_paused(name, c, scopes)]
 def rank(backend, item):
     """Highest score first; stable legacy fields break equal-score ties."""
     score, _ = priority_score(backend, item)
@@ -2066,6 +2238,9 @@ def status_snapshot(lanes, state, res, ready, blocked, records=None):
     status["_stale"] = sum(1 for L in lanes if state.get(L) and "stale_since" in state[L])
     status["_ready"] = ready
     status["_blocked"] = blocked
+    status["_review_backlog"] = review_backlog(review_lanes(lanes), state)
+    status["_queue_failures"] = int(state.get("_queue_failures", 0) or 0)
+    status["_minted"] = int(state.get("_minted", 0) or 0)
     status["_pauses"] = pause_reasons(lanes, records)  # which switch holds every paused lane (Refs #1592)
     status["_stale_stripped_n"] = STALE_STRIPPED_N
     status["_stale_search_skips"] = STALE_STRIPPED_N
@@ -2369,9 +2544,41 @@ def fix_round_brief(body, title=""):
 LANE_BUSY_RE = re.compile(r"lane \S+ is busy", re.I)  # the host still runs the finished run
 CAPACITY_EXHAUSTED_RE = re.compile(r"\b(?:capacity exhausted|no (?:available )?capacity)\b", re.I)
 
+TESTER_RISK_CARD_LIMIT = 200
+
+def tester_risk_decision(body):
+    """Classify how deep the evidence review of a verify card must go (Refs #1988).
+
+    A failure never buys a cheaper review: the card is read in full.
+    """
+    if tester_risk is None:
+        return {"decision": "full_read", "reason": "risk classifier unavailable"}
+    try:
+        return tester_risk.classify_card(
+            body, repo=REPO, read=sh,
+            # default 1 = every card is read in full: sampling is opt-in and never lowers the default gate
+            sample_rate=os.environ.get("AD_TESTER_RISK_SAMPLE_RATE", "1"),
+            seed=os.environ.get("AD_TESTER_RISK_SEED", "risk-v1"))
+    except (OSError, ValueError, TypeError, subprocess.SubprocessError):
+        return {"decision": "full_read", "reason": "risk classification unavailable"}
+
+def record_tester_risk(state, issue, decision):
+    """Keep the review depth with the card, not only with the lane slot.
+
+    The lane entry is dropped when the run ends, but the card keeps its decision so
+    the tester still reads how deep the evidence review must go.
+    """
+    cards = state.setdefault("_tester_risk_cards", {})
+    cards[str(issue)] = decision
+    if len(cards) > TESTER_RISK_CARD_LIMIT:
+        for key in list(cards)[:len(cards) - TESTER_RISK_CARD_LIMIT]: cards.pop(key)
+
 def dispatch(lane, cfg, item, base):
     n = item["n"]
     body = item["body"]
+    if item.get("verify") and item.get("tester_risk"):
+        risk = item["tester_risk"]
+        body = f"{body.rstrip()}\n\nTester evidence review: {risk['decision']}\nReason: {risk['reason']}\n"
     labels = set(item.get("labels", ()))
     # PLANNER's ordinary work cards have Chinese titles and only priority/backend
     # labels, so impl is the default. Explicit non-impl markers take precedence,
@@ -3302,6 +3509,10 @@ def run_tick(lanes, state, last_warn, publisher):
     base = None
     outcomes = {}
     freed_lanes = set()
+    # The review lanes (CX2/CX4/CX5) take the review cards by their backlog (Refs #1701).
+    # The review is chosen at admission time: a work dispatch must not strand a review
+    # on an obsolete plan. Waiting cards are counted separately from admitted runs.
+    review_ids = review_lanes(lanes)
     memory_rejections = {}
     dispatch_eligible_lanes = set()
 
@@ -3364,15 +3575,15 @@ def run_tick(lanes, state, last_warn, publisher):
         if lane_paused(L, cfg, scopes): return "paused"
         if remote_idle and res[L].get("lane") != "idle": return "no-capacity"
         if not tick_queue(): return "no-card"
+        asked = L  # the lane that was asked for a card (it may hand it to another lane)
         pick = None
         candidates = [i for i in q if i.get("deps_ok", True) and can_take(cfg["backend"], i, L)]
         candidates.sort(key=lambda i: rank(cfg["backend"], i))
+        # A harvested lane is available in this tick even if the remote snapshot still
+        # calls it busy. Keep the same pause/host/cap checks. The list is read in every
+        # tick: the review balancing below needs the lanes that can take a card.
+        idle = idle_lane_names(lanes, state, res, scopes, freed_lanes)
         if AD_VERIFY_SHARE_ENABLED:
-            # A harvested lane is available in this tick even if the remote
-            # snapshot still calls it busy. Keep the same pause/host/cap checks.
-            idle = [name for name, c in lanes.items() if not state.get(name) and "error" not in res[name]
-                    and (name in freed_lanes or res[name].get("lane") == "idle")
-                    and host_ok(c["host"]) and not lane_paused(name, c, scopes)]
             verify_slots, work_slots = queue_class_limits(lanes, state, idle)
             metrics = verify_metrics(state)
             metrics["deficit"] = verify_slots
@@ -3419,6 +3630,41 @@ def run_tick(lanes, state, last_warn, publisher):
             # never count it as a stale skip and never dispatch on unverified labels
             log_unverified(c["n"], status, detail, "kept in queue (not dispatched this tick)")
         if not pick: return "no-card"
+        if pick.get("verify"):
+            # The review card goes to the review lane with the smallest review backlog:
+            # equal backlogs rotate over the review lanes and a lane that is at its
+            # in-flight cap is skipped - the review waits for a free lane (Refs #1701).
+            running = review_running(review_ids, state)
+            waiting = [i for i in q if i is not pick and i.get("deps_ok", True) and i.get("verify")]
+            # Memory admission applies to the lane that finally takes the review, not only to the
+            # lane that was asked: a balanced-away review must not land on a host short of memory.
+            eligible = []
+            for lane in idle:
+                if lane not in review_ids or not can_take(lanes[lane]["backend"], pick, lane): continue
+                rejection = memory_preflight(lane, lanes[lane], pick, memory_cache)
+                if rejection:
+                    memory_rejections.setdefault(pick["n"], {})[lane] = rejection
+                    shown = "unavailable" if rejection["available_mb"] is None else f"{rejection['available_mb']}MB"
+                    log(f"{lane} #{pick['n']} review skipped: blocked-by-host-memory host={rejection['host']} available={shown} threshold={rejection['threshold_mb']}MB", brain=False)
+                    continue
+                eligible.append(lane)
+            queued = review_waiting_counts(review_ids, waiting, running, head_eligible=eligible)
+            # Rank and log the running + waiting forecast, but cap only admitted runs.
+            # Shared waiting demand must not prevent an idle lane from draining it.
+            loads = {lane: running[lane] + queued.get(lane, 0) for lane in review_ids}
+            chosen, snapshot = pick_reviewer(review_ids, loads, eligible=eligible,
+                                             max_in_flight=REVIEW_MAX_IN_FLIGHT,
+                                             in_flight=running,
+                                             pr=review_target_pr(pick),
+                                             log=lambda row: log(row, brain=False))
+            if chosen is None: return "no-capacity"
+            if chosen != L:
+                # The review belongs to another review lane: it takes the card, the lane
+                # that was asked keeps its slot free (the next tick tries again).
+                # recorded as dispatched only after the dispatch succeeded (below): a failed
+                # dispatch must leave the lane free for the rest of this tick
+                L, cfg = chosen, lanes[chosen]
+            pick["tester_risk"] = tester_risk_decision(pick["body"])
         blocked = sum(not i["deps_ok"] for i in q)
         publisher.publish(res=res, ready=len(q) - blocked, blocked=blocked, phase="dispatch")
         commit = base_commit()
@@ -3427,6 +3673,7 @@ def run_tick(lanes, state, last_warn, publisher):
         except Exception as e:
             dispatch_failed(L, cfg, pick, e, busy=bool(LANE_BUSY_RE.search(str(e))))
             return "no-capacity"
+        if L != asked: outcomes[L] = "dispatched"
         q.remove(pick)
         record = {"issue": pick["n"], "run": run, "host": cfg["host"], "base": commit, "at": time.strftime("%F %T"), "verify": ver, "class": "verify" if pick.get("verify") else "work", "hot": hot_files(pick.get("body", ""))}
         with publisher._lock:
@@ -3439,7 +3686,15 @@ def run_tick(lanes, state, last_warn, publisher):
             if pick.get("verify"):
                 metrics["dispatches"]["verify"] += 1
                 record_verify_time(state, pick["n"], "dispatched", time.time())
+            if pick.get("verify"):
+                state[L]["tester_risk"] = pick["tester_risk"]
+                record_tester_risk(state, pick["n"], pick["tester_risk"])
             publisher.record_dispatch(L, record)
+        if pick.get("verify"):
+            # the review decision goes to the log with the backlog snapshot of that moment
+            # (the PR, the chosen lane and the load of every review lane) (Refs #1701)
+            backlog = ", ".join(f"{lane}={snapshot[lane]}" for lane in review_ids)
+            log(f"review assignment: PR #{review_target_pr(pick)} → lane {L} (backlog: {backlog})")
         # Stop this lane's gap at its own successful dispatch. Later lanes may take
         # minutes to assign; their work cannot extend an already occupied lane's gap.
         closed = idle_close(state, L, time.time(), last_alive, tick_started_at=now)
@@ -3451,7 +3706,8 @@ def run_tick(lanes, state, last_warn, publisher):
         score, basis = priority_score(cfg["backend"], pick)
         save_state(state); log(f"dispatched #{pick['n']} → {L} ({cfg['host']}) run {run} base {commit[:8]} "
                                f"priority={score:g} basis={json.dumps(basis, sort_keys=True)}")
-        return "dispatched"
+        # the lane that was asked keeps its slot free when the card went to another lane
+        return "dispatched" if L == asked else "no-capacity"
 
     # 1) Re-dispatch each freed lane before harvesting the next one (Refs #1688).
     #    Another lane's slow fetch/push/PR creation must not hold up this lane.
@@ -3486,12 +3742,16 @@ def run_tick(lanes, state, last_warn, publisher):
     queue_ok = tick_queue()
     update_busy_stale(lanes, state, res)
     if not queue_ok:
+        # the pool level is unknown: the refill works on the last known level and is bounded
+        # (Refs #1662)
+        refill_on_unreadable_queue(state)
         with publisher._lock:
             st = status_snapshot(lanes, state, res, None, None, records)
             if isinstance(st, dict):
                 st["_phase"] = "queue"
                 st["_tick_at"] = publisher.tick_at or st.get("_at")
             st["_queue_error"] = queue_error or "queue unavailable"
+            st["_ready_estimate"] = pool_level(state)  # the level the refill worked on (not authoritative)
             write_status_snapshot(publisher.path, st, publisher.logger)
         return last_warn
     # 2) the lanes that were idle before this tick
@@ -3510,6 +3770,15 @@ def run_tick(lanes, state, last_warn, publisher):
     # stale search rows are not dispatchable: drop them (and log the skip) before counting
     q = freshen_queue(q, state)
     state["_pool_entered_at"] = {str(item["n"]): item["pool_entered_at"] for item in q if item.get("deps_ok", True) and "pool_entered_at" in item}
+    # Publish the complete remaining queue, including overflow beyond the admission cap.
+    if review_ids:
+        running = review_running(review_ids, state)
+        waiting_reviews = [i for i in q if i.get("deps_ok", True) and i.get("verify")]
+        state["_review_waiting"] = review_waiting_counts(review_ids, waiting_reviews, running, REVIEW_MAX_IN_FLIGHT)
+        if waiting_reviews:
+            backlog = ", ".join(f"{lane}={count}" for lane, count in review_backlog(review_ids, state).items())
+            log(f"review queue: {len(waiting_reviews)} card(s) wait (backlog: {backlog})", brain=False)
+        save_state(state)
     blocked = sum(not i["deps_ok"] for i in q)
     memory_blocks = {}
     for item in q:
@@ -3532,18 +3801,23 @@ def run_tick(lanes, state, last_warn, publisher):
     short = {b: sum(c["backend"] == b for c in lanes.values()) - sum(1 for i in q if i.get("deps_ok", True) and i["n"] not in hot_blocked and i["n"] not in memory_blocks and can_take(b, i, verify_gate=False))
              for b in {c["backend"] for c in lanes.values()}}
     starve = max(short.values(), default=0)
-    if ready < LOW or starve > 0:
+    need = refill_need(ready, low=LOW, target=TARGET, starved=starve)
+    filed = []
+    if need > 0:
         publisher.publish(res=res, ready=ready, blocked=blocked, phase="refill")
         why = f"queue low ({ready} < {LOW})" if ready < LOW else f"backend starved ({', '.join(f'{b} short {k}' for b, k in short.items() if k > 0)})"
         if mint_paused(scopes):
             if time.time() - last_warn > 600:
                 log(f"{why}: mint paused, no new issue minted", brain=False); last_warn = time.time()
         else:
-            filed = replenish(max(LOW - ready, starve), state)
+            filed = replenish(need, state)
             if filed: log(f"{why}: filed {len(filed)} issue(s) from backlog: {' '.join(filed)}")
             elif time.time() - last_warn > 600:
-                log(f"WARNING queue low: {ready} dispatchable lane-ready issue(s) left (+{blocked} waiting on 依赖), backlog/ empty (threshold {LOW})"); last_warn = time.time()
+                log(f"WARNING queue low: {ready} dispatchable lane-ready issue(s) left (+{blocked} waiting on 依赖), need {need} card(s) (threshold {LOW}, target {TARGET}), none filed{mint_evidence()}"); last_warn = time.time()
         publisher.publish(res=res, ready=ready, blocked=blocked, phase="refill")  # the (slow) refill is done
+    # the level of this tick is authoritative: it replaces the estimate the AD used while the
+    # queue was unreadable, and the cards minted since then are counted on top of it (Refs #1662)
+    state["_ready"] = ready; state["_minted"] = len(filed); state["_queue_failures"] = 0
     state["_tick_at"] = now
     observe_verify_verdicts(state)
     save_state(state)
@@ -3554,8 +3828,129 @@ def run_tick(lanes, state, last_warn, publisher):
         publisher.publish(res=res, ready=ready, blocked=blocked, phase="idle")
     return last_warn
 
+def preflight_card(text):
+    """Reject a card that the card lint refuses; a missing lint script also refuses the card (fail closed, Refs #1732)."""
+    script = next((p for p in (f"{LOCAL}/swrm/bin/swrm",
+                               os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "swrm", "bin", "swrm"))
+                   if os.path.isfile(p)), None)
+    if script is None:
+        log("card preflight unavailable: swrm/bin/swrm not found, card refused", brain=False)
+        raise RuntimeError("card preflight unavailable: swrm/bin/swrm not found")
+    result = subprocess.run([sys.executable, script, "card-lint", "-"],
+                            input=text, text=True, capture_output=True, timeout=120)
+    if result.returncode:
+        raise RuntimeError(f"card preflight rejected: {result.stdout.strip()} {result.stderr.strip()}")
+
+
+def refill_need(ready, low=None, target=None, starved=0):
+    """How many cards the pool needs (Refs #1662).
+
+    Below LOW the pool is topped up to at least LOW or TARGET, whichever is higher.
+    This preserves the low-water trigger when AD_LOW exceeds AD_TARGET.  A backend
+    that cannot be fed can request more cards than the pool deficit."""
+    low = LOW if low is None else low
+    target = TARGET if target is None else target
+    if ready < low: return max(target - ready, low - ready, starved, 0)
+    return max(starved, 0)
+
+def card_lines(text):
+    """Read the first two nonempty header lines, keeping the body formatting intact."""
+    lines = text.splitlines(); header = []
+    for index, line in enumerate(lines):
+        if not line.strip(): continue
+        header.append(line.strip())
+        if len(header) == 2: return header + lines[index + 1:]
+    return header
+
+def card_defect(text, strict=False):
+    """Why a card cannot be minted as a lane-ready issue (None when it can).
+
+    A card needs a `# ` title, a `labels:` line and a body: without them a lane has
+    nothing to run.  A card of the repo backlog (`docs/backlog/next/*.md`, written by a
+    planner run) must also carry the published contract of that batch: a body of at least
+    two lines and an `验收：` acceptance line (the same rules as `is_thin_card` of
+    tools/check-ad-ready-target.py).  The local backlog is the operator's drop box: a card
+    there is minted as long as a lane can run it, because the acceptance line is the
+    convention of the planner cards and not of the local ones.  A card without any of that
+    can never be run by a lane, so minting it only fills the pool with dead cards
+    (Refs #1662)."""
+    lines = [line.strip() for line in card_lines(text) if line.strip()]
+    if len(lines) < 2: return "thin card: needs a title and a labels line"
+    if not lines[0].startswith("# "): return "thin card: the first line is not a '# ' title"
+    if not lines[1].startswith("labels:"): return "thin card: the second line is not a 'labels:' line"
+    if strict:
+        if len(lines) < 4: return "thin card: needs a title, a labels line, a body and an acceptance line"
+        if len(lines[2:]) < 2: return "thin card: no body"
+        if not any(line.startswith("验收：") for line in lines[2:]): return "thin card: no '验收：' acceptance line"
+    elif not lines[2:]: return "thin card: no body"
+    return None
+
+def mint_evidence():
+    """One-line summary of the last refill attempt, for the queue-low warning."""
+    parts = []
+    if MINT_EVIDENCE.get("rejected"): parts.append(f"{MINT_EVIDENCE['rejected']} card(s) rejected")
+    if MINT_EVIDENCE.get("planner"): parts.append(f"planner {MINT_EVIDENCE['planner']}")
+    return f" ({'; '.join(parts)})" if parts else ""
+
+def move_without_overwrite(source, destination):
+    """Move a backlog card without ever overwriting an earlier card of the same name.
+
+    The name is reserved with an exclusive create, so two AD processes cannot pick the
+    same free name; an existing card (a card already quarantined in `rejected/`, a card
+    already filed in `filed/`) keeps its content and the moved card gets the next free
+    serial suffix (Refs #1662)."""
+    stem, suffix = os.path.splitext(destination)
+    target = destination; serial = 0
+    while True:
+        try: handle = os.open(target, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
+        except FileExistsError:
+            serial += 1; target = f"{stem}.{serial}{suffix}"; continue
+        os.close(handle)
+        try: os.replace(source, target)
+        except OSError:
+            os.unlink(target); raise
+        return target
+
+def pool_level(state):
+    """The pool level the AD knows: the last authoritative count plus the cards minted since.
+
+    While the queue cannot be read there is no authoritative count; the cards minted in the
+    meantime are added to the last known level, so a refill does not mint the same batch
+    over and over (Refs #1662)."""
+    ready = state.get("_ready")
+    if isinstance(ready, bool) or not isinstance(ready, int): return None
+    return ready + int(state.get("_minted", 0) or 0)
+
+def refill_on_unreadable_queue(state):
+    """Refill while the queue cannot be read, but only within a bounded number of retries.
+
+    The pool level is unknown when the queue read fails.  The AD mints against the last
+    known level (plus the cards it minted since), counts the consecutive failures and
+    mints nothing any more once the bound is reached: it then waits for an authoritative
+    read, so a broken `gh` cannot flood the backlog with duplicate cards (Refs #1662)."""
+    # tick_queue() already counted this tick's failed read (one count per tick)
+    failures = max(1, int(state.get("_queue_failures", 0) or 0))
+    state["_queue_failures"] = failures
+    level = pool_level(state)
+    if level is None:
+        log(f"queue unreadable #{failures}: pool level unknown, no card minted (waiting for an authoritative read)", brain=False)
+        save_state(state); return []
+    if failures > QUEUE_UNREADABLE_REFILL_MAX:
+        log(f"queue unreadable #{failures}: no card minted any more (bounded retries exhausted, waiting for an authoritative read)", brain=False)
+        save_state(state); return []
+    need = refill_need(level)
+    if need <= 0:
+        log(f"queue unreadable #{failures}: pool level {level} is above the threshold ({LOW}), no card minted", brain=False)
+        save_state(state); return []
+    log(f"queue unreadable #{failures}: minting {need} card(s) for the last known level ({level} dispatchable)", brain=False)
+    filed = replenish(need, state)
+    state["_minted"] = int(state.get("_minted", 0) or 0) + len(filed)
+    save_state(state)
+    return filed
+
 def file_issue(text, extra=()):
-    lines = text.splitlines()
+    preflight_card(text)
+    lines = card_lines(text)
     title = lines[0].lstrip("# ").strip(); labels = [l.strip() for l in lines[1].split(":", 1)[1].split(",") if l.strip()]
     body = "\n".join(lines[2:]).strip() + "\n"
     args = ["issue", "create", "-t", title, "-b", body]
@@ -3563,6 +3958,80 @@ def file_issue(text, extra=()):
     rc, o, e = gh(args)
     if rc: raise RuntimeError(e.strip()[-200:])
     return "#" + o.strip().rsplit("/", 1)[-1]
+
+CARD_MARK = "ad-card:"
+CREATE_SETTLE_S = max(120.0, env_number("AD_CREATE_SETTLE_S", 300.0))  # never below twice the gh timeout  # create timeout + server propagation: a request may still be in flight until then
+CREATE_EMPTY_PROOFS = 2   # consecutive empty listings, all taken after the settle time, before a card is created again
+LOOKBACK_SKEW_S = 300  # clock skew allowed between this host and the server when a listing is used as proof
+
+def card_marker(key, text):
+    """The identity of one card: its source and its text (written into the body of the issue)."""
+    return hashlib.sha256((key + "\n" + text).encode("utf-8")).hexdigest()[:16]
+
+def iso_epoch(value):
+    """Epoch seconds of a UTC ISO-8601 stamp such as 2026-11-10T01:02:03Z, else None."""
+    try: return datetime.strptime(str(value)[:19], "%Y-%m-%dT%H:%M:%S").replace(tzinfo=timezone.utc).timestamp()
+    except ValueError: return None
+
+def find_issue_by_marker(marker, since):
+    """The issue whose body carries this card marker: "#N", "" when it provably does not exist, None when unknown.
+
+    The newest issues are listed (the list is read-your-writes consistent, unlike the search index, so a lag
+    cannot hide an issue). Absence is proven only when the page is not full or reaches back to before the
+    creation attempt (`since`, epoch seconds); otherwise the answer is unknown and the card must not be retried."""
+    limit = 200
+    rc, o, _ = gh(["issue", "list", "--state", "all", "--limit", str(limit), "--json", "number,body,createdAt"])
+    if rc: return None
+    try: rows = json.loads(o)
+    except ValueError: return None
+    if not isinstance(rows, list): return None
+    for row in rows:
+        if isinstance(row, dict) and row.get("number") is not None and f"{CARD_MARK}{marker}" in str(row.get("body") or ""):
+            return "#" + str(row["number"])
+    if len(rows) < limit: return ""
+    created = [iso_epoch(row.get("createdAt")) if isinstance(row, dict) else None for row in rows]
+    if created and all(c is not None for c in created) and min(created) <= float(since) - LOOKBACK_SKEW_S:
+        return ""
+    return None
+
+def file_issue_once(text, key, state):
+    """File the card once, even when the answer of `gh issue create` is lost or the process stops (Refs #1662).
+
+    The body of the issue carries a marker of the card. Before the call the card is persisted as pending;
+    after it, in ONE save, the pending record is replaced by a done record, so a stop between the two
+    leaves either a pending card (looked up by its marker) or a done one, never nothing. A pending card is
+    created again only when the request has certainly ended (CREATE_SETTLE_S) and the listing of the newest
+    issues proves twice that it does not exist; an unknown answer (failed or truncated listing, a request that
+    may still be in flight) never retries. Returns the issue, or None when the card must wait for the next tick."""
+    pending = state.setdefault("_import_pending", {})
+    done = state.setdefault("_import_done", {})
+    marker = card_marker(key, text)
+    if marker in done:
+        return done[marker] + "(already filed)"
+    if marker in pending:
+        found = find_issue_by_marker(marker, float(pending[marker]))
+        if found is None:
+            log(f"card {key}: a pending creation cannot be checked (issue list failed or truncated); not created again, checked next tick", brain=False); return None
+        if found:
+            done[marker] = found; pending.pop(marker, None); save_state(state)
+            log(f"card {key}: the earlier creation reached the server as {found}; not filed again", brain=False)
+            return found + "(already filed)"
+        # An empty listing is not proof: the lost request may still be in flight on the server and
+        # succeed after the listing. Create again only once the request has certainly ended (settle
+        # time passed) and the listing stayed empty twice after that.
+        empties = state.setdefault("_import_empty", {})
+        if time.time() - float(pending[marker]) < CREATE_SETTLE_S:
+            log(f"card {key}: the earlier creation may still be in flight; checked again next tick", brain=False); return None
+        empties[marker] = int(empties.get(marker, 0)) + 1
+        if empties[marker] < CREATE_EMPTY_PROOFS:
+            save_state(state)
+            log(f"card {key}: not found once after the settle time; confirmed again next tick", brain=False); return None
+        empties.pop(marker, None)
+    pending[marker] = time.time(); save_state(state)
+    issue = file_issue(text.rstrip("\n") + f"\n\n<!-- {CARD_MARK}{marker} -->\n")
+    done[marker] = issue; pending.pop(marker, None); save_state(state)
+    return issue
+
 
 def record_mint(record):
     ledger = load(f"{D}/mint-log.json", [])
@@ -3575,7 +4044,7 @@ def record_mint(record):
 
 
 def mint_card(text, state, counts, source):
-    lines = text.splitlines()
+    lines = card_lines(text)
     if len(lines) < 2 or not lines[0].startswith("#") or not lines[1].startswith("labels:"):
         record_mint({"at": time.strftime("%F %T"), "source": source,
                      "minted": False, "reason": "bad_format"})
@@ -3593,11 +4062,14 @@ def mint_card(text, state, counts, source):
     # Persist the decision before the external write, including if issue creation fails.
     record_mint({**record, "reason": "mint_pending"})
     try:
-        ref = file_issue(text)
+        ref = file_issue_once(text, source, state)
     except Exception:
         record_mint({**record, "reason": "mint_failed"})
         raise
-    record.update(minted=True, issue=ref.lstrip("#"))
+    if ref is None:  # the earlier creation of this card is not settled: nothing new is created, retried next tick
+        record_mint({**record, "reason": "creation_pending"})
+        return None
+    record.update(minted=True, issue=re.sub(r"\(.*\)$", "", ref).lstrip("#"))
     for path in verdict["files"]: counts[path] = counts.get(path, 0) + 1
     try: record_mint(record)
     except OSError as e: log(f"mint ledger final write failed: {e}", brain=False)
@@ -3616,30 +4088,93 @@ labels: <p1 或 p2>,backend:<pi|codex|agy>
 热文件：`<要改的仓库相对路径>`（多个用逗号分隔）
 
 验收：`<一条在仓库根或 cd 子目录后可直接运行、只用 python3 标准库/现有脚本的命令>`
+
+## 失败模式清单
+对照 docs/defect-patterns.md 检查相关失败模式。
 ```
+
+工具类卡的 plan 段必须列「复刻的引擎数据形状清单」，验收含真实形状 fixture 门槛。
+派发/暂停/终态类卡的 design 段须逐项填写状态机边例矩阵的预期行为：单后端 / drain / 暂停 / 已派发后变化 / 合并后清理 / dry-run 无副作用。
+涉及派发行为的验收必须写明 tick/集成级测试，仅函数级单测不算关账。
+每条验收须有明确判定方法；逐卡运行 `swrm/bin/swrm card-lint`，通过后才可导入。
 
 要求：{k} 条里 backend:pi / backend:agy / backend:codex / 无 backend 标签 大约 2:1:2:1（至少 3 条无 backend 标签供饥饿兜底）；优先 #6 三 Bot 组织诊断 e2e（examples/org-health-local）的测试覆盖、文档、健壮性小修，其次 swrm 的纯单元测试（不需要 Unix socket 的可标 codex，需要的标 pi）；每条 15 分钟内可完成；不要写安全加固、不要改 CI 的 macOS 矩阵、不要碰签名；不要与下列已有 issue 重复：
 
 {open}
 
+生成前逐项完成以下检查，并把相关证据写入各卡正文：
+- 对照 main 确认目标文件确实存在。
+- 写明当前行为和期望行为之间的差异。
+- 给出能复现问题的输入与目标对象。
+- 明确本卡覆盖的功能范围。
+- 写清不在本卡范围内的工作。
+- 确认不依赖另一张未完成卡。
+- 检查已有 issue 中的同类问题。
+- 给出最小实现入口和调用者。
+- 标明输入字段的实际来源。
+- 给出输出结构及消费方。
+- 工具卡列出复刻的数据形状。
+- 工具卡引用真实 fixture 的来源。
+- fixture 必须覆盖真实嵌套字段。
+- 派发卡填写单后端的预期结果。
+- 派发卡填写 drain 的预期结果。
+- 派发卡填写暂停的预期结果。
+- 派发卡填写已派发后变化的预期结果。
+- 派发卡填写合并后清理的预期结果。
+- 派发卡填写 dry-run 的无副作用断言。
+- 派发卡指定 tick 或等价集成测试入口。
+- 验收命令应能从仓库根运行。
+- 验收写明返回码或可观察判定结果。
+- 每条验收对应一个明确的行为。
+- 保留失败路径和边界输入的测试要求。
+- 对照缺陷模式库说明相关风险。
+- 检查测试是否针对真正的目标对象。
+- 检查覆盖范围与结论范围是否一致。
+- 检查状态写入后是否按同一结构读回。
+- 检查冲突配置的优先级预期。
+- 检查清理后待办任务是否仍存在。
+- 对每张卡运行预审，逐条修正拒绝原因。
+
 只新增 `docs/backlog/next/` 下的文件，不改其它文件。
 
 验收：`ls docs/backlog/next/{tag}-*.md | wc -l | grep -qx {k}`
+
+## 失败模式清单
+对照 docs/defect-patterns.md；检查生成对象和全量卡数，拒绝薄卡及不可测条目。
 """
 
 def replenish(k, state):
     """Queue refill, in order: (1) ~/phanes-ctl/autodispatch/backlog/*.md (`# title` / `labels: a,b` / body; moved to backlog/filed/);
     (2) docs/backlog/next/*.md on origin/main not yet imported (written by planner runs); (3) if still short and no planner
-    issue is open, file one planner issue asking a lane to write the next batch into docs/backlog/next/."""
-    bd = f"{D}/backlog"; os.makedirs(f"{bd}/filed", exist_ok=True); out = []
+    issue is open, file one planner issue asking a lane to write the next batch into docs/backlog/next/.
+
+    A card that does not satisfy the card rules (`card_defect`) is quarantined in backlog/rejected/
+    with its reason and the rest of the batch is still minted: one unusable card must never block
+    the whole refill, and the reason is logged so a silent pool can be diagnosed (Refs #1662).
+    A quarantined card never overwrites an earlier card of the same name (Refs #1662)."""
+    global LAST_MINT_LOG
+    if mint_paused():
+        log("replenish skipped: mint paused (PAUSE-MINT marker or the mint pause scope)", brain=False); return []
+    bd = f"{D}/backlog"; os.makedirs(f"{bd}/filed", exist_ok=True); os.makedirs(f"{bd}/rejected", exist_ok=True); out = []
     counts = hot_inflight(state)
+    MINT_EVIDENCE.clear(); MINT_EVIDENCE["need"] = k; rejected = 0
     for f in sorted(x for x in os.listdir(bd) if x.endswith(".md")):
-        if len(out) >= k: return out
-        try: ref = mint_card(open(f"{bd}/{f}").read(), state, counts, f"backlog/{f}")
-        except Exception as e: log(f"backlog {f}: {e}", brain=False); return out
-        if ref is None: continue
-        out.append(ref)
-        os.replace(f"{bd}/{f}", f"{bd}/filed/{f}")
+        if len(out) >= k: break
+        try:
+            with open(f"{bd}/{f}") as stream: text = stream.read()
+        except OSError as e: log(f"backlog {f}: {e}", brain=False); continue
+        defect = card_defect(text)
+        if defect:
+            target = move_without_overwrite(f"{bd}/{f}", f"{bd}/rejected/{f}")
+            rejected += 1
+            log(f"backlog {f}: {defect} → {target}", brain=False); continue
+        try: issue = mint_card(text, state, counts, f"backlog/{f}")
+        except Exception as e:
+            log(f"backlog {f}: {e}", brain=False); continue  # one failing card must not block the batch
+        if issue is None: continue  # refused by the hot-file gate, or its earlier creation is not settled
+        out.append(issue)
+        move_without_overwrite(f"{bd}/{f}", f"{bd}/filed/{f}")
+    MINT_EVIDENCE["rejected"] = rejected
     G = ["git", "-C", "/workspace/phanes-repo"]
     sh(G + ["fetch", "-q", "origin", "main"], timeout=120)
     rc, ls, _ = sh(G + ["ls-tree", "--name-only", "origin/main", "docs/backlog/next/"])
@@ -3647,22 +4182,50 @@ def replenish(k, state):
     for path in sorted(x for x in ls.split() if x.endswith(".md")) if not rc else []:
         if len(out) >= k: break
         if path in imp: continue
-        rc, text, _ = sh(G + ["show", f"origin/main:{path}"])
-        try:
-            if rc: raise RuntimeError("card read failed")
-            ref = mint_card(text, state, counts, path)
-        except Exception as e: log(f"repo backlog {path}: {e}", brain=False); continue
-        if ref is None: continue
-        imp.append(path); save_state(state)
-        out.append(ref)
+        read_rc, text, _ = sh(G + ["show", f"origin/main:{path}"])
+        if read_rc: log(f"repo backlog {path}: read failed (rc={read_rc})", brain=False); continue
+        defect = card_defect(text, strict=True)
+        if defect:
+            imp.append(path); save_state(state)
+            log(f"repo backlog {path}: {defect} → skipped", brain=False); continue
+        try: issue = mint_card(text, state, counts, path)
+        except Exception as e:
+            log(f"repo backlog {path}: {e}", brain=False); continue  # keep the card unimported: it is retried next tick
+        if issue is None: continue
+        imp.append(path); save_state(state); out.append(issue)
     if len(out) < k:
         rc, o, _ = gh(["issue", "list", "--state", "open", "--label", "planner", "--json", "number"])
-        if not rc and json.loads(o) == []:
+        planners = None
+        if rc:
+            # the gate cannot prove that no planner is open: no card is minted (Refs #1662)
+            MINT_EVIDENCE["planner"] = f"issue list failed (rc={rc})"
+            log(f"planner query unreadable: gh issue list failed (rc={rc}); skip planner creation", brain=False)
+        else:
+            try:
+                planners = json.loads(o)
+                if not isinstance(planners, list): raise ValueError("the planner query did not return a JSON list")
+            except (ValueError, TypeError) as e:
+                planners = None
+                # an unreadable planner query cannot prove that no planner is open: the gate stays
+                # closed instead of filing a second planner card (Refs #1662)
+                MINT_EVIDENCE["planner"] = f"query unreadable ({str(e)[:60]})"
+                log(f"planner query unreadable: the planner JSON cannot be parsed ({e}); skip planner creation", brain=False)
+        if planners:
+            numbers = [i["number"] for i in planners if isinstance(i, dict) and i.get("number") is not None]
+            MINT_EVIDENCE["planner"] = f"issue #{numbers[0]} already open" if numbers else "a planner issue is already open"
+            if time.time() - LAST_MINT_LOG > 600:
+                log(f"planner issue already open ({', '.join('#' + str(n) for n in numbers) or 'unknown number'}): no new planner card minted", brain=False); LAST_MINT_LOG = time.time()
+        elif planners == []:
             rc, o, _ = gh(["issue", "list", "--state", "open", "--limit", "200", "--json", "number,title"])
-            titles = "\n".join(f"- #{i['number']} {i['title']}" for i in json.loads(o)) if not rc else ""
+            titles = ""
+            if not rc:
+                try: titles = "\n".join(f"- #{i['number']} {i['title']}" for i in json.loads(o))
+                except (ValueError, TypeError, KeyError) as e: log(f"open issue list unreadable ({e}); the planner card carries no issue list", brain=False)
             tag = time.strftime("%Y%m%d-%H%M")
-            try: out.append(file_issue(PLANNER.format(k=20, tag=tag, open=titles)) + "(planner)")
-            except Exception as e: log(f"planner issue: {e}", brain=False)
+            try:
+                out.append(file_issue(PLANNER.format(k=20, tag=tag, open=titles)) + "(planner)"); MINT_EVIDENCE["planner"] = "card filed"
+            except Exception as e:
+                MINT_EVIDENCE["planner"] = f"card failed ({str(e)[:60]})"; log(f"planner issue: {e}", brain=False)
     return out
 
 def sleep_chunk(total=TICK, chunk=5):
