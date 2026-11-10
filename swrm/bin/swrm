@@ -7430,6 +7430,129 @@ def lane_state_path(name):
     return os.path.join(lane_root(name), "state.json")
 
 
+def lane_assignment_path(rid):
+    return os.path.join(RUNS, rid, "assignment.json")
+
+
+def lane_save_assignment(spec):
+    """Persist enough of an assignment to validate and restore it after supervisor restart."""
+    jsave(lane_assignment_path(spec["run_id"]), spec)
+
+
+def lane_ad_recovery_view(lane, spec):
+    """Read AD's {lane: {issue, run}} ownership and the live issue, failing closed."""
+    match = re.match(r"^#(\d+)\b", spec.get("title") or "")
+    issue = spec.get("issue") or (int(match.group(1)) if match else None)
+    if not issue:
+        return None  # Manual assignments have no AD issue owner.
+    cfg = lane.get("recovery_ad") or {}
+    if not isinstance(cfg, dict):
+        return "AD recovery configuration is invalid"
+    host = cfg.get("host") or envvar("AD_HOST")
+    default_path = "phanes-ctl/autodispatch/state.json" if host else os.path.expanduser("~/phanes-ctl/autodispatch/state.json")
+    path = cfg.get("state_path") or envvar("AD_STATE", default_path)
+    repo = cfg.get("repo") or envvar("AD_REPO", "surlymochan/phanes")
+    try:
+        def remote_read(command):
+            proc = subprocess.run(["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10", host, command],
+                                  capture_output=True, text=True, timeout=20)
+            if proc.returncode:
+                raise ValueError("authority unavailable")
+            return json.loads(proc.stdout)
+
+        state = remote_read("cat " + shlex.quote(path)) if host else jload(path, None)
+        if not isinstance(state, dict):
+            return "AD state is unavailable"
+        owners = [(name, row) for name, row in state.items()
+                  if isinstance(row, dict) and str(row.get("issue")) == str(issue)]
+        if len(owners) != 1 or owners[0][0] != lane["name"] or owners[0][1].get("run") != spec["run_id"]:
+            return "AD issue ownership changed or the issue was reassigned"
+        endpoint = f"repos/{repo}/issues/{issue}"
+        view = remote_read("gh api " + shlex.quote(endpoint)) if host else gh_transport(endpoint)
+        labels = {item.get("name") if isinstance(item, dict) else item for item in view.get("labels", [])}
+        if str(view.get("state", "")).lower() != "open" or "in-progress" not in labels:
+            return "AD issue is not explicitly in-progress"
+        if labels & {"lane-pr", "lane-failed", "lane-done", "cancelled"}:
+            return "AD issue has a conflicting terminal label"
+    except (OSError, ValueError, TypeError, AttributeError, subprocess.SubprocessError, BusError):
+        return "AD recovery authority is unavailable"
+    return None
+
+
+def lane_recovery_event(lane, spec, event_file, reason=None):
+    event = {"type": "recovery_abandoned" if reason else "recovery", "run_id": spec["run_id"],
+             "level": spec.get("_recovery_level"), "point": spec.get("_recovery_point")}
+    if reason:
+        event["reason"] = reason
+        jsave(os.path.join(lane_root(lane["name"]), "preserve-workspace.json"), {"run_id": spec["run_id"]})
+    elif spec.get("_recovery_level") == "workspace":
+        event["note"] = "恢复自未提交状态"
+    lane_record_event(event_file, event)
+    cfg = lane.get("recovery_ad")
+    cfg = cfg if isinstance(cfg, dict) else {}
+    path = cfg.get("brain_log") or envvar("BRAIN_LOG") or os.path.join(lane["repo"], "brain", "log.md")
+    try:
+        os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
+        with open(path, "a") as stream:
+            stream.write(f"- lane {event['type']}: " + json.dumps(event, ensure_ascii=False) + "\n")
+    except OSError as error:
+        lane_record_event(event_file, {"type": "error", "error": f"recovery brain log unavailable: {error}"})
+
+
+def lane_recover_assignment(lane, previous_state):
+    rid = previous_state.get("current_run")
+    if not rid or previous_state.get("state") not in ("busy", "starting", "crashed"):
+        return None, "no busy run was recorded"
+    status = jload(os.path.join(RUNS, rid, "status.json"), {}) or {}
+    if status.get("state") not in ("queued", "running") or status.get("lane") != lane["name"]:
+        return None, "run status is not queued/running on this lane"
+    for other in lane_config():
+        if other["name"] == lane["name"]:
+            continue
+        other_state = jload(lane_state_path(other["name"]), {}) or {}
+        if other_state.get("current_run") == rid:
+            return None, f"run is already assigned to lane {other['name']}"
+    spec = jload(lane_assignment_path(rid), None)
+    if not isinstance(spec, dict) or spec.get("run_id") != rid or not isinstance(spec.get("task"), str):
+        return None, "saved assignment is missing or invalid"
+    if not isinstance(spec.get("base"), str) or not spec["base"]:
+        return None, "saved base commit is missing"
+    authority_error = lane_ad_recovery_view(lane, spec)
+    if authority_error:
+        return None, authority_error
+    if lane["backend"] == "codex" and not spec.get("thread_id"):
+        return None, "saved Codex thread is missing; refusing a new session"
+    if lane["backend"] == "pi" and not spec.get("session_file"):
+        return None, "saved Pi session file is missing; refusing a new session"
+    if lane_headless(lane) and not spec.get("conversation_id"):
+        return None, "saved headless conversation is missing; refusing a new session"
+    if lane["backend"] in ("cursor", "hermes", "copilot") and not lane_headless(lane) and not spec.get("session_id"):
+        return None, "saved ACP session is missing; refusing a new session"
+    wt = os.path.join(lane_root(lane["name"]), "wt")
+    if spec.get("workspace_path") != wt:
+        return None, "saved workspace path does not match this lane"
+    branch = f"swrm/{rid}"
+    repo = lane["repo"]
+    # Refresh the exact branch; a stale tracking ref alone is not push evidence.
+    rc, _, _ = lane_git(["fetch", "--no-tags", "origin",
+                          f"+refs/heads/{branch}:refs/remotes/origin/{branch}"], repo, timeout=30)
+    rc_remote, remote, _ = lane_git(["rev-parse", "--verify", f"refs/remotes/origin/{branch}^{{commit}}"], repo)
+    pushed = False
+    if not rc and not rc_remote and remote != spec.get("base"):
+        rc, _, _ = lane_git(["merge-base", "--is-ancestor", spec["base"], remote], repo)
+        pushed = rc == 0
+    if lane_worktree_matches(repo, wt):
+        rc, current_branch, _ = lane_git(["branch", "--show-current"], wt)
+        if rc or current_branch != branch:
+            return None, "saved workspace branch does not match run"
+    elif not pushed:
+        return None, "saved workspace is missing and no pushed recovery point exists"
+    spec["_recovered"] = True
+    spec["_recovery_level"] = "commit" if pushed else "workspace"
+    spec["_recovery_point"] = remote if pushed else wt
+    return spec, None
+
+
 def lane_socket_path(name):
     path = os.path.join(lane_root(name), "ctl.sock")
     if sys.platform == "darwin" and len(os.fsencode(path)) > 103:
@@ -7547,6 +7670,33 @@ def lane_state_lock(lane_name):
         yield
 
 
+def lane_process_identity(pid):
+    """A PID alone is not an identity across supervisor or host restarts."""
+    if not isinstance(pid, int) or isinstance(pid, bool) or pid <= 1:
+        return None
+    try:
+        if sys.platform.startswith("linux"):
+            with open("/proc/sys/kernel/random/boot_id") as stream:
+                boot = stream.read().strip()
+            with open(f"/proc/{pid}/stat") as stream:
+                fields = stream.read().rsplit(")", 1)[1].split()
+            return {"boot": boot, "start": fields[19]}
+        if sys.platform == "darwin":
+            rc, boot, _ = sh(["sysctl", "-n", "kern.boottime"], timeout=5)
+            rc2, process, _ = sh(["ps", "-p", str(pid), "-o", "lstart="], timeout=5)
+            if not rc and not rc2 and boot.strip() and process.strip():
+                return {"boot": boot.strip(), "process": process.strip()}
+    except (OSError, ValueError, IndexError):
+        pass
+    return None
+
+
+def lane_stop_previous_child(previous_state):
+    pid, expected = previous_state.get("child_pid"), previous_state.get("child_identity")
+    if expected and expected == lane_process_identity(pid):
+        kill_tree(pid, grace=1)
+
+
 def lane_write_state(lane_name, **changes):
     with lane_state_lock(lane_name):
         return lane_write_state_locked(lane_name, **changes)
@@ -7556,6 +7706,8 @@ def lane_write_state_locked(lane_name, **changes):
     """Read/modify/write with lane_state_lock already held by the caller."""
     state = jload(lane_state_path(lane_name), {}) or {}
     old_run = state.get("current_run")
+    if "child_pid" in changes:
+        changes["child_identity"] = lane_process_identity(changes["child_pid"])
     state.update(changes)
     # Keep stale visible through later activity and status writes. Clear it
     # only when its run is resolved or a different run is assigned.
@@ -7704,7 +7856,49 @@ def lane_rebuild_worktree(repo, wt, base):
         raise RuntimeError(f"lane worktree checkout failed: {err[:250]}")
 
 
-def lane_prepare_workspace(lane, rid, base_rev=None):
+def lane_snapshot_workspace(lane, rid, wt):
+    """Keep an independent worktree, including its index and ignored/untracked files."""
+    rdir = os.path.join(RUNS, rid)
+    saved = jload(os.path.join(rdir, "status.json"), {}) or {}
+    if saved.get("preserved_workspace") and lane_worktree_matches(lane["repo"], saved["preserved_workspace"]):
+        return saved["preserved_workspace"]
+    archive = os.path.join(lane_root(lane["name"]), "preserved", rid + "-" + uuid.uuid4().hex[:8])
+    os.makedirs(os.path.dirname(archive), exist_ok=True)
+    rc, head, err = lane_git(["rev-parse", "HEAD"], wt)
+    if rc:
+        raise RuntimeError(f"cannot preserve interrupted workspace: {err}")
+    rc, _, err = lane_git(["clone", "--no-hardlinks", "--dissociate", "--no-checkout", "-q", wt, archive], wt)
+    if rc:
+        raise RuntimeError(f"cannot preserve interrupted workspace: {err}")
+    rc, _, err = lane_git(["remote", "set-url", "origin", os.path.realpath(lane["repo"])], archive)
+    if rc:
+        raise RuntimeError(f"cannot preserve interrupted workspace: {err}")
+    # Only the root .git belongs to the source worktree. Keep nested repos and
+    # dependency symlinks as-is, and never traverse their targets.
+    shutil.copytree(wt, archive, symlinks=True, dirs_exist_ok=True,
+                    ignore=lambda directory, names: [".git"] if directory == wt else [])
+    rc, source, err = lane_git(["rev-parse", "--git-path", "index"], wt)
+    rc2, target, err2 = lane_git(["rev-parse", "--git-path", "index"], archive)
+    if rc or rc2:
+        raise RuntimeError(f"cannot preserve interrupted index: {err or err2}")
+    source = source if os.path.isabs(source) else os.path.join(wt, source)
+    target = target if os.path.isabs(target) else os.path.join(archive, target)
+    if os.path.isfile(source):
+        shutil.copy2(source, target)
+        # Split indexes refer to sharedindex files beside the original index.
+        for name in os.listdir(os.path.dirname(source)):
+            if name.startswith("sharedindex."):
+                shutil.copy2(os.path.join(os.path.dirname(source), name), os.path.join(os.path.dirname(target), name))
+    set_status(rdir, preserved_workspace=archive, preserved_head=head)
+    result_path = os.path.join(rdir, "result.json")
+    result = jload(result_path, None)
+    if isinstance(result, dict):
+        result["preserved_workspace"] = archive
+        jsave(result_path, result)
+    return archive
+
+
+def lane_prepare_workspace(lane, rid, base_rev=None, preserve=False, recovery_point=None):
     repo = os.path.realpath(lane["repo"])
     rc, top, err = lane_git(["rev-parse", "--show-toplevel"], repo)
     if rc:
@@ -7715,6 +7909,49 @@ def lane_prepare_workspace(lane, rid, base_rev=None):
         raise RuntimeError(f"invalid base revision {base_rev!r}: {err}")
     wt = os.path.join(lane_root(lane["name"]), "wt")
     os.makedirs(os.path.dirname(wt), exist_ok=True)
+    if preserve:
+        if recovery_point and not os.path.exists(wt):
+            lane_rebuild_worktree(repo, wt, recovery_point)
+            rc, _, err = lane_git(["checkout", "-B", f"swrm/{rid}", recovery_point], wt)
+            if rc:
+                raise RuntimeError(f"cannot restore pushed branch: {err}")
+        if not lane_worktree_matches(repo, wt):
+            raise RuntimeError("cannot resume run: saved lane worktree is missing or belongs to another repository")
+        rc, branch, err = lane_git(["branch", "--show-current"], wt)
+        if rc or branch != f"swrm/{rid}":
+            raise RuntimeError("cannot resume run: lane worktree branch does not match saved run")
+        rc, head, err = lane_git(["rev-parse", "HEAD"], wt)
+        if rc:
+            raise RuntimeError(f"cannot resume run: cannot read worktree tip: {err}")
+        if recovery_point and head != recovery_point:
+            rc, _, err = lane_git(["fetch", "--no-tags", repo, recovery_point], wt)
+            if rc:
+                raise RuntimeError(f"cannot fetch pushed recovery point: {err}")
+            # Fast-forward without reset/clean, preserving partial edits.
+            rc, _, err = lane_git(["merge", "--ff-only", recovery_point], wt)
+            if rc:
+                raise RuntimeError(f"cannot restore pushed recovery point safely: {err}")
+            head = recovery_point
+        linked = link_dependency_dirs(repo, wt)
+        configure_executor_environment(wt)
+        return {"mode": "worktree", "path": wt, "root": wt, "repo": repo, "branch": branch,
+                "base": base, "head": head, "base_dirty": False, "linked": linked, "lane": lane["name"],
+                "workspace_note": workspace_note(repo)}
+    protection_path = os.path.join(lane_root(lane["name"]), "preserve-workspace.json")
+    protected = jload(protection_path, {}) or {}
+    if protected.get("run_id") and os.path.exists(wt):
+        lane_snapshot_workspace(lane, protected["run_id"], wt)
+        os.unlink(protection_path)
+    if lane_worktree_matches(repo, wt):
+        rc, branch, err = lane_git(["branch", "--show-current"], wt)
+        if rc:
+            raise RuntimeError(f"cannot inspect prior lane workspace: {err}")
+        old_rid = branch.removeprefix("swrm/") if branch.startswith("swrm/") else None
+        if old_rid and old_rid != rid:
+            prior = jload(os.path.join(RUNS, old_rid, "status.json"), {}) or {}
+            if prior.get("recovery_abandoned") or prior.get("workspace_preserved") or prior.get("state") in ("queued", "running"):
+                # Refuse destructive preparation unless the backup is complete.
+                lane_snapshot_workspace(lane, old_rid, wt)
     if not lane_worktree_matches(repo, wt):
         lane_rebuild_worktree(repo, wt, base)
     # Temporarily remove only dependency symlinks created for this worktree. This lets `git clean
@@ -8058,7 +8295,7 @@ class CursorHeadlessChild(AgyChild):
         cmd = [binary, "-p", "--trust", "--force", "--sandbox", "enabled", "--model", "composer-2.5",
                "--output-format", "stream-json"]
         if conversation:
-            cmd.append("--continue")
+            cmd += ["--resume", conversation] if isinstance(conversation, str) else ["--continue"]
         cmd += ["--", prompt]
         # A steer/restart may leave detached descendants in the previous scope.
         # Reuse it until finish() has proved it empty and removed the directory.
@@ -8084,6 +8321,8 @@ class CursorHeadlessChild(AgyChild):
                     event = json.loads(line)
                 except ValueError:
                     continue
+                if event.get("session_id"):
+                    event["conversation_id"] = event["session_id"]
                 if event.get("type") == "result":
                     event["response"] = event.get("result") or ""
                     event["status"] = "ERROR" if event.get("is_error") else "SUCCESS"
@@ -8193,11 +8432,18 @@ def lane_control_messages(server, lane, current, child, turn, pending):
                                                         "card_type", "rework_of", "paths", "regress_label", "read_only", "scope")}
                         spec["scope"] = spec.get("scope") or "repo"
                         spec["budget_minutes"] = budget
+                        if not spec.get("base"):
+                            rc, base, err = lane_git(["rev-parse", "--verify", "HEAD^{commit}"], lane["repo"])
+                            if rc:
+                                raise RuntimeError(f"lane repository has no valid base: {err[:250]}")
+                            spec["base"] = base
                         provider = execution_provider(lane["backend"], policy=load_policy(), lane=lane)
                         spec.update({"run_id": rid, "task": task, "started": NOW(), "provider": provider})
                         spec["queued_at"] = spec["started"]
+                        spec["workspace_path"] = os.path.join(lane_root(lane["name"]), "wt")
                         spec["_event_file"] = os.path.join(rdir, f"events.1.{lane['backend']}.jsonl")
                         open(spec["_event_file"], "w").close()
+                        lane_save_assignment(spec)
                         current.update(spec)
                         lane_write_state(lane["name"], state="busy", current_run=rid, turn_state="queued",
                                          concurrency_keys=[], last_error=None, last_activity=NOW())
@@ -8302,20 +8548,32 @@ def lane_agy_stop(child):
         kill_tree(child.proc.pid, grace=1)
 
 
-def lane_begin_turn(lane, child, prompt, worktree, event_file, turn):
+def lane_begin_turn(lane, child, prompt, worktree, event_file, turn, spec=None):
     if lane["backend"] == "codex":
         req_id = "thread-" + uuid.uuid4().hex
-        child.send({"jsonrpc": "2.0", "id": req_id, "method": "thread/start",
-                    "params": {"cwd": worktree, "model": lane["model"], "approvalPolicy": "never",
-                               "sandbox": load_policy().get("codex", {}).get("sandbox", "workspace-write"),
-                               "ephemeral": True}})
+        recovering = bool(spec and spec.get("_recovered"))
+        if recovering and not spec.get("thread_id"):
+            raise RuntimeError("saved Codex thread is missing")
+        method = "thread/resume" if recovering else "thread/start"
+        params = {"cwd": worktree, "model": lane["model"], "approvalPolicy": "never",
+                  "sandbox": load_policy().get("codex", {}).get("sandbox", "workspace-write")}
+        if recovering:
+            params["threadId"] = spec["thread_id"]
+        else:
+            params["ephemeral"] = False
+        child.send({"jsonrpc": "2.0", "id": req_id, "method": method, "params": params})
         reply = child.wait_response(req_id, 60, event_file)
         if reply.get("error"):
-            raise RuntimeError(f"codex thread/start failed: {short(reply['error'], 300)}")
+            raise RuntimeError(f"codex {method} failed: {short(reply['error'], 300)}")
         thread = reply.get("thread") or {}
         turn["thread_id"] = thread.get("id")
         if not turn["thread_id"]:
             raise RuntimeError("codex thread/start response did not contain thread.id")
+        if spec is not None:
+            if recovering and turn["thread_id"] != spec["thread_id"]:
+                raise RuntimeError("Codex restored a different thread")
+            spec["thread_id"] = turn["thread_id"]
+            lane_save_assignment(spec)
         req_id = "turn-" + uuid.uuid4().hex
         child.send({"jsonrpc": "2.0", "id": req_id, "method": "turn/start",
                     "params": {"threadId": turn["thread_id"], "input": [{"type": "text", "text": prompt}],
@@ -8326,28 +8584,86 @@ def lane_begin_turn(lane, child, prompt, worktree, event_file, turn):
             raise RuntimeError(f"codex turn/start failed: {short(reply['error'], 300)}")
         turn["id"] = (reply.get("turn") or {}).get("id")
     elif lane["backend"] == "pi":
+        if spec and spec.get("_recovered") and not spec.get("session_file"):
+            raise RuntimeError("saved Pi session file is missing")
+        if spec and spec.get("_recovered") and spec.get("session_file"):
+            sid = "switch-" + uuid.uuid4().hex
+            child.send({"id": sid, "type": "switch_session", "sessionFile": spec["session_file"]})
+            switched = child.wait_response(sid, 30, event_file)
+            if switched.get("success") is not True or switched.get("error"):
+                raise RuntimeError("Pi could not restore the saved session")
+            turn["session_id"] = spec.get("session_id")
+            pid = "prompt-" + uuid.uuid4().hex
+            child.send({"id": pid, "type": "prompt", "message":
+                        "Resume the interrupted run from the existing session and continue its task.\n\n" + prompt})
+            turn["id"] = pid
+            return
         sid = "new-" + uuid.uuid4().hex
         child.send({"id": sid, "type": "new_session"})
-        child.wait_response(sid, 30, event_file)
+        response = child.wait_response(sid, 30, event_file)
+        data = response.get("data") or response.get("result") or {}
+        session_id = response.get("sessionId") or response.get("session_id") or data.get("sessionId") or data.get("session_id")
+        session_file = response.get("sessionFile") or response.get("session_file") or data.get("sessionFile") or data.get("session_file")
+        if spec is not None and not session_file:
+            # new_session may only report cancellation; get_state identifies
+            # the actual active session rather than guessing its filename.
+            state_id = "state-" + uuid.uuid4().hex
+            child.send({"id": state_id, "type": "get_state"})
+            state_reply = child.wait_response(state_id, 30, event_file)
+            session_state = state_reply.get("data") or {}
+            session_id = session_state.get("sessionId") or session_id
+            session_file = session_state.get("sessionFile")
+        if spec and (session_id or session_file):
+            spec["session_id"], spec["session_file"] = session_id, session_file
+            if spec.get("run_id"):
+                lane_save_assignment(spec)
         pid = "prompt-" + uuid.uuid4().hex
         child.send({"id": pid, "type": "prompt", "message": prompt})
         turn["id"] = pid
     elif lane_headless(lane):
         turn["id"] = "agy-" + uuid.uuid4().hex
         turn["prompt"] = prompt
-        child.start(prompt, model=lane["model"], effort=lane.get("effort"))
+        conversation = spec.get("conversation_id") if spec and spec.get("_recovered") else None
+        if spec and spec.get("_recovered") and not conversation:
+            raise RuntimeError("saved headless conversation is missing")
+        if conversation:
+            turn["conversation_id"] = conversation
+        child.start(prompt, model=lane["model"], effort=lane.get("effort"), conversation=conversation)
     else:
+        recovering = bool(spec and spec.get("_recovered"))
+        if recovering and not spec.get("session_id"):
+            raise RuntimeError("saved ACP session is missing")
         sid = "session-" + uuid.uuid4().hex
-        child.send({"jsonrpc": "2.0", "id": sid, "method": "session/new",
-                    "params": {"cwd": worktree, "mcpServers": []}})
+        method = "session/load" if recovering else "session/new"
+        params = {"cwd": worktree, "mcpServers": []}
+        if recovering:
+            params["sessionId"] = spec["session_id"]
+        child.send({"jsonrpc": "2.0", "id": sid, "method": method, "params": params})
         reply = child.wait_response(sid, 60, event_file)
         if reply.get("error"):
-            raise RuntimeError(f"cursor-agent ACP session/new failed: {short(reply['error'], 300)}")
+            raise RuntimeError(f"ACP {method} failed: {short(reply['error'], 300)}")
         result = reply.get("result") or {}
-        turn["session_id"] = result.get("sessionId")
+        turn["session_id"] = result.get("sessionId") or (spec["session_id"] if recovering else None)
         if not turn["session_id"]:
             raise RuntimeError("cursor-agent ACP session/new response did not contain sessionId")
-        if lane["backend"] == "hermes" and not lane.get("model"):
+        if spec is not None:
+            if recovering and turn["session_id"] != spec["session_id"]:
+                raise RuntimeError("ACP restored a different session")
+            spec["session_id"] = turn["session_id"]
+            if spec.get("run_id"):
+                lane_save_assignment(spec)
+        if recovering and isinstance(getattr(child, "backlog", None), list):
+            # session/load replays history before its response. Keep that history
+            # in the log without treating old answers as output of the new turn.
+            pending = []
+            for event in child.backlog:
+                if (isinstance(event, dict) and event.get("method") == "session/update"
+                        and (event.get("params") or {}).get("sessionId") == turn["session_id"]):
+                    lane_record_event(event_file, {"type": "session_replay", "event": event})
+                else:
+                    pending.append(event)
+            child.backlog = pending
+        if (lane["backend"] == "hermes" and not lane.get("model")) or (recovering and not result.get("configOptions")):
             lane_cursor_start_prompt(child, turn, prompt)
             if turn.get("abort_pending"):
                 lane_abort_child(lane, child, turn)
@@ -8504,9 +8820,19 @@ def lane_run_turn(lane, child, spec, prompt, ws, rdir, server, turn, pending, at
     if continuation:
         lane_continue_turn(lane, child, prompt, event_file, turn)
     else:
-        lane_begin_turn(lane, child, prompt, ws["path"], event_file, turn)
+        try:
+            lane_begin_turn(lane, child, prompt, ws["path"], event_file, turn, spec)
+        except Exception as error:
+            if spec.get("_recovered"):
+                reason = f"session recovery failed: {short(error, 300)}"
+                lane_recovery_event(lane, spec, event_file, reason)
+                set_status(rdir, recovery_abandoned=reason)
+            raise
+        if spec.get("_recovered"):
+            lane_recovery_event(lane, spec, event_file)
     if lane_headless(lane):
         set_status(rdir, executor_pid=child.pid)
+        lane_write_state(lane["name"], child_pid=child.pid)
     while pending:
         kind, value = pending.pop(0)
         if kind == "steer":
@@ -8546,6 +8872,7 @@ def lane_run_turn(lane, child, spec, prompt, ws, rdir, server, turn, pending, at
         agy_started_at = NOW()
         agy_saw_executor_event = False
         set_status(rdir, executor_pid=child.pid)
+        lane_write_state(lane["name"], child_pid=child.pid)
         turn["id"] = "agy-" + uuid.uuid4().hex
         return True
 
@@ -8722,6 +9049,9 @@ def lane_run_turn(lane, child, spec, prompt, ws, rdir, server, turn, pending, at
             kind, payload = agy_event(msg)
             if payload.get("conversation_id"):
                 turn["conversation_id"] = payload.get("conversation_id")
+                spec["conversation_id"] = turn["conversation_id"]
+                if spec.get("run_id"):
+                    lane_save_assignment(spec)
             if kind != "result":
                 continue
             result = agy_result(msg)
@@ -8729,6 +9059,9 @@ def lane_run_turn(lane, child, spec, prompt, ws, rdir, server, turn, pending, at
                 spec["_agy_finished_early"] = result["finished_reason"]
             if result["conversation_id"]:
                 turn["conversation_id"] = result["conversation_id"]
+                spec["conversation_id"] = turn["conversation_id"]
+                if spec.get("run_id"):
+                    lane_save_assignment(spec)
             if any(result["usage"].values()):
                 usage = result["usage"]
             if spec.get("abort_requested") or budget_hit:
@@ -8837,7 +9170,8 @@ def lane_note_stream_retry(rdir, event_file, retries, max_retries, error_text, w
                                    "wait_seconds": round(wait_seconds, 3), "error": error_text})
 
 
-def lane_finalize_run(lane, spec, ws, final, usage, error_class, rc, event_file, attempts=None):
+def lane_finalize_run(lane, spec, ws, final, usage, error_class, rc, event_file, attempts=None,
+                      preserve_workspace=False):
     rid, rdir = spec["run_id"], os.path.join(RUNS, spec["run_id"])
     title = spec.get("title") or spec["task"].strip().splitlines()[0][:72]
     stopped = bool(spec.get("stop_requested"))
@@ -8855,6 +9189,10 @@ def lane_finalize_run(lane, spec, ws, final, usage, error_class, rc, event_file,
             ancestor_rc, _, _ = git(["merge-base", "--is-ancestor", ws["base"], head.strip()], ws["root"])
             changed = changed or ancestor_rc == 0
     read_only = spec.get("read_only") or spec.get("card_type") in READ_ONLY_CARD_TYPES
+    # Prepare/session failures must leave interrupted progress (including the index) intact.
+    preserve_workspace = preserve_workspace or (spec.get("_recovered") and error_class in ("prepare_failed", "exec_error"))
+    if preserve_workspace:
+        jsave(os.path.join(lane_root(lane["name"]), "preserve-workspace.json"), {"run_id": rid})
     evidence_error = None
     collected_artifacts = []
     if spec.get("evalid_role"):
@@ -8863,7 +9201,8 @@ def lane_finalize_run(lane, spec, ws, final, usage, error_class, rc, event_file,
             ws, spec["artifact_sink"], spec["evalid_output"], rid, "executor")
     fin = ({"branch": None, "commit": None, "diffstat": "", "excluded_files": [],
             "patch": None, "worktree": ws["root"], "merge_hint": None}
-           if read_only or evidence_error else finalize_workspace(ws, title, lane["backend"], rdir, keep=True))
+           if read_only or evidence_error or preserve_workspace
+           else finalize_workspace(ws, title, lane["backend"], rdir, keep=True))
     if fin.get("commit") and ws.get("mode") == "worktree" and ws.get("lane"):
         # The executor may switch branches or detach HEAD. Publish the finalized
         # commit under the run branch so the normal merge hint delivers that result.
@@ -8872,7 +9211,7 @@ def lane_finalize_run(lane, spec, ws, final, usage, error_class, rc, event_file,
         if rc:
             raise RuntimeError(f"lane branch handoff failed: {err.strip()[:250]}")
     read_only_output = read_only and read_only_output_exists(ws.get("path"), (final or {}).get("files_changed"))
-    if read_only and ws.get("mode") == "worktree" and not spec.get("evalid_role"):
+    if read_only and ws.get("mode") == "worktree" and not spec.get("evalid_role") and not preserve_workspace:
         for command in (["checkout", "--detach", "-f", ws["base"]],
                         ["clean", "-ffdx", "-e", "/.swrm-tmp/"],
                         ["branch", "-D", ws["branch"]]):
@@ -8886,7 +9225,7 @@ def lane_finalize_run(lane, spec, ws, final, usage, error_class, rc, event_file,
                                                collected_artifacts, lane_git)
     verify = None
     prepare_error = None
-    if spec.get("verify") and not evidence_error and error_class not in ("risk_blocked", "rate_limit") and (final is not None or changed):
+    if spec.get("verify") and not evidence_error and not preserve_workspace and error_class not in ("risk_blocked", "rate_limit") and (final is not None or changed):
         if read_only or lockfiles_changed(ws):
             prepared = run_workspace_prepare(ws["repo"], ws["root"], "before_verify")
             if prepared:
@@ -8946,12 +9285,12 @@ def lane_finalize_run(lane, spec, ws, final, usage, error_class, rc, event_file,
         read_only=read_only, verify=verify)
     if evidence_error:
         status, verify_note, error_class = "failed", evidence_error, "evalid_evidence_infra"
-    if read_only and verify and not evidence_error:
+    if read_only and verify and not evidence_error and not preserve_workspace:
         for command in (["reset", "--hard", ws["base"]], ["clean", "-ffdx", "-e", "/.swrm-tmp/"]):
             cleanup_rc, _, cleanup_err = lane_git(command, ws["root"])
             if cleanup_rc:
                 raise RuntimeError(f"review worktree cleanup failed: {cleanup_err[:250]}")
-    if ws.get("mode") == "worktree" and not read_only and not evidence_error:
+    if ws.get("mode") == "worktree" and not read_only and not evidence_error and not preserve_workspace:
         detach_at = fin.get("commit") or ws["base"]
         lane_git(["checkout", "--detach", detach_at], ws["root"])
     out = {"id": rid, "status": status, "error_class": error_class, "title": title, "lane": lane["name"],
@@ -9000,8 +9339,9 @@ def lane_finalize_run(lane, spec, ws, final, usage, error_class, rc, event_file,
                    "lessons_injected": spec.get("lessons_injected", []),
                    "patterns_injected": spec.get("patterns_injected", [])})
     set_status(rdir, state="finished", status=status, finished=NOW(), commit=fin.get("commit"), lane=lane["name"],
-               scope=spec.get("scope", "repo"), error_class=error_class)
-    if not evidence_error:
+               scope=spec.get("scope", "repo"), error_class=error_class,
+               workspace_preserved=bool(preserve_workspace))
+    if not evidence_error and not preserve_workspace:
         cleanup_executor_tmp(ws.get("root") or ws["path"])
     return out
 
@@ -9016,7 +9356,8 @@ def lane_do_run(lane, spec, child, server, current):
     try:
         ws = spec.pop("_capacity_workspace", None)
         resuming_capacity = ws is not None
-        ws = ws or lane_prepare_workspace(lane, rid, spec.get("base"))
+        ws = ws or lane_prepare_workspace(lane, rid, spec.get("base"), preserve=bool(spec.get("_recovered")),
+                                          recovery_point=spec.get("_recovery_point") if spec.get("_recovery_level") == "commit" else None)
         if ws.get("workspace_note"):
             set_status(rdir, workspace_note=ws["workspace_note"])
         ws["prepare"] = []
@@ -9027,9 +9368,11 @@ def lane_do_run(lane, spec, child, server, current):
                 evp = os.path.join(rdir, f"events.1.{lane['backend']}.jsonl")
                 open(evp, "a").close()
                 lane_record_event(evp, {"type": "error", "error": "workspace prepare failed"})
-                # lane_prepare_workspace already reset and cleaned this worktree, so discard only prepare artifacts.
-                lane_git(["reset", "--hard", ws["base"]], ws["root"])
-                lane_git(["clean", "-fdx"], ws["root"])
+                # A resumed worktree contains progress from before this prepare step.
+                # Only fresh runs can safely discard prepare artifacts.
+                if not spec.get("_recovered"):
+                    lane_git(["reset", "--hard", ws["base"]], ws["root"])
+                    lane_git(["clean", "-fdx"], ws["root"])
                 attempt = {"backend": lane["backend"], "model": lane["model"], "effort": lane.get("effort"),
                            "rc": prepared["rc"], "seconds": prepared["seconds"], "error_class": "prepare_failed",
                            "meta": {"usage": {}}, "events": evp, "error_tail": None}
@@ -9042,6 +9385,12 @@ def lane_do_run(lane, spec, child, server, current):
                 set_status(rdir, verify_note="verify paths rewritten from base repo to lane worktree")
         task = spec["task"]
         prompt = execution_prompt(ws["path"], task, spec.get("scope", "repo"))
+        if spec.get("_recovered"):
+            note = "恢复自未提交状态" if spec.get("_recovery_level") == "workspace" else "恢复自已推送提交"
+            prompt = (f"{note}: {spec.get('_recovery_point')}. Resume the interrupted task using the existing "
+                      "session and workspace progress.\n\n" + prompt)
+            set_status(rdir, recovery_level=spec.get("_recovery_level"), recovery_point=spec.get("_recovery_point"),
+                       recovery_note=note)
         if spec.get("verify"):
             prompt += (f"\nAfter you finish, the planner runs this acceptance command on the host, outside your sandbox: "
                        f"`{spec['verify']}`. If your sandbox blocks running it (ports, network, missing deps), say so in "
@@ -9284,9 +9633,15 @@ def cmd_lane_serve(lane, policy):
     name = lane["name"]
     server = lane_ctl_listener(name)
     current, child = {}, None
+    recovered_ws = None
+    previous_state = jload(lane_state_path(name), {}) or {}
+    recovered, recovery_error = lane_recover_assignment(lane, previous_state)
+    if previous_state.get("current_run"):
+        lane_stop_previous_child(previous_state)
     started, backoff, next_start = NOW(), 1, 0
     lane_write_state(name, name=name, backend=lane["backend"], model=lane["model"], effort=lane.get("effort"),
-                     state="starting", supervisor_pid=os.getpid(), child_pid=None, current_run=None,
+                     state="starting", supervisor_pid=os.getpid(), child_pid=None,
+                     current_run=recovered["run_id"] if recovered else None,
                      started=started, last_error=None, resolved_model=None)
     quota_state = jload(lane_state_path(name), {}) or {}
     if lane["backend"] == "agy" and quota_state.get("quota_model") == lane["model"]:
@@ -9295,6 +9650,14 @@ def cmd_lane_serve(lane, policy):
             lane_write_state(name, quota_until=NOW() + 3600)
     try:
         wt = os.path.join(lane_root(name), "wt")
+        if recovered:
+            try:
+                recovered_ws = lane_prepare_workspace(
+                    lane, recovered["run_id"], recovered.get("base"), preserve=True,
+                    recovery_point=recovered["_recovery_point"] if recovered["_recovery_level"] == "commit" else None)
+            except Exception as error:
+                recovery_error = f"workspace recovery failed: {short(error, 300)}"
+                recovered = None
         # Create the fixed worktree before launching a cwd-bound Pi child.
         os.makedirs(lane_root(name), exist_ok=True)
         repo = os.path.realpath(lane["repo"])
@@ -9304,11 +9667,28 @@ def cmd_lane_serve(lane, policy):
         rc, base, err = lane_git(["rev-parse", "--verify", "HEAD^{commit}"], top)
         if rc:
             raise RuntimeError(f"lane repo has no commit: {err}")
-        if not lane_worktree_matches(top, wt):
+        if not recovered and not lane_worktree_matches(top, wt):
             lane_rebuild_worktree(top, wt, base)
+        if recovered:
+            current.update(recovered)
         child = lane_child(lane, wt, policy)
-        lane_write_state(name, state="idle", child_pid=child.pid, last_error=None,
-                         turn_state=None, concurrency_keys=[])
+        if recovered:
+            lane_write_state(name, state="busy", child_pid=child.pid, current_run=recovered["run_id"],
+                             turn_state="queued", last_error=None, last_activity=NOW())
+            recovery_file = recovered.get("_event_file") or os.path.join(
+                RUNS, recovered["run_id"], f"events.1.{lane['backend']}.jsonl")
+            lane_record_event(recovery_file, {"type": "recovery_pending", "run_id": recovered["run_id"],
+                                              "level": recovered["_recovery_level"],
+                                              "point": recovered["_recovery_point"]})
+        else:
+            lane_write_state(name, state="idle", child_pid=child.pid, current_run=None, last_error=None,
+                             turn_state=None, concurrency_keys=[])
+            if recovery_error and previous_state.get("current_run"):
+                rid = previous_state["current_run"]
+                event_file = os.path.join(RUNS, rid, f"events.1.{lane['backend']}.jsonl")
+                if os.path.isdir(os.path.dirname(event_file)):
+                    lane_recovery_event(lane, {"run_id": rid}, event_file, recovery_error)
+                    set_status(os.path.dirname(event_file), recovery_abandoned=recovery_error)
     except Exception as e:
         traceback.print_exc()
         lane_write_state(name, state="crashed", last_error=short(e, 500), child_pid=None)
@@ -9322,9 +9702,14 @@ def cmd_lane_serve(lane, policy):
                                   {"type": "error", "error": "resident executor process exited"})
                 spec.pop("stop_requested", None)
                 lane_write_state(name, state="crashed", last_error="resident executor process exited", child_pid=None)
-                lane_finalize_run(lane, spec, lane_prepare_workspace(lane, spec["run_id"], spec.get("base")),
+                # A child can die before its first recovered turn. Reuse the validated
+                # workspace instead of preparing it as a fresh run and erasing progress.
+                ws = recovered_ws if spec.get("_recovered") else lane_prepare_workspace(
+                    lane, spec["run_id"], spec.get("base"))
+                lane_finalize_run(lane, spec, ws,
                                   None, {}, "exec_error", 1,
-                                  os.path.join(RUNS, spec["run_id"], f"events.1.{lane['backend']}.jsonl"))
+                                  os.path.join(RUNS, spec["run_id"], f"events.1.{lane['backend']}.jsonl"),
+                                  preserve_workspace=bool(spec.get("_recovered")))
                 current.clear()
             try:
                 child.close()
@@ -9340,8 +9725,10 @@ def cmd_lane_serve(lane, policy):
                 wt = os.path.join(lane_root(name), "wt")
                 child = lane_child(lane, wt, policy)
                 backoff = 1
-                lane_write_state(name, state="idle", child_pid=child.pid, current_run=None, last_error=None,
-                                 turn_state=None, concurrency_keys=[])
+                lane_write_state(name, state="busy" if current.get("run_id") else "idle",
+                                 child_pid=child.pid, current_run=current.get("run_id"), last_error=None,
+                                 turn_state="queued" if current.get("run_id") else None,
+                                 **({} if current.get("run_id") else {"concurrency_keys": []}))
             except Exception as e:
                 traceback.print_exc()
                 lane_write_state(name, state="crashed", child_pid=None, last_error=short(e, 500))
@@ -9352,7 +9739,7 @@ def cmd_lane_serve(lane, policy):
         if (down or current.get("down_requested")) and not current.get("run_id"):
             shutdown = True
             continue
-        if current.get("run_id"):
+        if current.get("run_id") and child:
             spec = current
             down_after = False
             outcome = {}
