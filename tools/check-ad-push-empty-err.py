@@ -26,7 +26,7 @@ def load_module():
     return module
 
 
-def fake_git(push_rc=0, push_err="", remote_head=HEAD, pushed_head=HEAD, remote_rc=0):
+def fake_git(push_rc=0, push_err="", remote_head=HEAD, pushed_head=HEAD, remote_rc=0, local_rc=0):
     """Return a `sh` replacement answering the push, the ls-remote and the rev-parse."""
     def sh(cmd, timeout=120, inp=None):
         argv = cmd if isinstance(cmd, list) else [cmd]
@@ -35,7 +35,7 @@ def fake_git(push_rc=0, push_err="", remote_head=HEAD, pushed_head=HEAD, remote_
         if "ls-remote" in argv:
             return (remote_rc, f"{remote_head}\t{argv[-1]}\n", "") if remote_head else (remote_rc, "", "")
         if "rev-parse" in argv:
-            return (0, f"{pushed_head}\n", "") if pushed_head else (1, "", "")
+            return (local_rc, f"{pushed_head}\n", "") if pushed_head else (1, "", "")
         return 0, "", ""
     return sh
 
@@ -110,7 +110,8 @@ def main():
 
     # 9. all uncertain/mismatched push outcomes must also stop the full harvest
     #    before any GitHub call, even if ls-remote emitted a SHA before failing.
-    for scenario in ({"pushed_head": ""}, {"remote_head": OTHER_HEAD}, {"remote_rc": 1}):
+    for scenario in ({"pushed_head": ""}, {"remote_head": OTHER_HEAD}, {"remote_rc": 1},
+                     {"local_rc": 1}, {"push_err": "! [rejected] non-fast-forward"}):
         result, gh = run_finish(ad, fake_git(push_rc=1, **scenario))
         assert result["status"] == "push-failed" and not result["done"], result
         gh.assert_not_called()
@@ -125,6 +126,29 @@ def main():
     probes = [call.args[0] for call in sh.call_args_list if "ls-remote" in call.args[0]]
     assert pushes == [["git", "-C", ad.LOCAL, "push", "-q", "origin", f"{HEAD}:refs/heads/{BRANCH}"]], pushes
     assert probes == [["git", "-C", ad.LOCAL, "ls-remote", "origin", f"refs/heads/{BRANCH}"]], probes
+
+    # 11. exercise the full harvest for both success paths. A successful push
+    #     needs no probe; whitespace-only stderr recovers after exactly one probe.
+    for scenario in ({"push_rc": 0, "remote_rc": 1, "local_rc": 1},
+                     {"push_rc": 1, "push_err": " \n\t"}):
+        sh = mock.Mock(side_effect=fake_git(**scenario))
+        result, gh = run_finish(ad, sh)
+        assert result["status"] == "pr-created" and result["done"], result
+        prs = [call.args[0] for call in gh.call_args_list if call.args[0][:2] == ["pr", "create"]]
+        assert len(prs) == 1 and prs[0][prs[0].index("--head") + 1] == BRANCH, prs
+        pushes = [call.args[0] for call in sh.call_args_list if "push" in call.args[0]]
+        probes = [call.args[0] for call in sh.call_args_list if "ls-remote" in call.args[0]]
+        assert len(pushes) == 1, pushes
+        assert len(probes) == scenario["push_rc"], probes
+
+    # 12. unfiltered harvests push a local ref rather than a literal SHA. Compare
+    #     origin with the resolved commit, not with the name of that local ref.
+    with mock.patch.object(ad, "sh", side_effect=fake_git(push_rc=1)) as sh, \
+         mock.patch.object(ad, "log"):
+        ok, error = ad.harvest_push("lane", 1, BRANCH, "refs/fleet/lane")
+    assert ok and error is None, (ok, error)
+    sh.assert_any_call(["git", "-C", ad.LOCAL, "rev-parse", "--verify", "--quiet",
+                       "refs/fleet/lane^{commit}"], timeout=60)
 
     print("ad push empty stderr: OK")
 

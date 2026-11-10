@@ -184,43 +184,10 @@ summary/tests、host verify rc）拼出 PR 标题与正文，再逐项校验：
 校验结果写入 run 记录（lane 主机 `runs/<run>/pr-validation.json` 与 `pr-validation.log`）
 和 AD 侧 `~/phanes-ctl/autodispatch/runs/<run>.log`，供阻塞诊断引用。
 
-## 派发简报模板：实现卡三行与 fix 轮 F1–F6（Refs #1839 / #1851）
+## 派发简报模板（#1851）
 
-AD 写给 lane 的任务书（task book）按卡的类别注入不同的硬性要求，常量在
-`autodispatch.py` 里，注入点在 `dispatch()`：
-
-| 卡 | 常量 | 强制的要求 |
-| --- | --- | --- |
-| 实现卡（默认类别） | `IMPL_CARD_TASK_BOOK` | 交付说明逐个新增函数列出**入口→调用链→数据结构来源**；至少一个 **tick/集成级测试**（从真实入口驱动到可观测结果，只测函数加 mock 不算） |
-| 修复轮 | `FIX_ROUND_TASK_BOOK` | rubric **F1–F6** 六条清单 |
-
-修复轮的六条（`FIX_ROUND_TASK_BOOK`）：
-
-| 条 | 要求 |
-| --- | --- |
-| F1 | 从 `rebase-pr-<N>` 续改，先做祖先校验（`git merge-base --is-ancestor <base> rebase-pr-<N>`）；校验不过就停下报告，不另起分支重写 |
-| F2 | 先枚举同类点（同样的写法、同样的调用点），再逐个修 |
-| F3 | 上一轮每条 BLOCKER 逐条勾选（`- [x]`）并附证据（文件:行号 + 测试名或命令输出） |
-| F4 | 先写能复现问题的失败测试并跑一次确认是红的，再改实现让它转绿 |
-| F5 | 不删既有集成测试（要改断言就改断言并写明理由） |
-| F6 | 修完复跑 A4/A2 两项验收（同一条命令、同一个环境） |
-
-**修复轮卡的标记是显式的**，不靠标题猜：fix 标签（`fix` / `fix-round` / `review-fix` /
-`rework`，含 `card:` / `type:` 前缀）、正文里的 `## Fix Round` 段，或标题前缀
-（`fix round:` / `修复轮：` 等）。普通工作卡（只是修一个 bug）不带清单；planner /
-follow-up / ops / upstream / verify-intent 这些类别的卡也不要清单（它们不交代码）。
-修复轮仍是实现卡，所以三行交付要求照样注入。
-
-`{pr}` 占位符替换成卡里指出的 PR 号（`rebase-pr-<N>` 分支名或 `目标 PR：#N` 字段，
-标题里的 `PR #N` 也算）；卡没写 PR 号时保留 `<N>`。
-
-离线验证：
-
-```bash
-python3 -m unittest tools.tests.test_dispatch_brief_templates -v   # 模板渲染
-python3 -m unittest tools.tests.test_fix_round_brief -v            # 注入接线
-python3 -m unittest tools.tests.test_impl_card_task_book -v         # 实现卡三行
-```
+实现卡要求入口、调用链、数据结构来源和 tick/集成测试。修复轮额外注入 F1–F6 清单；
+PR 号取自卡内容，未指定时保留 `<N>`。非实现类别不注入修复清单。
 
 ## 收割前的越界产物过滤（Refs #1835）
 
