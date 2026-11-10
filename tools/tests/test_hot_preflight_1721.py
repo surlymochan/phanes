@@ -413,17 +413,33 @@ class BlockedCardTests(HotFileCase):
                          "still holds the file" % HOT_FILE)
 
     def test_a_lane_whose_only_card_is_blocked_gets_a_new_one(self):
-        """The supply water level counts a blocked card as no work: the lane would starve."""
+        """The supply water level counts a blocked card as no work: the lane gets a card that does not conflict."""
         scenario = self.two_cards_one_lane()
         scenario.module.LOW = 0  # only the starvation count can trigger the refill
         scenario.module.replenish = scenario.real_replenish
         title = "a fresh card for the starved lane"
-        scenario.backlog_card("fresh.md", card_text(title, (HOT_FILE,)))
+        scenario.backlog_card("fresh.md", card_text(title, (OTHER_HOT_FILE,)))
         scenario.tick()
 
         self.assertIn(title, scenario.filed(),
                       "the lane whose only card is blocked by the hot file (%s) got no new "
-                      "card: the blocked card is still counted as supply" % HOT_FILE)
+                      "card although a card without a conflict was in the backlog" % HOT_FILE)
+
+    def test_a_starved_lane_still_refuses_a_conflicting_card(self):
+        """Starvation never lets a card through whose hot file is at its cap."""
+        scenario = self.two_cards_one_lane()
+        scenario.module.LOW = 0
+        scenario.module.replenish = scenario.real_replenish
+        conflicting = "a conflicting card for the starved lane"
+        free = "a card without a conflict for the starved lane"
+        scenario.backlog_card("a-conflict.md", card_text(conflicting, (HOT_FILE,)))
+        scenario.backlog_card("b-free.md", card_text(free, (OTHER_HOT_FILE,)))
+        scenario.tick()
+
+        self.assertNotIn(conflicting, scenario.filed(),
+                         "a card of the hot file (%s) at its cap was created for a starved lane" % HOT_FILE)
+        self.assertIn(free, scenario.filed(),
+                      "the starved lane got no card although a card without a conflict was in the backlog")
 
     def test_the_blocked_card_carries_the_blocking_file_and_the_waiting_time(self):
         """The blocked card is explained: the file it waits for and how long it waits."""

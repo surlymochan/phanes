@@ -3308,10 +3308,7 @@ def tick(lanes, state, last_warn):
             if time.time() - last_warn > 600:
                 log(f"{why}: mint paused, no new issue minted", brain=False); last_warn = time.time()
         else:
-            global MINT_STARVED
-            MINT_STARVED = starve > 0
-            try: filed = replenish(max(LOW - ready, starve), state)
-            finally: MINT_STARVED = False
+            filed = replenish(max(LOW - ready, starve), state)
             if filed: log(f"{why}: filed {len(filed)} issue(s) from backlog: {' '.join(filed)}")
             elif time.time() - last_warn > 600:
                 log(f"WARNING queue low: {ready} dispatchable lane-ready issue(s) left (+{blocked} waiting on 依赖), backlog/ empty (threshold {LOW})"); last_warn = time.time()
@@ -3347,11 +3344,7 @@ def record_mint(record):
     os.replace(tmp, f"{D}/mint-log.json")
 
 
-MINT_STARVED = False  # set by the tick while a lane has no card it may take
-
-
-def mint_card(text, state, counts, source, starved=None):
-    if starved is None: starved = MINT_STARVED
+def mint_card(text, state, counts, source):
     lines = text.splitlines()
     if len(lines) < 2 or not lines[0].startswith("#") or not lines[1].startswith("labels:"):
         record_mint({"at": time.strftime("%F %T"), "source": source,
@@ -3360,11 +3353,9 @@ def mint_card(text, state, counts, source, starved=None):
     verdict = hot_verdict("\n".join(lines[2:]), counts)
     record = {"at": time.strftime("%F %T"), "title": lines[0].lstrip("# ").strip(),
               "source": source, "preflight": verdict, "minted": False, "issue": None}
-    if verdict["blocked"] and starved:
-        # A lane has nothing it may take: a card that waits for its hot file is still
-        # supply the status explains, a refused one leaves the lane idle (Refs #1721).
-        record["starved_override"] = True
-    elif verdict["blocked"]:
+    if verdict["blocked"]:
+        # A card that conflicts on a hot file is never created, not even for a starved
+        # lane: the caller moves on to the next card that does not conflict (Refs #1721).
         record["reason"] = "hot_file_conflict"
         record_mint(record)
         log(f"mint refused {record['title']}: {verdict['advice']} {verdict['conflicts']}", brain=False)
