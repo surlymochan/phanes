@@ -364,3 +364,25 @@ REPORT: dropped — 旧 .lane-review 文件载体已由 main 过滤，按 issue 
 ## 热文件预检（#1721）
 
 `hot_policy.json` 是 backlog 铸卡和 AD 派发共用的上限配置；变更配置后须与脚本及 `hotfiles.py` 一同部署。卡片用 `热文件：path/to/file` 声明修改文件。导入时冲突卡保留待重试，`mint-log.json` 记录预检；同批已铸卡计入占用。`lanes-status.json` 的 `_blocked_details` 给出原因、文件及自首次观测以来的等待秒数；这些卡不计入 `_ready` 和补给水位。旧在途状态缺少 `hot` 字段时，声明了热文件的卡保守等待，直到旧任务结束。文档文件按既有规则豁免。
+
+## PR 交付换标（#1772 A/2）
+
+成功创建 PR 后，移除 `lane-ready`、`in-progress` 并添加 `lane-pr`。
+终态采用**流转标签子集**口径：完整标签与
+`{lane-ready, in-progress, lane-pr}` 的交集恰为 `{lane-pr}`；保留 p1、backend、planner 等其它标签。
+每次尝试均先 gh 实读，读取失败不写；写后再次 gh 实读核验，最多尝试三次。
+耗尽后返回 False、写 brain WARNING，提交路径在 `error` 报告交付标签未核验（`status` 仍记录 PR 已创建），不能当作换标成功。
+远端持续不可用时无法保证摘除 lane-ready；告警要求人工修复，不会主动加回 lane-ready。
+开放 PR、已合并未关闭 issue、重排及派发并发守卫属于 B 卡。
+旧 `openswarm/lib/dispatch` 已退役：REPORT: dropped；仅移植旧 PR 的交付换标结构到当前工具。
+
+| BLOCKER / 验收或失败模式 → 修复 | 文件 | 对应测试（tools/tests/） |
+| --- | --- | --- |
+| B4 完整标签口径冲突 → 流转子集判定，增删仅三个流转标签 | autodispatch.py | test_lane_pr_relabel.RelabelTests.test_metadata_preserved |
+| B5 缺写后核验 → gh 新读取，残留 in-progress 则重试 | autodispatch.py | test_lane_pr_relabel.RelabelTests.test_stale_readback_retries |
+| R3 三次不收敛静默 → False + brain WARNING | autodispatch.py | test_lane_pr_relabel.RelabelTests.test_nonconvergence_warns_and_fails |
+| R2 实读失败 → 本轮不写，下轮重新实读 | autodispatch.py | test_lane_pr_relabel.RelabelTests.test_read_and_write_exceptions_retry |
+| API 读/写及写后读取持续失败 → 三轮后告警 | autodispatch.py | test_lane_pr_relabel.RelabelTests.test_persistent_exceptions_warn_and_fail |
+
+验证：`python3 -m unittest discover -s tools/tests -p 'test_lane_pr*.py'`；
+`python3 -m unittest discover -s tools/lane-autodispatch -p 'test_*.py'`。

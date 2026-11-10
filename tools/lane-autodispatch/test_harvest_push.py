@@ -92,6 +92,26 @@ class HarvestPushTest(unittest.TestCase):
         self.assertIn("push failed", result["error"])
         self.assertFalse(any(call.args[0][:2] == ["pr", "create"] for call in gh.call_args_list))
 
+    def test_a_failed_pr_create_does_not_mark_the_issue_done_or_relabel_it(self):
+        st = {"issue": 1, "run": "run", "base": "base"}
+        info = {"branch": "branch", "commit": "commit", "repo": "repo"}
+        def gh(args, timeout=60):
+            if args[:2] == ["issue", "view"]: return 0, json.dumps({"body": "# card"}), ""
+            if args[:2] == ["pr", "create"]: return 1, "", "HTTP 502"
+            return 0, "", ""
+        with mock.patch.object(ad, "sh", fake_git()), \
+             mock.patch.object(ad, "harvest_fetch", return_value=(True, "", 0)), \
+             mock.patch.object(ad, "filter_harvest", return_value=(HEAD, [], False)), \
+             mock.patch.object(ad, "pr_validation_mode", return_value="warn"), \
+             mock.patch.object(ad, "mark_done") as mark_done, \
+             mock.patch.object(ad, "log"), mock.patch.object(ad, "gh", side_effect=gh) as gh_mock:
+            result = ad.finish("lane", {"host": "host"}, st, info, {})
+        self.assertFalse(result["done"])
+        self.assertEqual(result["status"], "pr-create-failed")
+        self.assertIn("HTTP 502", result["error"])
+        mark_done.assert_not_called()
+        self.assertFalse(any(c.args[0][:2] == ["issue", "edit"] for c in gh_mock.call_args_list))
+
 
 if __name__ == "__main__":
     unittest.main()
