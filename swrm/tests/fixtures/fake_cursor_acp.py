@@ -50,6 +50,7 @@ def read_message(timeout=0.2):
 
 session_id = "fake-cursor-session"
 cwd = os.getcwd()
+sessions = os.environ.get("FAKE_CURSOR_SESSION_DIR", os.path.join(cwd, ".fake-acp-sessions"))
 record({"argv": sys.argv, "key_matches": os.environ.get("FAKE_EXPECTED_KEY") == os.environ.get(os.environ.get("FAKE_KEY_ENV", "MINIMAX_CN_API_KEY"))})
 config_options = [{"id": "model", "name": "Model", "category": "model", "type": "select",
                    "currentValue": "other-model", "options": [
@@ -66,11 +67,29 @@ while True:
     params = request.get("params") or {}
     if method == "initialize":
         send({"jsonrpc": "2.0", "method": "fixture/unrelated", "params": {"before": method}})
-        response(request, {"protocolVersion": 1, "agentCapabilities": {},
+        response(request, {"protocolVersion": 1, "agentCapabilities": {"loadSession": True},
                            "agentInfo": {"name": "fake-cursor-agent", "version": "1"}})
     elif method == "session/new":
         cwd = params.get("cwd", cwd)
+        os.makedirs(sessions, exist_ok=True)
+        with open(os.path.join(sessions, session_id), "w") as stream:
+            stream.write("saved conversation context")
         response(request, {"sessionId": session_id, "configOptions": config_options})
+    elif method == "session/load":
+        cwd = params.get("cwd", cwd)
+        path = os.path.join(sessions, params.get("sessionId", "missing"))
+        context = None
+        if os.path.isfile(path):
+            with open(path) as stream:
+                context = stream.read()
+        if context != "saved conversation context":
+            send({"jsonrpc": "2.0", "id": request.get("id"),
+                  "error": {"code": -32602, "message": "session unavailable"}})
+        else:
+            session_id = params["sessionId"]
+            send({"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": session_id,
+                  "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "old answer"}}}})
+            response(request, {"configOptions": config_options})
     elif method == "session/set_config_option":
         config_options[0]["currentValue"] = params.get("value")
         response(request, {"configOptions": config_options})

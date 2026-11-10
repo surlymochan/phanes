@@ -2,6 +2,7 @@ import hashlib
 import json
 import os
 import pathlib
+import signal
 import runpy
 import shutil
 import socket
@@ -16,6 +17,8 @@ from unittest import mock
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 CLI = ROOT / "bin" / "swrm"
 FIXTURES = ROOT / "tests" / "fixtures"
+GIT_IDENTITY = {"GIT_AUTHOR_NAME": "Lane Test", "GIT_AUTHOR_EMAIL": "lane-test@example.invalid",
+                "GIT_COMMITTER_NAME": "Lane Test", "GIT_COMMITTER_EMAIL": "lane-test@example.invalid"}
 
 
 class CodexSandboxTests(unittest.TestCase):
@@ -51,7 +54,7 @@ class CodexSandboxTests(unittest.TestCase):
 
     def git(self, cwd, *args):
         return subprocess.run(["git", "-C", str(cwd), *args], check=True,
-                              capture_output=True, text=True).stdout.strip()
+                              capture_output=True, text=True, env={**os.environ, **GIT_IDENTITY}).stdout.strip()
 
     def test_policy_modes_and_network_restrictions(self):
         class RecordingChild:
@@ -151,7 +154,7 @@ class CodexSandboxTests(unittest.TestCase):
                      "lane control plane is AF_UNIX-based; Windows named-pipe transport is not implemented")
 class LaneTests(unittest.TestCase):
     def setUp(self):
-        self.tmp = tempfile.TemporaryDirectory(prefix="oslane-", dir=tempfile.gettempdir())
+        self.tmp = tempfile.TemporaryDirectory(prefix="oslane-", dir=ROOT.parent)
         self.root = pathlib.Path(self.tmp.name)
         self.data = self.root / "data"
         self.repo = self.root / "repo"
@@ -164,7 +167,9 @@ class LaneTests(unittest.TestCase):
         self.git("commit", "-q", "-m", "base")
         for path in FIXTURES.glob("fake_*py"):
             path.chmod(0o755)
-        self.env = dict(os.environ, OPENSWARM_HOME=str(self.data))
+        self.env = dict(os.environ, OPENSWARM_HOME=str(self.data),
+                        OPENSWARM_FLEET_GUARD_CONFIG=str(self.data / "no-fleet-guard.json"),
+                        OPENSWARM_FLEET_GUARD_REQUIRED="0")
         self.env["FAKE_PI_RPC_LOG"] = str(self.root / "fake-pi-rpc.jsonl")
         self.lane_name = "L1"
         self.backend = "codex"
@@ -182,10 +187,11 @@ class LaneTests(unittest.TestCase):
         if backend:
             self.backend = backend
         fixture = {"codex": "fake_app_server.py", "cursor": "fake_cursor_acp.py",
-                   "agy": "fake_agy.py", "pi": "fake_pi_rpc.py"}[self.backend]
+                   "agy": "fake_agy.py", "pi": "fake_pi_rpc.py",
+                   "hermes": "fake_cursor_acp.py", "copilot": "fake_cursor_acp.py"}[self.backend]
         binary = FIXTURES / fixture
         if model is None:
-            model = "composer-2.5" if self.backend == "cursor" else (
+            model = "composer-2.5" if self.backend in ("cursor", "hermes", "copilot") else (
                 "gemini-3.8-flash-medium" if self.backend == "agy" else "fake-model")
         (self.data / "lanes").mkdir(parents=True, exist_ok=True)
         (self.data / "lanes.json").write_text(json.dumps({"lanes": [{
@@ -195,13 +201,18 @@ class LaneTests(unittest.TestCase):
                ({"provider": "fake-provider"} if self.backend == "pi" else {})),
             "repo": str(self.repo), "binary": str(binary),
         }]}))
-        if self.backend == "cursor":
+        if self.backend in ("cursor", "hermes", "copilot"):
             self.env["FAKE_CURSOR_ACP_LOG"] = str(self.root / "fake-cursor-acp.jsonl")
+            self.env["FAKE_CURSOR_SESSION_DIR"] = str(self.root / "sessions")
+        if self.backend == "hermes":
+            self.env["HERMES_HOME"] = str(self.root / "hermes")
         if self.backend == "agy":
             self.env["FAKE_AGY_LOG"] = str(self.root / "fake-agy.jsonl")
 
     def git(self, *args):
-        return subprocess.run(["git", *args], cwd=self.repo, check=True, capture_output=True, text=True).stdout.strip()
+        # The lane workspace is an independent clone without the repo's local identity.
+        return subprocess.run(["git", *args], cwd=self.repo, check=True, capture_output=True, text=True,
+                              env={**os.environ, **GIT_IDENTITY}).stdout.strip()
 
     def cli(self, *args, check=True, timeout=15):
         if self.backend == "pi":
@@ -376,6 +387,229 @@ class LaneTests(unittest.TestCase):
         self.assertEqual(result["workspace"]["base"], expected_head)
         self.assertTrue(wt.is_dir())
 
+    def test_serve_restart_resumes_the_in_flight_run(self):
+        self.set_config("pi")
+        self.start_lane()
+        run_id = self.assign("LANE_TEST_WAIT resume this run after supervisor restart")
+        self.wait_running(run_id)
+        log = pathlib.Path(self.env["FAKE_PI_RPC_LOG"])
+        self.wait_for(
+            lambda: log.exists() and any(
+                row.get("type") == "prompt" and "resume this run" in row.get("message", "")
+                for row in (json.loads(line) for line in log.read_text().splitlines())
+            ),
+            description="the in-flight prompt to reach the executor",
+        )
+
+        supervisor_pid = self.lane_state()["supervisor_pid"]
+        os.kill(supervisor_pid, signal.SIGKILL)
+        # SIGKILL cannot unlink a filesystem socket; lane up must handle that
+        # stale socket. Observe the dead supervisor rather than its pathname.
+        self.wait_for(lambda: json.loads(self.cli("lane", "status").stdout)[0]["state"] == "crashed",
+                      description="the stopped supervisor to be reported crashed")
+        restarted = self.cli("lane", "up", self.lane_name)
+        self.assertTrue(json.loads(restarted.stdout)["lanes"][0]["started"])
+
+        state = self.wait_for(
+            lambda: (row if (row := self.lane_state()).get("current_run") == run_id else None),
+            timeout=3,
+            description=f"restarted lane to resume run {run_id}",
+        )
+        self.assertEqual(state["state"], "busy")
+        self.wait_for(
+            lambda: log.exists() and any(row.get("type") == "switch_session"
+                                         for row in (json.loads(line) for line in log.read_text().splitlines())),
+            description="the restarted executor to restore the saved Pi session",
+        )
+        events = [json.loads(line) for line in (self.data / "runs" / run_id / "events.1.pi.jsonl").read_text().splitlines()]
+        self.assertTrue(any(event.get("type") == "recovery" and event.get("run_id") == run_id for event in events))
+
+    def restart_supervisor(self):
+        state = self.lane_state()
+        os.kill(state["supervisor_pid"], signal.SIGKILL)
+        # The stale control socket is removed by lane up's ownership probe.
+        self.cli("lane", "up", self.lane_name)
+
+    def prepare_interrupted_issue(self, backend="pi"):
+        self.set_config(backend)
+        self.env["FAKE_APP_SERVER_LOG"] = str(self.root / "codex.jsonl")
+        self.env["OPENSWARM_AD_STATE"] = str(self.root / "ad.json")
+        self.env["OPENSWARM_BRAIN_LOG"] = str(self.root / "brain.log")
+        gh = self.root / "gh"
+        gh.write_text("#!/bin/sh\ncat " + str(self.root / "issue.json") + "\n")
+        gh.chmod(0o755)
+        self.env["OPENSWARM_GH_BIN"] = str(gh)
+        (self.root / "issue.json").write_text(json.dumps({"state": "open", "labels": [{"name": "in-progress"}]}))
+        self.start_lane()
+        rid = self.assign("LANE_TEST_WAIT broker interrupted task", "--title", "#1720 recovery")
+        self.wait_running(rid)
+        assignment = self.data / "runs" / rid / "assignment.json"
+        key = {"pi": "session_file", "codex": "thread_id", "agy": "conversation_id"}.get(backend, "session_id")
+        self.wait_for(lambda: json.loads(assignment.read_text()).get(key), description="persisted session")
+        (self.root / "ad.json").write_text(json.dumps({self.lane_name: {"issue": 1720, "run": rid}}))
+        return rid
+
+    def test_broker_disconnect_restart_preserves_workspace_and_rejects_duplicate_dispatch(self):
+        # A short relative AF_UNIX path keeps the broker fixture inside the
+        # worktree without exceeding macOS's sockaddr_un limit.
+        broker_path = pathlib.Path(os.path.relpath(self.root / "broker.sock"))
+        broker = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        broker.bind(str(broker_path))
+        broker.listen(2)
+        broker.settimeout(12)
+        self.addCleanup(broker.close)
+        # The fixture connects from the lane cwd; use a relative path from it.
+        self.env["FAKE_PI_BROKER_SOCKET"] = "../../../../broker.sock"
+        rid = self.prepare_interrupted_issue()
+        connection, _ = broker.accept()
+        self.assertEqual(connection.recv(32), b"inference\n")
+        connection.close()
+        log = pathlib.Path(self.env["FAKE_PI_RPC_LOG"])
+        self.wait_for(lambda: '"broker_disconnected"' in log.read_text(), description="broker transport loss")
+        wt = self.data / "lanes" / self.lane_name / "wt"
+        (wt / "partial.txt").write_text("partial work")
+        self.restart_supervisor()
+        connection, _ = broker.accept()
+        self.assertEqual(connection.recv(32), b"inference\n")
+        connection.sendall(b"ready")
+        connection.close()
+        self.wait_for(lambda: self.lane_state().get("current_run") == rid, description="same run restored")
+        log = pathlib.Path(self.env["FAKE_PI_RPC_LOG"])
+        self.wait_for(lambda: '"switch_session"' in log.read_text(), description="session restored")
+        duplicate = self.cli("lane", "assign", self.lane_name, "--prompt", "duplicate", check=False)
+        self.assertNotEqual(duplicate.returncode, 0)
+        self.assertEqual((wt / "partial.txt").read_text(), "partial work")
+        self.assertEqual(len(list((self.data / "runs").iterdir())), 1)
+        events = [json.loads(line) for line in (self.data / "runs" / rid / "events.1.pi.jsonl").read_text().splitlines()]
+        self.assertTrue(any(e.get("type") == "recovery" and e["level"] == "workspace" for e in events))
+        self.assertIn(rid, (self.root / "brain.log").read_text())
+
+    def check_pushed_restart(self, missing=False):
+        rid = self.prepare_interrupted_issue()
+        wt = self.data / "lanes" / self.lane_name / "wt"
+        base = self.git("rev-parse", "HEAD")
+        (wt / "saved.txt").write_text("pushed progress")
+        self.git("-C", str(wt), "add", "saved.txt")
+        self.git("-C", str(wt), "commit", "-qm", "progress")
+        tip = self.git("-C", str(wt), "rev-parse", "HEAD")
+        remote = self.root / "remote.git"
+        self.git("init", "--bare", "-q", str(remote))
+        self.git("remote", "add", "origin", str(remote))
+        # The lane workspace is an independent clone: the run branch lives there,
+        # not in the shared repository, so it is pushed from the workspace.
+        self.git("-C", str(wt), "push", "-q", str(remote), f"HEAD:refs/heads/swrm/{rid}")
+        state = self.lane_state()
+        os.kill(state["supervisor_pid"], signal.SIGKILL)
+        os.kill(state["child_pid"], signal.SIGKILL)
+        if missing:
+            shutil.rmtree(wt)
+        else:
+            self.git("-C", str(wt), "reset", "--hard", base)
+        self.cli("lane", "up", self.lane_name)
+        self.wait_for(lambda: self.lane_state().get("current_run") == rid, description="pushed run restored")
+        self.assertEqual(self.git("-C", str(wt), "rev-parse", "HEAD"), tip)
+        self.assertEqual((wt / "saved.txt").read_text(), "pushed progress")
+        self.wait_for(lambda: (self.root / "brain.log").exists() and tip in (self.root / "brain.log").read_text(),
+                      description="commit recovery brain log")
+
+    def test_restart_restores_remote_tip_ahead_of_local_head(self):
+        self.check_pushed_restart()
+
+    def test_restart_restores_missing_workspace_from_pushed_tip(self):
+        self.check_pushed_restart(missing=True)
+
+    def test_restart_abandons_issue_reassigned_under_new_run_id(self):
+        rid = self.prepare_interrupted_issue()
+        (self.root / "ad.json").write_text(json.dumps({self.lane_name: {"issue": 1720, "run": rid},
+                                                       "L2": {"issue": 1720, "run": "replacement"}}))
+        self.restart_supervisor()
+        self.wait_for(lambda: self.lane_state().get("state") == "idle", description="abandoned run yields idle lane")
+        self.wait_for(lambda: self.run_state(rid).get("recovery_abandoned"), description="abandonment reason")
+        self.assertIn("reassigned", self.run_state(rid)["recovery_abandoned"])
+        self.assertNotIn('"switch_session"', pathlib.Path(self.env["FAKE_PI_RPC_LOG"]).read_text())
+        self.assertEqual(self.wait_run(self.assign("new task"))["status"], "done")
+
+    def check_abandoned_restart(self, condition, reason):
+        rid = self.prepare_interrupted_issue()
+        wt = self.data / "lanes" / self.lane_name / "wt"
+        (wt / "partial.txt").write_text("unfinished work")
+        if condition == "unavailable":
+            (self.root / "ad.json").unlink()
+        elif condition == "not-progress":
+            (self.root / "issue.json").write_text(json.dumps({"state": "open", "labels": []}))
+        else:
+            assignment = self.data / "runs" / rid / "assignment.json"
+            spec = json.loads(assignment.read_text())
+            spec.pop("session_file")
+            assignment.write_text(json.dumps(spec))
+        self.restart_supervisor()
+        self.wait_for(lambda: self.run_state(rid).get("recovery_abandoned"), description="recovery abandoned")
+        self.assertIn(reason, self.run_state(rid)["recovery_abandoned"])
+        self.assertNotIn('"switch_session"', pathlib.Path(self.env["FAKE_PI_RPC_LOG"]).read_text())
+        self.assertIn("recovery_abandoned", (self.root / "brain.log").read_text())
+        self.assertEqual(self.wait_run(self.assign("new task after abandonment"))["status"], "done")
+        archive = pathlib.Path(self.run_state(rid)["preserved_workspace"])
+        self.assertEqual((archive / "partial.txt").read_text(), "unfinished work")
+
+    def test_restart_abandons_unavailable_ad_authority(self):
+        self.check_abandoned_restart("unavailable", "unavailable")
+
+    def test_restart_abandons_issue_without_in_progress(self):
+        self.check_abandoned_restart("not-progress", "not explicitly in-progress")
+
+    def test_restart_abandons_missing_pi_session(self):
+        self.check_abandoned_restart("session", "session file is missing")
+
+    def test_restart_codex_uses_saved_thread(self):
+        rid = self.prepare_interrupted_issue("codex")
+        self.restart_supervisor()
+        log = self.root / "codex.jsonl"
+        self.wait_for(lambda: '"thread/resume"' in log.read_text(), description="Codex resumes persisted thread")
+        messages = [json.loads(line) for line in log.read_text().splitlines()]
+        self.assertEqual(sum(m.get("method") == "thread/start" for m in messages), 1)
+        resumed = next(m for m in messages if m.get("method") == "thread/resume")
+        self.assertEqual(resumed["params"]["threadId"], "fake-thread")
+        self.assertEqual(self.lane_state()["current_run"], rid)
+
+    def check_acp_restart_uses_saved_session(self, backend):
+        rid = self.prepare_interrupted_issue(backend)
+        wt = self.data / "lanes" / self.lane_name / "wt"
+        (wt / "partial.txt").write_text("unfinished work")
+        self.restart_supervisor()
+        log = pathlib.Path(self.env["FAKE_CURSOR_ACP_LOG"])
+        self.wait_for(lambda: '"session/load"' in log.read_text(), description=f"{backend} restores saved session")
+        event_file = self.data / "runs" / rid / f"events.1.{backend}.jsonl"
+        self.wait_for(lambda: '"type": "recovery"' in event_file.read_text(), description="successful session recovery")
+        messages = [json.loads(line) for line in log.read_text().splitlines()]
+        self.assertEqual(sum(m.get("method") == "session/new" for m in messages), 1)
+        loaded = next(m for m in messages if m.get("method") == "session/load")
+        self.assertEqual(loaded["params"]["sessionId"], "fake-cursor-session")
+        self.assertEqual(self.lane_state()["current_run"], rid)
+        self.assertEqual((wt / "partial.txt").read_text(), "unfinished work")
+        duplicate = self.cli("lane", "assign", self.lane_name, "--prompt", "duplicate", check=False)
+        self.assertNotEqual(duplicate.returncode, 0)
+        self.assertEqual(len(list((self.data / "runs").iterdir())), 1)
+
+    def test_restart_cursor_uses_saved_session(self):
+        self.check_acp_restart_uses_saved_session("cursor")
+
+    def test_restart_hermes_uses_saved_session(self):
+        self.check_acp_restart_uses_saved_session("hermes")
+
+    def test_restart_copilot_uses_saved_session(self):
+        self.check_acp_restart_uses_saved_session("copilot")
+
+    def test_restart_agy_uses_saved_conversation(self):
+        rid = self.prepare_interrupted_issue("agy")
+        self.restart_supervisor()
+        log = pathlib.Path(self.env["FAKE_AGY_LOG"])
+        self.wait_for(lambda: '"--conversation", "conv-1"' in log.read_text(), description="agy resumes saved conversation")
+        event_file = self.data / "runs" / rid / "events.1.agy.jsonl"
+        self.wait_for(lambda: '"type": "recovery"' in event_file.read_text(), description="successful agy recovery")
+        self.assertEqual(self.lane_state()["current_run"], rid)
+        duplicate = self.cli("lane", "assign", self.lane_name, "--prompt", "duplicate", check=False)
+        self.assertNotEqual(duplicate.returncode, 0)
+        self.assertEqual(len(list((self.data / "runs").iterdir())), 1)
     def test_lane_git_metadata_is_inside_executor_writable_worktree(self):
         wt = self.data / "lanes" / self.lane_name / "wt"
         wt.parent.mkdir(parents=True)
