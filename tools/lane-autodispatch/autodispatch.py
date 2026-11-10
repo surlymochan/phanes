@@ -3041,8 +3041,9 @@ def tick(lanes, state, last_warn):
         except Exception as e:
             queue_failed = True; queue_error = str(e)
             state["_queue_failures"] = state.get("_queue_failures", 0) + 1
-            log(f"queue error:\n{traceback.format_exc()[-4000:]}", brain=True)
             save_state(state)
+            try: log(f"queue error:\n{traceback.format_exc()[-4000:]}", brain=True)
+            except Exception: pass  # logging must not replace the queue failure or stop harvest
             if isinstance(e, (RuntimeError, OSError, subprocess.SubprocessError, json.JSONDecodeError)):
                 return False
             raise
