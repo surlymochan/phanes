@@ -26,6 +26,9 @@ Usage::
 """
 
 import json
+import contextlib
+import fcntl
+import tempfile
 import os
 import socket
 import time
@@ -168,17 +171,28 @@ def write_state(path, state):
     parent = os.path.dirname(os.path.abspath(path))
     try:
         os.makedirs(parent, exist_ok=True)
-        with open(path, "w", encoding="utf-8") as stream:
-            json.dump(state, stream, ensure_ascii=False, indent=1)
-            stream.write("\n")
+        fd, temporary = tempfile.mkstemp(dir=parent, prefix=".broker-state-")
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as stream:
+                json.dump(state, stream, ensure_ascii=False, indent=1)
+                stream.write("\n")
+                stream.flush()
+                os.fsync(stream.fileno())
+            os.replace(temporary, path)
+        finally:
+            if os.path.exists(temporary):
+                os.unlink(temporary)
     except (OSError, TypeError, ValueError):
         pass
 
 
-def host_state(state, host):
+def host_state(state, host, socket_path=None):
     """The recovery record of one host."""
     hosts = state.get("hosts") if isinstance(state, dict) else None
     record = hosts.get(host) if isinstance(hosts, dict) else None
+    if socket_path is not None and isinstance(record, dict):
+        channels = record.get("channels", {})
+        return channels.get(socket_path, record if record.get("socket") == socket_path else {})
     return record if isinstance(record, dict) else {}
 
 
@@ -229,12 +243,18 @@ class BrokerRecovery:
 
     def previous_record(self):
         """The record of this host from the state file."""
-        return host_state(read_state(self.state_path), self.host)
+        return host_state(read_state(self.state_path), self.host, self.socket_path)
 
     def _save(self, record):
         state = read_state(self.state_path)
         hosts = state.get("hosts") if isinstance(state.get("hosts"), dict) else {}
-        hosts[self.host] = record
+        previous = hosts.get(self.host, {})
+        channels = dict(previous.get("channels", {}))
+        if previous.get("socket") and not channels:
+            channels[previous["socket"]] = {k: v for k, v in previous.items() if k != "channels"}
+        channels[self.socket_path] = record
+        failures = [row for row in channels.values() if row.get("interrupted")]
+        hosts[self.host] = dict(failures[0] if failures else record, channels=channels)
         state["hosts"] = hosts
         state["updated_at"] = self.now()
         write_state(self.state_path, state)
@@ -335,6 +355,15 @@ class BrokerRecovery:
         return self._save(record)
 
     def ensure_ready(self):
+        # Serialize the whole probe/restart/validation transaction across dispatches.
+        if not self.state_path:
+            return self._ensure_ready()
+        os.makedirs(os.path.dirname(os.path.abspath(self.state_path)), exist_ok=True)
+        with open(str(self.state_path) + ".lock", "a") as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            return self._ensure_ready()
+
+    def _ensure_ready(self):
         """Probe the broker socket and recover it when it is gone.
 
         The probe is light: a dead socket is restarted with a capped exponential
@@ -348,6 +377,8 @@ class BrokerRecovery:
         need_validation = bool(previous.get("interrupted")) and previous.get("socket") == self.socket_path
         restart_first = False
         record = previous
+        self._save(dict(previous, host=self.host, socket=self.socket_path, ok=False,
+                        interrupted=True, result="checking", detail="broker validation in progress"))
         for attempt in range(1, self.attempts + 1):
             result, detail = self._attempt(need_validation, restart_first)
             if result in (RESULT_HEALTHY, RESULT_RECOVERED):

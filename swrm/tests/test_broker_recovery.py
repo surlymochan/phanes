@@ -966,5 +966,76 @@ class BrokerRestartScriptTests(unittest.TestCase):
         self.assertIn("credential store unavailable", result.stderr)
 
 
+class SandboxRecoveryTests(unittest.TestCase):
+    def test_concurrent_dispatches_wait_for_validation(self):
+        with tempfile.TemporaryDirectory() as directory:
+            state = os.path.join(directory, "state.json")
+            entered, release = threading.Event(), threading.Event()
+            results = []
+            def validate():
+                entered.set()
+                release.wait(5)
+                return False, "remote down"
+            options = dict(socket_path="/a", host="host", state_path=state, attempts=1,
+                           probe=lambda: True, validate=validate)
+            recovery.write_state(state, {"hosts": {"host": {"socket": "/a", "interrupted": True}}})
+            threads = [threading.Thread(target=lambda: results.append(recovery.BrokerRecovery(**options).ensure_ready()))
+                       for _ in range(2)]
+            threads[0].start()
+            self.assertTrue(entered.wait(5))
+            threads[1].start()
+            self.assertEqual(results, [])
+            release.set()
+            for thread in threads:
+                thread.join(5)
+                self.assertFalse(thread.is_alive())
+            self.assertEqual(len(results), 2)
+            self.assertTrue(all(not result["ok"] for result in results))
+
+    def test_lane_child_recovers_before_launch_and_passes_socket(self):
+        calls = []
+        lane = {"name": "P1", "backend": "pi", "model": "model", "binary": "/bin/pi", "broker_socket": "/broker.sock"}
+        policy = {"pi": {"require_isolation": False}}
+        with tempfile.TemporaryDirectory() as directory, \
+             mock.patch.object(xs, "lane_root", return_value=directory), \
+             mock.patch.object(xs, "configure_executor_environment", return_value=(directory, {})), \
+             mock.patch.object(xs, "pi_broker_ensure_ready", side_effect=lambda *a: calls.append("recover") or {"ok": True}), \
+             mock.patch.object(xs.subprocess, "Popen", side_effect=lambda *a, **kw: calls.append(kw["env"]["OPENSWARM_PI_BROKER_SOCKET"]) or mock.MagicMock()), \
+             mock.patch.object(xs.threading.Thread, "start"), \
+             mock.patch.object(xs.procboundary.CgroupBoundary, "create", return_value=None):
+            xs.LaneChild(lane, directory, policy)
+        self.assertEqual(calls, ["recover", "/broker.sock"])
+
+    def test_lane_child_does_not_launch_when_recovery_fails(self):
+        lane = {"name": "P1", "backend": "pi", "model": "model", "binary": "/bin/pi", "broker_socket": "/missing"}
+        with tempfile.TemporaryDirectory() as directory, \
+             mock.patch.object(xs, "lane_root", return_value=directory), \
+             mock.patch.object(xs, "configure_executor_environment", return_value=(directory, {})), \
+             mock.patch.object(xs, "pi_broker_ensure_ready", return_value={"ok": False}), \
+             mock.patch.object(xs.subprocess, "Popen") as launch:
+            with self.assertRaises(RuntimeError):
+                xs.LaneChild(lane, directory, {"pi": {"require_isolation": False}})
+            launch.assert_not_called()
+
+    def test_proxy_session_failure_is_unhealthy(self):
+        lane = {"name": "P1", "backend": "pi", "model": "model", "broker_socket": "/proxy"}
+        with mock.patch.object(xs, "pi_broker_record", return_value={}), \
+             mock.patch.object(xs.broker_recovery_module(), "minimal_session", return_value=(False, "remote down")) as probe:
+            self.assertFalse(xs.pi_broker_channel_status([lane])["ok"])
+            probe.assert_called_once()
+
+    def test_marker_exists_before_restart_and_other_socket_failure_survives(self):
+        with tempfile.TemporaryDirectory() as directory:
+            state = os.path.join(directory, "state.json")
+            def restart():
+                self.assertTrue(recovery.host_state(recovery.read_state(state), "host", "/a")["interrupted"])
+            first = recovery.BrokerRecovery("/a", host="host", state_path=state, attempts=1,
+                                            probe=lambda: False, restart=restart, socket_wait_s=0)
+            self.assertFalse(first.ensure_ready()["ok"])
+            second = recovery.BrokerRecovery("/b", host="host", state_path=state, probe=lambda: True)
+            self.assertTrue(second.ensure_ready()["ok"])
+            self.assertTrue(recovery.host_state(recovery.read_state(state), "host")["interrupted"])
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

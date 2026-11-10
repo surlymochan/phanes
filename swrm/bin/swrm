@@ -3894,6 +3894,9 @@ def pi_broker_ensure_ready(lane=None, policy=None, host=None):
         socket_wait_s=settings["socket_wait_s"],
         state_path=settings["state_path"],
         brain_log=pi_broker_brain_log_path(policy),
+        # A listening SSH proxy does not prove the remote broker can serve.
+        probe=lambda: module.minimal_session(socket_path, model=pi_broker_model(lane, policy),
+                                             timeout=settings["session_timeout_s"])[0],
     )
     return recovery.ensure_ready()
 
@@ -3924,9 +3927,12 @@ def pi_broker_channel_status(lanes=None):
     module = broker_recovery_module()
     record = pi_broker_record()
     problems = []
-    for path in sorted(set(channels.values())):
-        if not module.probe_socket(path):
-            problems.append("broker socket %s does not answer" % path)
+    policy = load_policy()
+    for lane in lanes:
+        path = channels.get(lane.get("name"))
+        if path and not module.minimal_session(path, model=pi_broker_model(lane, policy),
+                                               timeout=pi_broker_settings(policy)["session_timeout_s"])[0]:
+            problems.append("broker socket %s does not answer a minimal session" % path)
     if record.get("interrupted"):
         problems.append(record.get("detail") or record.get("result") or
                         "the last recovery never validated a session")
@@ -8350,6 +8356,12 @@ class LaneChild:
             cmd = [binary, "--sandbox", "enabled", "acp"]
         child_env = dict(self.env) if getattr(self, "env", None) else os.environ.copy()
         self.secret = None
+        if backend == "pi" and pi_broker_lane_uses_socket(lane, policy):
+            broker = pi_broker_ensure_ready(lane, policy)
+            if not broker.get("ok"):
+                raise RuntimeError("pi broker unavailable: %s" %
+                                   (broker.get("detail") or broker.get("result"),))
+            child_env["OPENSWARM_PI_BROKER_SOCKET"] = pi_broker_socket_path(lane)
         if backend == "hermes":
             cfg = policy.get("hermes") or {}
             self.secret = minimax_key_from_pi()

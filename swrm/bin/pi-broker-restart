@@ -89,6 +89,20 @@ def clear_stale_socket(path):
 
 def main(argv):
     path = socket_path(argv)
+    # Worker deployments have SSH configuration and must never start a local
+    # credential-bearing broker. A live proxy opens a fresh SSH session per request.
+    config = pathlib.Path.home() / '.ssh' / 'swrm-pi' / 'config'
+    if config.is_file() or pathlib.Path(str(path) + '.proxy').exists():
+        probe = socket.socket(socket.AF_UNIX)
+        try:
+            probe.settimeout(1)
+            probe.connect(str(path))
+        except OSError:
+            os.environ['OPENSWARM_PI_WORKER_SOCKET'] = str(path)
+            os.execv(sys.executable, [sys.executable, str(HERE / 'pi-worker-proxy')])
+        finally:
+            probe.close()
+        return
     node = node_binary()
     if node is None:
         sys.exit('pi broker runtime unavailable: no node binary')
