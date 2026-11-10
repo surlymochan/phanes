@@ -67,20 +67,29 @@ def model():
 
 
 def clear_stale_socket(path):
-    """Remove a socket nobody listens on; refuse a path that is not a socket."""
-    if not path.exists() and not path.is_symlink():
+    """Remove a socket that is confirmed dead; refuse anything else.
+
+    Only a socket of the current user is removed, and only when connecting is
+    refused (nobody listens).  Any other failure leaves the path alone.
+    """
+    try:
+        info = path.lstat()
+    except FileNotFoundError:
         return
-    info = path.lstat()
     if not stat.S_ISSOCK(info.st_mode):
         sys.exit('invalid broker socket')
+    if info.st_uid != os.getuid():
+        sys.exit('broker socket is not owned by the current user')
     probe = socket.socket(socket.AF_UNIX)
     try:
         probe.settimeout(1)
         probe.connect(str(path))
     except ConnectionRefusedError:
         path.unlink()
-    except OSError:
-        path.unlink()
+    except FileNotFoundError:
+        return
+    except OSError as error:
+        sys.exit('broker socket state unclear, not removing it: %s' % error.__class__.__name__)
     else:
         sys.exit('broker already running')
     finally:

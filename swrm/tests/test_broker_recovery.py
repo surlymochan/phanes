@@ -945,6 +945,54 @@ class BrokerRestartScriptTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertFalse(self.socket_path.exists())
 
+    def _load_restart_module(self):
+        import importlib.machinery
+        import importlib.util
+        path = str(ROOT / "bin" / "pi-broker-restart")
+        loader = importlib.machinery.SourceFileLoader("pi_broker_restart_under_test", path)
+        spec = importlib.util.spec_from_loader(loader.name, loader)
+        module = importlib.util.module_from_spec(spec)
+        loader.exec_module(module)
+        return module
+
+    def _dead_socket(self):
+        dead = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        dead.bind(str(self.socket_path))
+        dead.listen(1)
+        dead.close()
+
+    def test_the_script_keeps_a_socket_of_another_user(self):
+        self._dead_socket()
+        module = self._load_restart_module()
+        with mock.patch.object(module.os, "getuid", return_value=os.getuid() + 1):
+            with self.assertRaises(SystemExit) as caught:
+                module.clear_stale_socket(pathlib.Path(self.socket_path))
+        self.assertIn("not owned by the current user", str(caught.exception))
+        self.assertTrue(self.socket_path.exists())
+
+    def test_the_script_keeps_a_socket_whose_state_is_unclear(self):
+        self._dead_socket()
+        module = self._load_restart_module()
+
+        class Unclear:
+            def __init__(self, *args, **kwargs):
+                pass
+
+            def settimeout(self, value):
+                pass
+
+            def connect(self, address):
+                raise PermissionError("denied")
+
+            def close(self):
+                pass
+
+        with mock.patch.object(module.socket, "socket", Unclear):
+            with self.assertRaises(SystemExit) as caught:
+                module.clear_stale_socket(pathlib.Path(self.socket_path))
+        self.assertIn("not removing it", str(caught.exception))
+        self.assertTrue(self.socket_path.exists())
+
     def test_the_script_refuses_a_path_that_is_not_a_socket(self):
         self.socket_path.write_text("not a socket")
         result = self.run_script(str(self.socket_path))
