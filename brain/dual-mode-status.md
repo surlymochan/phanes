@@ -24,7 +24,6 @@ Epic: https://github.com/surlymochan/phanes/issues/223
 - Hard degrade → `PAUSE-HOST-*` / `PAUSE-<LANE>` / `PAUSE-BACKEND-*` (auto: bodies); autodispatch skips them; other backends keep running
 - Quota/429 on harvest also sets `PAUSE-BACKEND-*`; health-loop clears after hold if no fresh signal
 - 37-minute tick silence: structural fix (wall-kill process trees, parallel probes, early heartbeat) — soak in progress; see `brain/lessons-37min-silence.md` if present
-- ib-refresh: reuse cert when TTL ≥25m (no force renew every tick); wall cap 420s
 
 ## Remaining gaps (Epic #223)
 1. Box reboot still needs manual `start-control-plane` (documented; no systemd on box).
