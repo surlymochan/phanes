@@ -1618,9 +1618,19 @@ FIX_ROUND_RE = re.compile(
 def fix_round_of(body):
     """Use the latest review result; only a CHANGES result requests a fix round."""
     # Only a formal result counts: examples inside fenced code blocks (an unclosed fence runs to the
-    # end) and quoted lines are not results of the review.
-    text = re.sub(r"^[ \t]*(`{3,}|~{3,}).*?(?:^[ \t]*\1[`~]*[ \t]*$|\Z)", "", body or "", flags=re.M | re.S)
-    text = re.sub(r"^[ \t]*>.*$", "", text, flags=re.M)
+    # end) and quoted lines are not results of the review. Fences follow CommonMark: the closing
+    # fence uses the opening character, is at least as long, and carries only whitespace after it.
+    kept, fence = [], None
+    for line in (body or "").splitlines():
+        if fence is None:
+            opening = re.match(r"^ {0,3}(`{3,}|~{3,})", line)
+            if opening and not (opening[1][0] == "`" and "`" in line[opening.end():]):
+                fence = opening[1]
+                continue
+            if not re.match(r"^ {0,3}>", line): kept.append(line)
+        elif re.match(r"^ {0,3}" + re.escape(fence[0]) + "{" + str(len(fence)) + r",}[ \t]*$", line):
+            fence = None
+    text = "\n".join(kept)
     rounds = FIX_ROUND_RE.findall(text)
     if not rounds or rounds[-1][1] != "CHANGES": return None
     return int(rounds[-1][0])

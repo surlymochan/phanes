@@ -63,7 +63,10 @@ class FixThinkingLevelTest(unittest.TestCase):
         formal = "Review round 1 (lane CX2) on PR #12 head `abcdef0123` returned CHANGES.\n"
         example = "Review round 2 (lane CX2) on PR #12 head `abcdef0123` returned APPROVED.\n"
         for tail in ("```\n" + example + "```\n", "~~~text\n" + example + "~~~\n", "> " + example,
-                     "```\n" + example):  # the last fence is never closed
+                     "```\n" + example,  # the fence is never closed
+                     "```\n```~~~\n" + example,  # a mixed line does not close a backtick fence
+                     "````\n```\n" + example,  # a shorter fence does not close a longer one
+                     "~~~\n```\n" + example):  # another character does not close it
             self.assertEqual(AUTODISPATCH.fix_round_of(formal + tail), 1, tail)
         self.assertEqual(AUTODISPATCH.fix_round_of(formal + example), None)  # a formal later result still wins
 
