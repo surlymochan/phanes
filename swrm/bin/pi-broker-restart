@@ -1,0 +1,105 @@
+#!/usr/bin/env python3
+"""Start the Pi broker again on the socket the executor probes (Refs #1714).
+
+The broker is the single point of failure of a Pi host: a broker that died took
+every Pi run of that host down with a vague `exec_error`, and only a human
+restart brought the host back.  The recovery of the executor needs a command
+that starts the broker again, and this is that command for the deployment of
+this repository: it starts `bin/pi-minimax-broker.mjs` with the same credential
+store and model as `bin/pi-broker-service`, but on the socket the executor
+uses.
+
+    pi-broker-restart [socket path]
+
+The socket path is the first argument, then `$OPENSWARM_PI_BROKER_SOCKET`, then
+the cache path of `bin/pi-broker-service`.  The script stays in the foreground:
+the broker is this process.  The executor starts it detached and treats a
+command that stays alive as a successful restart.
+"""
+import os
+import pathlib
+import shutil
+import socket
+import stat
+import sys
+
+HERE = pathlib.Path(__file__).resolve().parent
+DEFAULT_SOCKET = pathlib.Path.home() / 'Library' / 'Caches' / 'swrm-pi-broker' / 'broker.sock'
+DEFAULT_MODEL = 'MiniMax-M3.1-Flash'
+NODE_REL = pathlib.Path('.local') / 'node-v24.14.1' / 'bin' / 'node'
+AUTH_REL = pathlib.Path('lib/node_modules/@mariozechner/pi-coding-agent'
+                        '/dist/core/auth-storage.js')
+
+
+def socket_path(argv):
+    """The socket the broker has to serve: the argument, the environment, then the cache path."""
+    if len(argv) > 1 and argv[1]:
+        return pathlib.Path(argv[1])
+    exported = (os.environ.get('OPENSWARM_PI_BROKER_SOCKET')
+                or os.environ.get('XSWARM_PI_BROKER_SOCKET'))
+    if exported:
+        return pathlib.Path(exported)
+    return DEFAULT_SOCKET
+
+
+def node_binary():
+    """The node runtime of the broker: the override, the pinned install, then the PATH."""
+    override = os.environ.get('OPENSWARM_PI_NODE')
+    if override:
+        return pathlib.Path(override)
+    pinned = pathlib.Path.home() / NODE_REL
+    if pinned.is_file() and os.access(pinned, os.X_OK):
+        return pinned
+    found = shutil.which('node')
+    return pathlib.Path(found) if found else None
+
+
+def auth_module(node):
+    """The credential store of the broker: the override, then the one of the node install."""
+    override = os.environ.get('OPENSWARM_PI_AUTH_MODULE')
+    if override:
+        return pathlib.Path(override)
+    return node.parent.parent / AUTH_REL
+
+
+def model():
+    return os.environ.get('OPENSWARM_PI_ISOLATED_MODEL') or DEFAULT_MODEL
+
+
+def clear_stale_socket(path):
+    """Remove a socket nobody listens on; refuse a path that is not a socket."""
+    if not path.exists() and not path.is_symlink():
+        return
+    info = path.lstat()
+    if not stat.S_ISSOCK(info.st_mode):
+        sys.exit('invalid broker socket')
+    probe = socket.socket(socket.AF_UNIX)
+    try:
+        probe.settimeout(1)
+        probe.connect(str(path))
+    except ConnectionRefusedError:
+        path.unlink()
+    except OSError:
+        path.unlink()
+    else:
+        sys.exit('broker already running')
+    finally:
+        probe.close()
+
+
+def main(argv):
+    path = socket_path(argv)
+    node = node_binary()
+    if node is None:
+        sys.exit('pi broker runtime unavailable: no node binary')
+    auth = auth_module(node)
+    if not auth.is_file():
+        sys.exit('pi broker credential store unavailable: ' + str(auth))
+    clear_stale_socket(path)
+    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    broker = HERE / 'pi-minimax-broker.mjs'
+    os.execv(str(node), [str(node), str(broker), str(path), str(auth), model()])
+
+
+if __name__ == '__main__':
+    main(sys.argv)
