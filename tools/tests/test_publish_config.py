@@ -15,7 +15,8 @@ class PublishConfigTests(unittest.TestCase):
         for script in ('pub.sh', 'pub2.sh'):
             for target in (None, 'example/project'):
                 with self.subTest(script=script, target=target), tempfile.TemporaryDirectory() as tmp:
-                    directory = Path(tmp)
+                    directory = Path(tmp) / 'alias'
+                    directory.symlink_to(Path(tmp), target_is_directory=True)
                     commands = directory / 'commands'
                     commands.mkdir()
                     log = directory / 'calls.jsonl'
@@ -50,7 +51,7 @@ elif name == 'gh':
                     self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
                     calls = [json.loads(line) for line in log.read_text().splitlines()]
                     gh = next(row for row in calls if row[0] == 'gh')
-                    self.assertEqual(gh[1], str(directory))
+                    self.assertEqual(Path(gh[1]).resolve(), directory.resolve())
                     if target:
                         self.assertEqual(gh[2][2:4], ['--repo', target])
                     else:

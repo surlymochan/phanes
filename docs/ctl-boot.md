@@ -15,10 +15,11 @@ That script starts (if not already running):
 | lane-merge | `lane-merge` → `merge-loop.sh` | merge Linux-green `fleet/*` PRs | `~/phanes-ctl/autodispatch/merge-heartbeat` |
 | bus-worker-loop (`bus-worker`) | `bus-worker-loop` | GitHub issue bus mode 2 | `~/phanes-ctl/bus-worker/heartbeat`, `bus-worker/` |
 | health-loop | `health-loop` → `health-check.py` | disk/mem/ssh/quota probes; auto PAUSE-* | `~/phanes-ctl/autodispatch/health.heartbeat`, `health.json`, `health.alert` |
+| disk-watermark | `disk-watermark-guard.py --loop` | remote lane host disk watermark guard (Refs #1666) | `~/phanes-ctl/autodispatch/disk-watermark-<host>.json`, `/workspace/phanes/brain/log.md` |
 
 ## Key loops: startup commands & heartbeats
 
-The `start-control-plane` suite manages five resident loops (五件套: `ib-refresh-loop`, `lane-autodispatch`, `lane-merge`, `bus-worker-loop`, `health-loop`), with their startup commands and heartbeat/status files:
+The `start-control-plane` suite manages the five core resident loops (五件套: `ib-refresh-loop`, `lane-autodispatch`, `lane-merge`, `bus-worker-loop`, `health-loop`) plus the `disk-watermark` guard loop (Refs #1666), with their startup commands and heartbeat/status files:
 
 1. **`ib-refresh-loop`** / **`ib-refresh`** (instabox SSH certificate preflight & renewal loop):
    - **Startup command**: `~/phanes-ctl/bin/ctl-loop` (supervises `ib-refresh`) or manual preflight `~/phanes-ctl/bin/ib-refresh`  
@@ -105,6 +106,12 @@ The `start-control-plane` suite manages five resident loops (五件套: `ib-refr
      (or background one-shot: `setsid nohup ~/phanes-ctl/bin/health-loop >/dev/null 2>&1 &`; probe: `python3 ~/phanes-ctl/bin/health-check.py`)
    - **Heartbeat path**: `~/phanes-ctl/autodispatch/health.heartbeat`
    - **Status / alert snapshot**: `~/phanes-ctl/autodispatch/health.json`, `health.alert`
+
+6. **`disk-watermark`** (remote lane host disk watermark guard, Refs #1666):
+   - **Startup command**: `~/phanes-ctl/bin/disk-watermark-guard.py --loop --pause-dir ~/phanes-ctl/autodispatch --brain-log /workspace/phanes/brain/log.md --host lane-host-a`
+     (installed by `bash tools/install-disk-watermark-guard.sh`)
+   - **Heartbeat path**: none; the guard writes its state into `~/phanes-ctl/autodispatch/disk-watermark-<host>.json`
+   - **Status / alert snapshot**: `~/phanes-ctl/autodispatch/disk-watermark-<host>.json`, `/workspace/phanes/brain/log.md`
 
 ### Reboot pid-state helper scope (Refs #887)
 
@@ -297,7 +304,7 @@ Check scripts (no SSH):
 - `python3 tools/check-codex-queue-heartbeat.py` — offline #988 contract check for a Codex status that stays `queued` with a provider rate-limit `queue_reason`. If both `queued_at` and `heartbeat_at` are older than **30 minutes**, the item must be reclaimed; a fresh heartbeat or another queue reason is preserved.
 - `python3 tools/check-ctl-loop-reap.py` — offline #951 contract check for ctl-loop heartbeat expiry, pid disappearance, child restart, and duplicate-instance prevention.
 - `python3 tools/check-ctl-hb-refresh.py` — offline #1263 contract check: static scan of ctl-loop ensuring the ib-refresh wall-clock wait loop writes ctl-loop.heartbeat using date and enforces REFRESH_CAP.
-- `python3 tools/check-ready-refill-contract.py` — offline dual-mode refill contract (Refs #869, #1662). It creates a fake backlog and status snapshot with `_ready < 10`, then asserts the next tick's `filed N issue(s) from backlog` log. The check imports the shared `is_thin_card` predicate: a thin card is skipped and a thick card is accepted. It uses no live `~/phanes-ctl`, GitHub, git, SSH, or `gh issue create`; it also asserts `WARNING queue low` when local and repo backlog sources are exhausted, the `rejected/` quarantine (a thin card never blocks the rest of the batch and never overwrites an earlier card of the same name), the bounded refill retries while the queue read fails, and the single-planner gate (an unreadable planner query skips the creation).
+- `python3 tools/check-ready-refill-contract.py` — offline dual-mode refill contract (Refs #869). It creates a fake backlog and status snapshot with `_ready < 10`, then asserts the next tick's `filed N issue(s) from backlog` log. The check imports the shared `is_thin_card` predicate: a thin card is skipped and a thick card is accepted. It uses no live `~/phanes-ctl`, GitHub, git, SSH, or `gh issue create`; it also asserts `WARNING queue low` when local and repo backlog sources are exhausted.
 - `python3 tools/check-ad-ready-target.py` — offline #1242 AD ready-queue contract. With fake `ready`, `LOW`, and `TARGET` values, when `ready < LOW` the refill `need` is `max(TARGET - ready, ...)` (and reaches `TARGET`); `is_thin_card` rejects thin cards. It uses only a local fixture and never calls `gh`.
 - `python3 tools/check-ad-task-upload.py` — offline #920 contract check. It captures fake task content, asserts SSH stdin upload via `cat > /tmp/task-*.md`, and rejects a bare `scp` upload.
 - `python3 tools/check-fleet-batchmode-probe.py` — offline #954 contract check. It drives the production `ib-refresh` refresh path with a fake BatchMode probe runner: fake probe outputs with non-zero exit codes (such as `Permission denied` and `Connection closed`) never increment `hosts_ok`, while a zero exit code still does. It opens no SSH connection and touches no live instabox node.
@@ -464,8 +471,7 @@ python3 tools/lane-autodispatch/test_can_take.py
 When `lane-autodispatch` ready queue drops below `LOW` (`AD_LOW`, default 10), the refill
 loop must request enough candidate cards to refill up to `TARGET` (`TARGET = 20`) rather than
 topping up one card at a time. For fake `ready`, `LOW`, and `TARGET` values, the refill count
-calculates `need = max(TARGET - ready, LOW - ready, starved, 0)` whenever `ready < LOW`.
-The `LOW` floor preserves refill when `AD_LOW` exceeds `AD_TARGET`.
+calculates `need = max(TARGET - ready, starved, 0)` whenever `ready < LOW`.
 
 Candidate issue cards are rejected if they are thin:
 - `is_thin_card` discards any card lacking a `# ` title, a `labels:` declaration, a substantive body (at least two lines), or an `验收：` acceptance line.
@@ -473,31 +479,6 @@ Candidate issue cards are rejected if they are thin:
 
 ```bash
 python3 tools/check-ad-ready-target.py
-```
-
-### AD refill triggers when the pool runs dry (Refs #1662)
-
-The pool ran dry on 2026-11-02 (14 → 5 dispatchable issues) without a single mint record in
-`autodispatch.log`, and the 19:45 watchdog round found no usable card among the 21 cards of the
-local backlog. The refill triggers are therefore:
-
-- Below `LOW` the pool is topped up to the higher of `TARGET` and `LOW`
-  (`need = max(TARGET - ready, LOW - ready, starved, 0)`). With the defaults it reaches
-  `TARGET`; with `AD_LOW=30`, `AD_TARGET=20`, and `ready=25`, it still requests 5 cards.
-- While the queue read fails the pool level is unknown. The refill works on the last known level
-  plus the cards minted since, and the consecutive failures are bounded
-  (`AD_QUEUE_FAIL_REFILL_MAX`, default 3): past the bound the AD mints nothing and waits for an
-  authoritative read, so a broken `gh` cannot flood the backlog with duplicate cards.
-- A card that cannot be run by a lane (no `# ` title, no `labels:` line, no body) is quarantined
-  in `backlog/rejected/` with its reason and never overwrites an earlier card of the same name;
-  the rest of the batch is still minted. The cards of the repo backlog (`docs/backlog/next/*.md`)
-  must carry the full planner contract (body and `验收：` line, see `is_thin_card` above) and are
-  skipped when they do not.
-- A planner query whose result cannot be parsed cannot prove that no planner is open: the
-  single-planner gate stays closed and the reason is logged.
-
-```bash
-python3 tools/check-ready-refill-contract.py
 ```
 
 Recommended heartbeat monitoring (no SSH and no restart): run this from the
@@ -629,6 +610,119 @@ never read, written or removed):
 python3 tools/check-health-hosts-ok-pause.py
 ```
 
+## Lane host disk watermark guard (Refs #1666)
+
+`<host>` runs the CX2/CX4 review lanes; a full disk there stalls the reviews.  The
+guard is a resident loop of the box control plane that measures the **remote**
+filesystem of the lane host over ssh (the box and `<host>` have very different
+disks, so the local disk says nothing about the lane host) and holds the lanes of
+that host while the disk is too full.
+
+| Artefact | Role |
+| --- | --- |
+| `tools/disk-usage-probe.py` | the usage probe: `used_pct` / `used_bytes` / `free_bytes` and the top directories, ranked by the **allocated** blocks (`st_blocks`), not by the apparent size (a sparse file looks huge but occupies nothing) |
+| `tools/disk-watermark-guard.py` | the guard: measures the host over ssh, applies the watermark policy, writes the alert row into the brain log and owns the pause marker |
+| `tools/install-disk-watermark-guard.sh` | the installer: deploys the guard **and** its probe dependency, wires the resident loop into the live `~/phanes-ctl/bin/start-control-plane`, replaces the guard that is still running and verifies the new version |
+| `tools/check-disk-watermark.py` | the offline contract check (no ssh, no live state) |
+
+Watermark policy (the thresholds are the ones of the lane host):
+
+| Measured usage | State | Effect |
+| --- | --- | --- |
+| `>= 95%` | `block` | the independent disk gate pauses the host and the brain log gets an alert row |
+| `> 87%` and `< 95%`, previously blocked | `hold` | the pause **stays** (hysteresis): the lane is not released before the recovery threshold |
+| `> 87%` and `< 95%`, previously unblocked | `warn` | the brain log gets a warning; dispatch stays open and no pause is created |
+| `<= 87%` | `recovered` | the guard releases **its own** marker only |
+
+Ownership rules: the guard writes its diagnostic marker only in
+`~/phanes-ctl/autodispatch/.disk-watermark/PAUSE-HOST-<host>`. The shared
+`~/phanes-ctl/autodispatch/PAUSE-HOST-<host>` belongs to health checks and
+operators; the guard never writes or deletes it. Checking its body before a
+replace/unlink cannot protect a concurrent independent writer. A removed
+private marker is restored on the next tick; the independent state file below
+holds the gate throughout that interval. A **failed** probe is never a healthy
+host: the guard fails closed (the host stays paused) and says so in the brain log.
+
+The dispatch gate is independent of the pause marker: the dispatcher reads
+`~/phanes-ctl/autodispatch/disk-watermark-<host>.json` (written by the guard) and
+holds every lane of that host (`host:<host>` scope) even in the window where the
+health sweep has just cleared the marker. Blocked records never expire: if the
+guard stops, the host remains blocked until a successful probe records recovery.
+When upgrading from guard version 1, the shared `auto:disk-watermark host=...`
+marker is left untouched. Once a version 2 state exists, the updated dispatcher
+uses that state in place of the legacy disk marker, so recovery can open the
+gate without an unsafe deletion. Manual and other guards' shared markers still
+hold the host, including when they replace the legacy marker during recovery.
+
+Deploy (on the box, from the repository mirror):
+
+```bash
+DISK_WATERMARK_HOST=lane-host-a bash tools/install-disk-watermark-guard.sh  # default: $HOME/phanes-ctl
+```
+
+The installer stops the resident guard that is still running (an old process would
+keep the old code alive), deploys `disk-watermark-guard.py` and
+`disk-usage-probe.py` next to each other into `~/phanes-ctl/bin`, wires the
+resident loop into the live `~/phanes-ctl/bin/start-control-plane`, updates the
+dispatcher that carries the gate and verifies that the resident guard of the new
+version really runs. If a dispatcher is running, the installer checks that its
+restart entry identifies a dispatcher it can update before stopping any process;
+an unknown entry fails installation and preserves the running processes. A
+dispatcher that was stopped must be running again for installation to succeed.
+Alerts go to `/workspace/phanes/brain/log.md`, the same
+brain log used by the dispatcher. Set `DISK_WATERMARK_BRAIN_LOG` during installation
+to override this path for an isolated deployment. The probe counts allocated
+blocks throughout each directory tree by default; `--max-depth` explicitly
+requests a partial scan.
+
+Review fixes and evidence:
+
+- Marker ownership race: private markers separate disk writes/releases from
+  shared host pauses. `check-disk-watermark.py` injects manual and other-guard
+  writes (in-place and atomic replacement) at creation, refresh and unlink,
+  verifies the shared bytes survive, and checks v1 upgrade and manual pauses
+  in the actual dispatcher gate. The regression suite keeps its block/hold/
+  recovery, marker removal and deployment checks against the private marker;
+  foreign ownership checks still exercise the shared host marker.
+- Recovery boundary: the guard and offline check exercise 95% → 91% → 87%;
+  at 87% the own marker is removed, the independent gate opens and recovery is logged.
+- Dispatcher restart: installer tests cover the updated resident dispatcher's
+  heartbeat, an unknown restart entry preserving the old process, and a start
+  script that fails to restart the dispatcher returning an installation error.
+- B1: blocked state has no TTL; the real dispatch tick test removes the marker
+  and ages the state past 30 minutes, then verifies that <host> gets no run.
+- B2: the probe scans all depths by default; a deep 1 MiB payload must be counted
+  and rank above a shallow 64 KiB directory.
+- B3: the installer, startup example and guard default use the dispatcher brain
+  log path; the installation test verifies a block alert at the configured path.
+
+Manual one-shots:
+
+```bash
+python3 ~/phanes-ctl/bin/disk-watermark-guard.py --pause-dir ~/phanes-ctl/autodispatch \
+    --brain-log /workspace/phanes/brain/log.md --host lane-host-a      # measure once and apply the policy
+python3 ~/phanes-ctl/bin/disk-usage-probe.py --path / --top 10   # the usage probe of a host
+```
+
+Offline acceptance (run from the repository root; no remote SSH or live control
+plane state):
+
+```sh
+git diff --check && python3 tools/check-disk-watermark.py && python3 -m unittest tools.tests.test_disk_watermark_guard
+```
+
+Use that complete command in the host verifier, rather than the prose placeholder
+`run the acceptance command(s) named in the issue`. The placeholder is not shell
+syntax and fails before any test runs. The `&&` chain preserves each failing
+check's exit status and stops immediately; a shell parse error is not evidence
+that the disk guard itself failed.
+
+The contract check covers probe allocation, hysteresis, concurrent foreign-marker
+writes, failed probes, the dispatch gate and the paired probe dependency. The
+unittest suite also exercises installation and replacement of the resident guard
+inside an isolated fake control-plane tree. Passing these offline checks does not
+claim a production deployment or a successful SSH probe of the live lane host;
+those remain separate operator verification steps above.
 ### Executor task / zombie watermark probe (Refs #1826)
 
 The executor services of a lane leak: their cgroup fills up with zombie children until
@@ -746,7 +840,7 @@ health loop is not rewritten by the probe:
 The matching alert line (appended to `health.alert`, one line per alerting service):
 
 ```
-2026-11-03 19:15:00 level=hard source=executor-tasks host=<host>.example.invalid service=openswarm-executor-M19.service zombies=844 tasks=869/1552 ratio=0.56 parents=1210977 snapshot=/home/phanes-ctl/autodispatch/executor-task-snapshots/executor-tasks-gores1.example.invalid-20261103-191500-000000.ps
+2026-11-03 19:15:00 level=hard source=executor-tasks host=lane-host-a service=openswarm-executor-M19.service zombies=844 tasks=869/1552 ratio=0.56 parents=1210977 snapshot=/path/to/state/executor-tasks-snapshot.ps
 ```
 
 Offline proof (a fake fleet host answers the ssh commands of the probe; no network, no
@@ -1034,6 +1128,7 @@ setsid nohup ~/phanes-ctl/bin/bus-worker-loop >/dev/null 2>&1 &
 setsid nohup ~/phanes-ctl/bin/lane-merge >/dev/null 2>&1 &
 setsid nohup ~/phanes-ctl/bin/ctl-loop >/dev/null 2>&1 &
 setsid nohup ~/phanes-ctl/bin/health-loop >/dev/null 2>&1 &
+setsid nohup ~/phanes-ctl/bin/disk-watermark-guard.py --loop --pause-dir ~/phanes-ctl/autodispatch --brain-log /workspace/phanes/brain/log.md --host lane-host-a >/dev/null 2>&1 &
 ~/phanes-ctl/bin/ib-refresh                  # manual certificate refresh preflight
 ```
 

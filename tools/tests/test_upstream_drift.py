@@ -6,6 +6,7 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
+from tools import upstream_drift
 from tools.upstream_drift import (blob_id, classify, local_files, snapshot,
                                  pr_changed_paths, unmarked_paths)
 
@@ -88,6 +89,48 @@ class UpstreamDriftTests(unittest.TestCase):
             subprocess.run(["git", "init", "--bare", str(remote)], check=True, capture_output=True)
             with self.assertRaises(RuntimeError):
                 snapshot({"upstream_repo": str(remote)}, "deadbeef", Path(scratch))
+
+    def test_snapshot_uses_requested_work_dir_for_scratch_and_cleans_it(self):
+        with tempfile.TemporaryDirectory(dir=os.environ.get("TMPDIR")) as scratch:
+            root = Path(scratch)
+            remote = root / "upstream"
+            work_dir = root / "requested-work"
+            remote.mkdir()
+            work_dir.mkdir()
+            subprocess.run(["git", "init", str(remote)], check=True, capture_output=True)
+            (remote / "tracked.txt").write_text("snapshot\n")
+            base_sha = commit(remote, "base")
+
+            init_locations = []
+            original_run = upstream_drift.run
+
+            def recording_run(args, *, cwd=None):
+                if args[:3] == ["git", "init", "--bare"]:
+                    init_locations.append(Path(args[3]))
+                return original_run(args, cwd=cwd)
+
+            with patch.object(upstream_drift, "run", side_effect=recording_run):
+                result = snapshot({"upstream_repo": str(remote)}, base_sha, work_dir)
+
+            self.assertEqual(result, {"tracked.txt": blob_id(b"snapshot\n")})
+            self.assertEqual(len(init_locations), 1)
+            self.assertEqual(init_locations[0].parent, work_dir)
+            self.assertFalse(init_locations[0].exists())
+
+    def test_snapshot_creates_a_missing_work_dir_and_removes_it(self):
+        with tempfile.TemporaryDirectory(dir=os.environ.get("TMPDIR")) as scratch:
+            root = Path(scratch)
+            remote = root / "upstream"
+            work_dir = root / "missing-work"
+            remote.mkdir()
+            subprocess.run(["git", "init", str(remote)], check=True, capture_output=True)
+            (remote / "tracked.txt").write_text("snapshot\n")
+            base_sha = commit(remote, "base")
+
+            result = snapshot({"upstream_repo": str(remote)}, base_sha, work_dir)
+
+            self.assertEqual(result, {"tracked.txt": blob_id(b"snapshot\n")})
+            self.assertFalse(work_dir.exists())
 
     def test_snapshot_rejects_missing_base_sha_with_localized_git_error(self):
         with tempfile.TemporaryDirectory(dir=os.environ.get("TMPDIR")) as scratch:

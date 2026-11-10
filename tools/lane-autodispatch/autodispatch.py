@@ -36,6 +36,30 @@ RULES = ("Rules: work only inside this repository worktree (the current director
 IMPL_CARD_TASK_BOOK = ("## Impl card delivery requirements\n"
                        "1. 交付说明必须对每个新增函数列出入口→调用链→数据结构来源：由谁调用、输入来自哪个真实数据结构、每个字段由谁填写。\n"
                        "2. 至少补一个 tick/集成级测试：从真实入口（tick 或等价入口）驱动到可观测结果；只测函数加 mock 不算。\n")
+# The brief of a fix round (rubric F1..F6, Refs #1851): a fix round card asks a lane to redo a
+# rejected PR, so the task book has to force the six checklist items of the rubric. The `{pr}`
+# placeholder is the PR of the round (the `rebase-pr-<N>` branch to continue from); it is replaced
+# with the number the card names, or with `<N>` when the card names none.
+FIX_ROUND_TASK_BOOK = ("## Fix round checklist (rubric F1-F6)\n"
+                       "F1 续改基点：从 `rebase-pr-{pr}` 续改（上一轮 PR 的头），先做祖先校验 "
+                       "`git merge-base --is-ancestor <base> rebase-pr-{pr}`；校验不过就停下报告，不要另起分支重写。\n"
+                       "F2 先枚举同类点：先把同类问题全部枚举出来（同样的写法、同样的调用点），再逐个修，不要只修眼前这一处。\n"
+                       "F3 逐条 BLOCKER 勾选并附证据：上一轮每条 BLOCKER 都要在交付说明里逐条勾选（`- [x]`），"
+                       "并附证据（文件:行号 + 测试名或命令输出）。\n"
+                       "F4 先写失败测试：先写能复现上一轮问题的失败测试，跑一次确认是红的，再改实现让它转绿。\n"
+                       "F5 不删既有集成测试：不得删除或跳过既有的集成测试；要改断言就改断言并写明理由。\n"
+                       "F6 复跑 A4/A2：修完复跑 A4/A2 两项验收（同一条命令、同一个环境），把结果贴进交付说明。\n")
+# The markers of a fix round card: a fix label (`fix`, `card:fix`, `type:fix`, `review-fix`…) or a
+# `## Fix Round` heading, review request or rebase branch in the body, or a fix round title.
+# An ordinary work card that merely fixes a bug is not a fix round.
+FIX_ROUND_CARD_LABELS = {"fix", "fix-round", "review-fix", "rework",
+                         "card:fix", "card:fix-round", "card:review-fix", "card:rework",
+                         "type:fix", "type:fix-round", "type:review-fix", "type:rework"}
+FIX_ROUND_HEADING_RE = re.compile(r"(?mi)^##[^\S\r\n]*(?:fix[^\S\r\n]*round|review[^\S\r\n]*fix|rework|修复轮|返修轮)[^\S\r\n]*$")
+FIX_ROUND_TITLE_RE = re.compile(r"(?i)^(?:fix[ _-]?round|review[ _-]?fix|rework|修复轮|返修轮)(?:\s*[:：]|\s+|$)")
+# The PR of the round: the branch the card names, or its `目标 PR` field.
+FIX_ROUND_PR_BRANCH_RE = re.compile(r"(?i)rebase-pr-(\d+)")
+FIX_ROUND_PR_FIELD_RE = re.compile(r"(?i)(?:目标[^\S\r\n]*PR|PR)[^\S\r\n]*[:：]?[^\S\r\n]*#?[^\S\r\n]*(\d+)")
 NON_IMPL_CARD_TYPES = {"upstream", "ops", "follow-up", "planner", "verify-intent"}
 PRIO = {"p0": 0, "p1": 1, "p2": 2}
 DISPATCH_EXCLUDING_LABELS = {"in-progress", "lane-pr", "lane-failed"}
@@ -149,6 +173,40 @@ def marker_scope(name):
     if name.startswith("PAUSE-") and len(name) > len("PAUSE-"): return f"lane:{name[len('PAUSE-'):]}"
     return None
 
+# The disk watermark guard of the box control plane (Refs #1666) measures a remote lane host and
+# pauses it when the disk is too full. The health sweep can clear the `auto:` host pause, so the
+# dispatcher reads the state file of the guard as well: that is an independent gate that keeps the
+# lane closed for the whole hysteresis band, even between two guard ticks.
+DISK_WATERMARK_STATE_PREFIX = "disk-watermark-"
+
+def disk_watermark_states(now=None):
+    """The disk watermark states of the guard: one record per measured lane host."""
+    # A blocked host stays blocked until the guard records a measured recovery.
+    # A stopped guard and a missing marker are not evidence of free disk space.
+    states = {}
+    try: names = sorted(os.listdir(D))
+    except OSError: return states
+    for name in names:
+        if not name.startswith(DISK_WATERMARK_STATE_PREFIX) or not name.endswith(".json"): continue
+        try:
+            with open(os.path.join(D, name)) as stream: record = json.load(stream)
+        except (OSError, ValueError): continue
+        if not isinstance(record, dict): continue
+        host = record.get("host")
+        if not isinstance(host, str) or not host.strip(): continue
+        updated = record.get("updated_at")
+        if isinstance(updated, bool) or not isinstance(updated, (int, float)): continue
+        states[host.strip()] = record
+    return states
+
+def disk_watermark_blocked(host, states=None):
+    """Whether the disk watermark guard blocks the host (the independent disk gate)."""
+    if not host: return False
+    states = disk_watermark_states() if states is None else states
+    record = states.get(host)
+    if not record: return False
+    return bool(record.get("blocked"))
+
 # The deadline of a legacy pause marker: the health loop writes `auto:cooldown:until=<epoch|ISO>`
 # (`tools/check-health-pause.py`), the quota loop `mm_remains:until=<ISO>`
 # (`tools/check-health-quota-fresh.py`). The deadline is separated from the rest of the body by a
@@ -205,6 +263,7 @@ def pause_records(now=None, home=None):
     removal). The result is sorted by scope."""
     now = time.time() if now is None else now
     records = []
+    disk_states = disk_watermark_states(now)
     store = pause_store_dir(home)
     try: names = sorted(os.listdir(store))
     except OSError: names = []
@@ -238,12 +297,36 @@ def pause_records(now=None, home=None):
         scope = marker_scope(name)
         if scope is None: continue
         body = marker_body(name)
+        # Version 2 stopped writing shared host markers. Retain old files
+        # untouched, but use its independent state instead of its legacy marker.
+        # Other writers do not share a lock with the guard; deleting the legacy
+        # file after reading its body could delete a concurrent manual pause.
+        if name.startswith("PAUSE-HOST-"):
+            host = name[len("PAUSE-HOST-"):]
+            version = disk_states.get(host, {}).get("guard", 0)
+            if isinstance(version, int) and version >= 2:
+                if body.startswith(f"auto:disk-watermark host={host} "): continue
         deadline = pause_until(body)
         if deadline is not None and deadline <= now:
             log_expired_pause(name, deadline)  # the hold ends here, the marker file stays
             continue
         records.append({"scope": scope, "reason": marker_reason(name, body), "created_at": 0.0,
                         "expires_at": deadline, "source": "marker"})
+    # The private marker also gates dispatch if writing the state failed.
+    try: disk_markers = os.listdir(os.path.join(D, ".disk-watermark"))
+    except OSError: disk_markers = []
+    for name in disk_markers:
+        scope = marker_scope(name)
+        if scope and scope.startswith("host:"):
+            records.append({"scope": scope, "reason": "disk watermark marker",
+                            "created_at": 0.0, "expires_at": None, "source": "marker"})
+    # The disk watermark gate (Refs #1666): a blocked lane host stays blocked even when the
+    # health sweep removed its pause marker, as long as the guard reports the block.
+    for host, record in disk_states.items():
+        if not record.get("blocked"): continue
+        records.append({"scope": f"host:{host}", "reason": f"disk watermark guard: {record.get('state')}",
+                        "created_at": record.get("updated_at"), "expires_at": None,
+                        "source": "disk-watermark"})
     return sorted(records, key=lambda row: row["scope"])
 
 def paused_scopes(now=None, records=None):
@@ -1789,6 +1872,28 @@ def dispatch_failed(lane, cfg, item, error, busy=False):
         return
     host_fail(cfg["host"], f"dispatch #{item['n']}: {error}")
 
+def is_fix_round_card(labels, title, body):
+    """True when the card asks a lane to redo a rejected PR (rubric F1..F6, Refs #1851).
+
+    The marker is explicit: a fix label (`fix`, `card:fix`, `type:fix`, `review-fix`…), a
+    `## Fix Round` heading, review request or rebase branch in the body, or a fix round title prefix.
+    An ordinary work card that merely fixes a bug stays an ordinary work card."""
+    if set(labels) & FIX_ROUND_CARD_LABELS: return True
+    if FIX_ROUND_HEADING_RE.search(body or ""): return True
+    if "审查要求修改" in (body or "") or FIX_ROUND_PR_BRANCH_RE.search(body or ""): return True
+    return bool(FIX_ROUND_TITLE_RE.match(title or ""))
+
+def fix_round_pr(body, title=""):
+    """The PR number of the round: the `rebase-pr-<N>` branch or the `目标 PR` field of the card."""
+    for text in (body or "", title or ""):
+        match = FIX_ROUND_PR_BRANCH_RE.search(text) or FIX_ROUND_PR_FIELD_RE.search(text)
+        if match: return match.group(1)
+    return None
+
+def fix_round_brief(body, title=""):
+    """The fix round brief, with the PR of the round when the card names one."""
+    return FIX_ROUND_TASK_BOOK.replace("{pr}", fix_round_pr(body, title) or "<N>")
+
 LANE_BUSY_RE = re.compile(r"lane \S+ is busy", re.I)  # the host still runs the finished run
 CAPACITY_EXHAUSTED_RE = re.compile(r"\b(?:capacity exhausted|no (?:available )?capacity)\b", re.I)
 
@@ -1803,6 +1908,13 @@ def dispatch(lane, cfg, item, base):
     excluded_labels.add("upstream(swrm)")
     excluded_title = re.match(r"(?i)^(?:upstream|ops|follow-up|planner|verify-intent)(?:\s*[:：]|\s+|$)", item["title"])
     is_impl = not (labels & excluded_labels or excluded_title)
+    # A fix round redoes a rejected PR: its task book forces the six checklist items of the
+    # rubric (F1..F6). Only an implementation card gets them: a planner/follow-up/verify card
+    # asks for no code, so the checklist would be noise there.
+    if is_impl and is_fix_round_card(labels, item["title"], body):
+        brief = fix_round_brief(body, item["title"])
+        if brief.rstrip() not in body and FIX_ROUND_TASK_BOOK.rstrip() not in body:
+            body = f"{body.rstrip()}\n\n{brief}"
     # A heading mention or a partial block must not suppress either requirement.
     if is_impl and IMPL_CARD_TASK_BOOK.rstrip() not in body:
         body = f"{body.rstrip()}\n\n{IMPL_CARD_TASK_BOOK}"
@@ -2046,6 +2158,45 @@ def filter_harvest(ref, base):
             parent = git("commit-tree", tree, "-p", parent, env=commit_env, inp=message).strip().decode()
     return parent, removed, tree_of(parent) == tree_of(base)
 
+def origin_branch_head(branch):
+    """Return the head commit of a branch on origin ("" when the branch is not there).
+
+    The harvest push and this read use the same remote, so the answer describes the
+    branch the PR would be opened from."""
+    rc, out, _ = sh(["git", "-C", LOCAL, "ls-remote", "origin", f"refs/heads/{branch}"], timeout=60)
+    if rc: return ""
+    parts = out.split()
+    return parts[0] if parts else ""
+
+def local_commit(rev):
+    """Return the commit sha of a local revision ("" when it cannot be resolved)."""
+    rc, out, _ = sh(["git", "-C", LOCAL, "rev-parse", "--verify", "--quiet", f"{rev}^{{commit}}"], timeout=60)
+    return out.strip() if not rc else ""
+
+def harvest_push(lane, n, branch, head):
+    """Push the harvested branch to origin and tell whether the harvest may continue.
+
+    Returns (ok, error).  A push that failed without any error output (empty stderr)
+    but whose branch is already on origin at the pushed head means the update reached
+    origin before the failure was reported: the harvest goes on to the PR instead of
+    pushing again on every tick (Refs #1640; the dispatch engine reads the same
+    evidence).  A push that said why it failed, a branch that is not on origin and a
+    branch that carries another head or an unresolved local head all stay push failures."""
+    rc, _, err = sh(["git", "-C", LOCAL, "push", "-q", "origin", f"{head}:refs/heads/{branch}"], timeout=180)
+    if not rc: return True, None
+    reason = err.strip()[-200:]
+    if not reason:
+        remote, pushed = origin_branch_head(branch), local_commit(head)
+        if remote and pushed and remote == pushed:
+            log(f"{lane} #{n} push rc={rc} without error output; branch {branch} is on origin "
+                f"at {remote[:8]}; continuing to PR", brain=False)
+            return True, None
+        reason = ("no error output and the branch is not on origin" if not remote else
+                  f"no error output; cannot resolve the pushed head {head}" if not pushed else
+                  f"no error output; branch {branch} is on origin at {remote[:8]}, "
+                  f"not at the pushed head {pushed[:8]}")
+    return False, f"push failed: {reason}"
+
 def finish(lane, cfg, st, info, state):
     """Harvest a finished lane run: push the branch, open the PR, relabel the issue.
 
@@ -2075,8 +2226,8 @@ def finish(lane, cfg, st, info, state):
                                f"({len(removed)} excluded path(s)).\n\nLabel `lane-failed`; re-add `lane-ready` to retry.")
             mark_done(state, n)
             return {"done": True, "status": "lane-failed", "error": "empty after artifact filtering", "missing": []}
-        rc, _, err = sh(["git", "-C", LOCAL, "push", "-q", "origin", f"{head}:refs/heads/{b}"], timeout=180)
-        if rc: return {"done": False, "status": "push-failed", "error": f"push failed: {err.strip()[-200:]}", "missing": []}
+        pushed, push_error = harvest_push(lane, n, b, head)
+        if not pushed: return {"done": False, "status": "push-failed", "error": push_error, "missing": []}
         _, lj, _ = gh(["issue", "view", str(n), "--json", "labels"])
         if "lane-pr" in lj:
             record_verify_time(state, n, "evidence_ready")
