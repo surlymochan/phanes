@@ -19,7 +19,7 @@ This probe is that reader.  It answers two questions and alarms on both:
 
 The probe is offline and read-only: it never starts, stops or touches the dispatcher.
 ``swrm fleet status`` includes this verdict in its text and JSON health output.
-``swrm fleet health`` exits non-zero on an alarm; ``swrm fleet health --watch 60``
+``swrm fleet lanes-health`` exits non-zero on an alarm; ``swrm fleet lanes-health --watch 60``
 rechecks both signals every minute in an independent monitor process, including when
 the dispatcher exits or hangs. ``--json`` prints the same verdict for a monitor.
 

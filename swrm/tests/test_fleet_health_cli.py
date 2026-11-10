@@ -8,7 +8,7 @@ kept dispatching, and no reader noticed.
 The reader is ``tools/check-lanes-status-stall.py``: an offline probe that judges the
 snapshot (fresh / expired, with the last ``_at``) and the liveness of its writer (the
 heartbeat of the dispatcher loop and the pid file), and alarms on both.  The tests below
-drive the probe and swrm fleet health as commands, with an isolated home, and
+drive the probe and swrm fleet lanes-health as commands, with an isolated home, and
 pin the contract the issue asks for:
 
 * a frozen snapshot is reported as expired, with the last ``_at``, and the probe fails;
@@ -242,7 +242,6 @@ class FleetHealthIntegrationTest(unittest.TestCase):
     def test_existing_fleet_status_reports_stale_in_text_and_overall_json(self):
         for as_json in (False, True):
             with self.subTest(json=as_json), mock.patch.object(self.swrm, "fleet_config", return_value={}), \
-                    mock.patch.object(self.swrm, "instabox_states", return_value={}), \
                     contextlib.redirect_stdout(io.StringIO()) as output:
                 self.swrm.cmd_fleet(argparse.Namespace(fleet_cmd="status", json=as_json))
                 if as_json:
@@ -260,7 +259,7 @@ class FleetHealthIntegrationTest(unittest.TestCase):
         (self.state / "autodispatch.pid").write_text(json.dumps({"pid": dead_pid()}))
         environment = dict(os.environ, HOME=str(self.home), OPENSWARM_HOME=str(self.home / "swrm"))
         result = subprocess.run([sys.executable, str(REPO_ROOT / "swrm/bin/swrm"),
-                                 "fleet", "health", "--json"], env=environment,
+                                 "fleet", "lanes-health", "--json"], env=environment,
                                 capture_output=True, text=True, timeout=30)
         self.assertEqual(result.returncode, 1, result.stderr)
         report = json.loads(result.stdout)
@@ -271,7 +270,7 @@ class FleetHealthIntegrationTest(unittest.TestCase):
         self.snapshot.write_text(json.dumps({"_at": time.strftime("%F %T")}))
         (self.state / "autodispatch.pid").write_text(f"{dead_pid()}\n")
         with contextlib.redirect_stdout(io.StringIO()) as output, self.assertRaises(SystemExit) as exit_status:
-            self.swrm.cmd_fleet(argparse.Namespace(fleet_cmd="health", json=True, watch=None))
+            self.swrm.cmd_fleet(argparse.Namespace(fleet_cmd="lanes-health", json=True, watch=None))
         self.assertEqual(exit_status.exception.code, 1)
         report = json.loads(output.getvalue())
         self.assertFalse(report["ok"])
@@ -293,7 +292,7 @@ class FleetHealthIntegrationTest(unittest.TestCase):
 
         with mock.patch.object(self.swrm.time, "sleep", side_effect=next_period), \
                 contextlib.redirect_stdout(io.StringIO()) as output, self.assertRaises(KeyboardInterrupt):
-            self.swrm.cmd_fleet(argparse.Namespace(fleet_cmd="health", json=True, watch=60))
+            self.swrm.cmd_fleet(argparse.Namespace(fleet_cmd="lanes-health", json=True, watch=60))
         first, second = map(json.loads, output.getvalue().splitlines())
         self.assertTrue(first["ok"])
         self.assertFalse(second["ok"])
@@ -330,7 +329,7 @@ class StandaloneFleetHealthTest(unittest.TestCase):
                 environment = {name: value for name, value in os.environ.items()
                                if not name.startswith(("OPENSWARM_", "XSWARM_", "SWRM_", "PYTHONPATH"))}
                 environment.update(HOME=str(home), TMPDIR=str(home), OPENSWARM_HOME=str(runtime))
-                for command in ("health", "status"):
+                for command in ("lanes-health", "status"):
                     for as_json in (False, True):
                         with self.subTest(command=command, json=as_json):
                             argv = [sys.executable, str(self.binary), "fleet", command]
@@ -338,13 +337,13 @@ class StandaloneFleetHealthTest(unittest.TestCase):
                                 argv.append("--json")
                             result = subprocess.run(argv, env=environment, cwd=home,
                                                     capture_output=True, text=True, timeout=30)
-                            expected_code = int(status != "fresh") if command == "health" else 0
+                            expected_code = int(status != "fresh") if command == "lanes-health" else 0
                             self.assertEqual(result.returncode, expected_code, result.stderr)
                             self.assertNotIn("Traceback", result.stderr)
                             if as_json:
                                 report = json.loads(result.stdout)
                                 self.assertEqual(report["ok"], status == "fresh")
-                                control = report if command == "health" else report["control_plane"]
+                                control = report if command == "lanes-health" else report["control_plane"]
                                 expected_snapshot = "fresh" if status == "dead" else status
                                 self.assertEqual(control["snapshot"]["status"], expected_snapshot)
                                 if status == "dead":

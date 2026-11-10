@@ -33,7 +33,7 @@ def load_ready_target_contract():
 def run_tick(module, temp_dir, gh, shell, replenish=None):
     module.D = str(temp_dir)
     module.BRAIN_LOG = str(temp_dir / "brain.log")
-    module.queue = lambda: []
+    module.queue = lambda *args, **kwargs: []
     module.gh = gh
     module.sh = shell
     if replenish is not None:

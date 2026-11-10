@@ -19,7 +19,7 @@ below look for the probe that reports the verdict and fail when there is none.
 
 The probe is looked up by the naming conventions of the repository (an offline
 ``tools/check-*.py`` probe, like ``tools/check-ad-heartbeat-stall.py`` for the
-heartbeat, or a ``swrm fleet health`` command).  A probe that answers the questions
+heartbeat, or a ``swrm fleet lanes-health`` command).  A probe that answers the questions
 below satisfies the contract, whatever its name is.
 """
 
@@ -94,7 +94,7 @@ def candidate_probes():
             probes.append(argv)
     swrm = ROOT / "swrm" / "bin" / "swrm"
     if swrm.is_file():
-        probes.append([sys.executable, str(swrm), "fleet", "health", "--json"])
+        probes.append([sys.executable, str(swrm), "fleet", "lanes-health", "--json"])
     return probes
 
 
@@ -209,7 +209,7 @@ class LanesStatusHealthProbeTest(unittest.TestCase):
             f"({THRESHOLD_MINUTES} minutes) as expired, name the last _at and alarm "
             "(a non-zero exit), and it must report a dispatcher that is not alive any more. "
             "Expected an offline probe under tools/ (like tools/check-ad-heartbeat-stall.py "
-            "for the heartbeat) or a `swrm fleet health` command.")
+            "for the heartbeat) or a `swrm fleet lanes-health` command.")
 
 
 if __name__ == "__main__":

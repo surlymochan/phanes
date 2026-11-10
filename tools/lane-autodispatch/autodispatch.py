@@ -5,11 +5,12 @@ Every TICK seconds: finish runs that ended (push branch + open PR, relabel issue
 lane the next open issue labelled `lane-ready` (not `in-progress`), ordered p0 < p1 < p2 < unlabelled,
 then by issue number. Optional `backend:pi|agy|codex` label pins an issue to that executor family.
 State: ~/phanes-ctl/autodispatch/state.json   Log: ~/phanes-ctl/autodispatch/autodispatch.log + brain/log.md
-Pause: the swrm pause store ($OPENSWARM_HOME/pauses, written by `swrm pause <scope>`) and the
-legacy markers ~/phanes-ctl/autodispatch/PAUSE (whole loop), PAUSE-<LANE> (one lane),
-PAUSE-HOST-<HOST>, PAUSE-BACKEND-<BACKEND> and PAUSE-MINT (no new issue minted). Both are read (Refs #1366).
-A legacy marker that carries its own deadline (`until=<epoch|ISO>`) stops holding the lane once that
-deadline passed; the marker file stays on disk as the evidence of the hold (Refs #1592).
+Pause: the swrm pause store ($OPENSWARM_PAUSE_DIR, else $OPENSWARM_HOME/pauses, written by
+`swrm pause <scope>` and by `swrm fleet health --apply`) and the legacy markers
+~/phanes-ctl/autodispatch/PAUSE (whole loop), PAUSE-<LANE> (one lane),
+PAUSE-HOST-<HOST>, PAUSE-BACKEND-<BACKEND> and PAUSE-MINT (no new issue minted). All are read (Refs #1366).
+A hold that a program keeps under a scope of its own (`host:<host>@health`) holds the host as well (Refs #1367).
+A legacy marker with an `until=<epoch|ISO>` deadline stops holding after that deadline, while the file stays as evidence (Refs #1592).
 """
 import base64, hashlib, json, math, os, re, shlex, stat, subprocess, sys, threading, time, tempfile, concurrent.futures as cf
 from datetime import datetime, timezone
@@ -152,22 +153,88 @@ MM_BURN_MAX_AGE_S = env_number("MM_BURN_MAX_AGE_S", 900, int)
 MM_BURN_WARN_SEC = env_number("MM_BURN_WARN_SEC", 600, int)
 BURN_WARN_AT = 0.0  # epoch second of the last burn warning
 
+# --- dispatch priority (Refs #1705) -------------------------------------------------------
+# Scores deliberately use time in the *dispatchable pool*, not issue creation time.
+PRIORITY_WAIT_STEP_S = max(1.0, env_number("AD_PRIORITY_WAIT_STEP_S", 900.0))
+PRIORITY_WAIT_WEIGHT = env_number("AD_PRIORITY_WAIT_WEIGHT", 1.0)
+PRIORITY_LARGE_BUDGET_MINUTES = env_number("AD_PRIORITY_LARGE_BUDGET_MINUTES", 90.0)
+PRIORITY_LARGE_BONUS = env_number("AD_PRIORITY_LARGE_BONUS", 8.0)
+PRIORITY_BACKEND_EXACT = env_number("AD_PRIORITY_BACKEND_EXACT", 4.0)
+PRIORITY_BACKEND_UNPINNED = env_number("AD_PRIORITY_BACKEND_UNPINNED", 2.0)
+PRIORITY_STARVATION_S = max(0.0, env_number("AD_PRIORITY_STARVATION_S", 3600.0))
+PRIORITY_STARVATION_BONUS = env_number("AD_PRIORITY_STARVATION_BONUS", 16.0)
+
+def timestamp(value):
+    """Return an epoch timestamp for a numeric or ISO-8601 value, else None."""
+    if isinstance(value, bool) or value is None: return None
+    if isinstance(value, (int, float)): return float(value)
+    text = str(value).strip()
+    if not text: return None
+    for pattern, candidate in (("%Y-%m-%dT%H:%M:%SZ", text), ("%Y-%m-%dT%H:%M:%S", text[:19])):
+        try: return time.mktime(time.strptime(candidate, pattern))
+        except ValueError: pass
+    return None
+
+def budget_minutes(item):
+    """Read the dispatch budget populated by queue(), accepting legacy spellings."""
+    for key in ("budget_minutes", "budgetMinutes", "budget"):
+        try: return float(item.get(key))
+        except (TypeError, ValueError): pass
+    return 0.0
+
+def pool_wait_seconds(item, now=None):
+    """How long the card has actually been dispatchable, never its issue age."""
+    now = time.time() if now is None else now
+    entered = timestamp(item.get("pool_entered_at"))
+    if entered is None: entered = timestamp(item.get("poolEnteredAt"))
+    if entered is None: entered = now
+    return max(0.0, now - entered)
+
+def priority_score(backend, item, now=None):
+    """Return the score and auditable components used by dispatch ordering."""
+    waited = pool_wait_seconds(item, now)
+    wait_score = math.floor(waited / PRIORITY_WAIT_STEP_S) * PRIORITY_WAIT_WEIGHT
+    budget = budget_minutes(item)
+    large = budget >= PRIORITY_LARGE_BUDGET_MINUTES
+    size_score = PRIORITY_LARGE_BONUS if large else 0.0
+    if item.get("backend") == backend: backend_score = PRIORITY_BACKEND_EXACT
+    elif item.get("backend") is None: backend_score = PRIORITY_BACKEND_UNPINNED
+    else: backend_score = 0.0
+    starvation_score = PRIORITY_STARVATION_BONUS if not large and waited >= PRIORITY_STARVATION_S else 0.0
+    components = {"wait_s": round(waited, 3), "wait": wait_score, "size": size_score,
+                  "backend": backend_score, "starvation": starvation_score,
+                  "budget_minutes": budget}
+    return sum(components[k] for k in ("wait", "size", "backend", "starvation")), components
+
 def ctl_state_dir():
     directory = os.path.expanduser(os.environ.get("OPENSWARM_CTL_STATE_DIR", f"{HOME}/phanes-ctl/state"))
     os.makedirs(directory, mode=0o700, exist_ok=True)
     return directory
 
 def pause_home(home=None):
-    """The home that holds the pause store ($OPENSWARM_HOME by default).
-
-    An empty $OPENSWARM_HOME is no home at all: the fallback keeps the store path
-    absolute instead of turning it into a relative `pauses` directory."""
+    """The home that holds the pause store ($OPENSWARM_HOME by default)."""
     if home: return os.path.expanduser(home)
     return os.path.expanduser(os.environ.get("OPENSWARM_HOME") or os.environ.get("XSWARM_HOME") or f"{HOME}/.claude/swrm")
 
 def pause_store_dir(home=None):
-    """The swrm pause store ($OPENSWARM_HOME/pauses), the new home of the pause switches."""
+    """The swrm pause store, shared with the fleet health check (Refs #1367)."""
+    configured = os.environ.get("OPENSWARM_PAUSE_DIR") or os.environ.get("XSWARM_PAUSE_DIR")
+    if home is None and configured: return os.path.expanduser(configured)
     return os.path.join(pause_home(home), "pauses")
+
+def pause_executor_start_lane(lane):
+    """Cool down only the failing executor's lane; the card has not had an attempt."""
+    now = time.time()
+    scope = f"lane:{lane}"
+    directory = pause_store_dir()
+    os.makedirs(directory, exist_ok=True)
+    record = {"scope": scope, "reason": "auto:executor_start_failed", "created_at": now,
+              "expires_at": now + 600}
+    # Write atomically so dispatch never observes a partially written pause.
+    with tempfile.NamedTemporaryFile(mode="w", dir=directory, delete=False) as stream:
+        temporary = stream.name
+        json.dump(record, stream)
+    os.replace(temporary, os.path.join(directory, hashlib.sha256(scope.encode()).hexdigest() + ".json"))
 
 def marker_scope(name):
     """The pause scope of a legacy PAUSE marker file name, or None when it is none."""
@@ -236,10 +303,10 @@ def pause_until(body):
     if parsed.tzinfo is None: parsed = parsed.replace(tzinfo=timezone.utc)
     return parsed.timestamp()
 
-def marker_body(name):
+def marker_body(name, directory=None):
     """The body of a legacy pause marker (empty when the file cannot be read)."""
     try:
-        with open(os.path.join(D, name)) as stream: return stream.read()
+        with open(os.path.join(D if directory is None else directory, name)) as stream: return stream.read()
     except OSError: return ""
 
 def marker_reason(name, body):
@@ -313,10 +380,24 @@ def pause_records(now=None, home=None):
                 if body.startswith(f"auto:disk-watermark host={host} "): continue
         deadline = pause_until(body)
         if deadline is not None and deadline <= now:
-            log_expired_pause(name, deadline)  # the hold ends here, the marker file stays
+            log_expired_pause(name, deadline)
             continue
         records.append({"scope": scope, "reason": marker_reason(name, body), "created_at": 0.0,
                         "expires_at": deadline, "source": "marker"})
+    # Fleet health also writes legacy markers in the pause store.
+    if os.path.abspath(store) != os.path.abspath(D):
+        try: names = sorted(os.listdir(store))
+        except OSError: names = []
+        for name in names:
+            scope = marker_scope(name)
+            if scope is None: continue
+            body = marker_body(name, store)
+            deadline = pause_until(body)
+            if deadline is not None and deadline <= now:
+                log_expired_pause(name, deadline)
+                continue
+            records.append({"scope": scope, "reason": marker_reason(name, body), "created_at": 0.0,
+                            "expires_at": deadline, "source": "marker"})
     # The private marker also gates dispatch if writing the state failed.
     try: disk_markers = os.listdir(os.path.join(D, ".disk-watermark"))
     except OSError: disk_markers = []
@@ -345,10 +426,20 @@ def lane_paused(lane, cfg=None, scopes=None):
     if "all" in scopes: return True
     if f"lane:{lane}" in scopes: return True
     cfg = cfg or {}
-    if cfg.get("host") and f"host:{cfg['host']}" in scopes: return True
-    if cfg.get("backend") and f"backend:{cfg['backend']}" in scopes: return True
+    if cfg.get("host") and holds_target(scopes, "host", cfg["host"]): return True
+    if cfg.get("backend") and holds_target(scopes, "backend", cfg["backend"]): return True
     return False
 
+def holds_target(scopes, kind, value):
+    """Whether a scope holds the dispatch target `kind:value`.
+
+    A hold that a program keeps under a scope of its own (`host:<host>@health`) holds the
+    target as well: the fleet health check never overwrites the pause of an operator, and
+    the release of the operator never frees the host (Refs #1367).
+    """
+    base = f"{kind}:{value}"
+    if base in scopes: return True
+    return any(str(scope).startswith(base + "@") for scope in scopes)
 def pause_priority(row):
     """The order in which the switches are read: the global PAUSE, then the pause store,
     then the remaining legacy markers (Refs #1592)."""
@@ -371,7 +462,9 @@ def pause_reason(lane, cfg=None, records=None, now=None):
     if cfg.get("backend"): wanted.append(f"backend:{cfg['backend']}")
     for row in sorted(records, key=pause_priority):
         scope = row.get("scope")
-        if scope != "all" and scope not in wanted: continue
+        if scope != "all" and scope not in wanted and not (
+            cfg.get("host") and holds_target({scope}, "host", cfg["host"]) or
+            cfg.get("backend") and holds_target({scope}, "backend", cfg["backend"])): continue
         expires = row.get("expires_at")
         remaining = None if expires is None else max(0, int(round(expires - now)))
         return {"scope": scope, "source": row.get("source"), "reason": row.get("reason"),
@@ -386,6 +479,7 @@ def pause_reasons(lanes, records=None, now=None):
         reason = pause_reason(lane, cfg, records, now)
         if reason: reasons[lane] = reason
     return reasons
+
 
 def mint_paused(scopes=None):
     """Whether the minting of new issues is paused (the PAUSE-MINT marker / the mint scope)."""
@@ -1261,11 +1355,25 @@ def remote(lane, cfg, run=""):
     try: return json.loads(out.strip().splitlines()[-1])
     except Exception: return {"error": out[-200:]}
 
-def queue():
-    rc, out, err = gh(["issue", "list", "--state", "open", "--label", "lane-ready", "--limit", "100", "--json", "number,title,labels,body,createdAt"])
-    if rc: raise RuntimeError(err)
+def queue(state=None):
+    """Track admission clocks in tick's persisted state, keyed by JSON issue numbers.
+
+    Only a successful, complete pool read replaces the clocks. Missing/invalid cards
+    lose their clock so a later admission cannot inherit an earlier pool visit.
+    """
+    limit = 100
+    while True:
+        rc, out, err = gh(["issue", "list", "--state", "open", "--label", "lane-ready", "--limit", str(limit), "--json", "number,title,labels,body,createdAt"])
+        if rc: raise RuntimeError(err)
+        issues = json.loads(out)
+        if len(issues) < limit: break
+        # gh paginates up to --limit. A full result may omit an older waiting
+        # card, so expand until exhaustion before replacing any admission clocks.
+        limit *= 2
+    state = {} if state is None else state
+    entered_at = state.get("_pool_entered_at", {})
     items = []
-    for i in json.loads(out):
+    for i in issues:
         labels = label_names(i)
         if not dispatchable_issue(i): continue
         pr = min([PRIO[l] for l in labels if l in PRIO] or [3])
@@ -1281,7 +1389,16 @@ def queue():
             valid, missing = verify_requirements(body)
             if not valid:
                 log_verify_rejected(i["number"], missing); continue
-        items.append({"n": i["number"], "title": i["title"], "body": body, "labels": sorted(labels), "prio": pr, "backend": be, "strict": "strict-backend" in labels, "verify": verify, "queued": to_epoch(i.get("createdAt"))})
+        match = re.search(r"(?im)(?:budget(?:[_ -]minutes)?|预算)\s*[:：]\s*(\d+(?:\.\d+)?)", body)
+        budget = float(match.group(1)) if match else float(BUDGET)
+        item = {"n": i["number"], "title": i["title"], "body": body, "labels": sorted(labels), "prio": pr, "backend": be, "strict": "strict-backend" in labels, "verify": verify,
+                "queued": to_epoch(i.get("createdAt")), "created_at": i.get("createdAt"), "budget_minutes": budget}
+        item["deps_ok"] = deps_met(item)
+        if item["deps_ok"]:
+            entered = timestamp(entered_at.get(str(i["number"])))
+            item["pool_entered_at"] = time.time() if entered is None else entered
+        items.append(item)
+    state["_pool_entered_at"] = {str(item["n"]): item["pool_entered_at"] for item in items if item["deps_ok"]}
     return sorted(items, key=lambda x: (x["prio"], x["n"]))
 
 VERIFY_HEADING_RE = re.compile(r"(?mi)^##[^\S\r\n]*Verify[^\S\r\n]*Intent[^\S\r\n]*$")
@@ -1363,8 +1480,10 @@ def memory_preflight(lane, cfg, item, cache):
 def is_review_lane(lane):
     """The review lanes a verify card may be dispatched to (CX2/CX4/CX5)."""
     return bool(re.fullmatch(r"CX(?:2|4|5)(?:[-_].*)?", str(lane), re.I))
-def rank(backend, item):  # own pin first, then unpinned, then cross-pinned; within each by priority, work before verify, number
-    return (0 if item["backend"] == backend else 1 if item["backend"] is None else 2, item["prio"], bool(item.get("verify")), item["n"])
+def rank(backend, item):
+    """Highest score first; stable legacy fields break equal-score ties."""
+    score, _ = priority_score(backend, item)
+    return (-score, item["prio"], bool(item.get("verify")), item["n"])
 
 def queue_class_limits(lanes, state, idle):
     """Reserve review-capable capacity using available lanes and active runs only."""
@@ -2207,6 +2326,190 @@ def label_lane_failed(n, body):
     gh(["issue", "edit", str(n), "--remove-label", "in-progress", "--remove-label", "lane-ready", "--add-label", "lane-failed"])
     gh(["issue", "comment", str(n), "--body", body])
 
+def budget_window_open(lane, cfg, info):
+    """Confirm recovery from a scoped probe, or the health-loop quota snapshot.
+
+    The default source is health.json in the AD state directory. Its MiniMax
+    remains observation applies to pi (the provider's consumer in swrm/policy.json).
+    Snapshots must be newer than the hold; old snapshots and unknown windows keep
+    the hold. Elapsed time alone never establishes recovery. An operator probe
+    overrides the snapshot.
+    """
+    command = os.environ.get("AD_BUDGET_PROBE_CMD", "").strip()
+    try:
+        if command:
+            proc = subprocess.run(shlex.split(command), shell=False, capture_output=True, text=True, timeout=20)
+            if proc.returncode: return False
+            payload = json.loads(proc.stdout)
+        else:
+            path = os.path.join(D, "health.json")
+            held_at = info.get("at")
+            if (not isinstance(held_at, (int, float)) or isinstance(held_at, bool)
+                    or not math.isfinite(held_at)): return False
+            with open(path) as stream:
+                payload = json.load(stream)
+    except (OSError, subprocess.SubprocessError, ValueError):
+        return False
+    backend = cfg.get("backend")
+    if not backend or not isinstance(payload, dict): return False
+    # Select the target before inspecting any windows. Never search other lanes
+    # or backends for an available window when the target has unknown quota.
+    if "lanes" in payload:
+        rows = payload["lanes"]
+        payload = rows.get(lane) if isinstance(rows, dict) else None
+    elif "backends" in payload:
+        rows = payload["backends"]
+        payload = rows.get(backend) if isinstance(rows, dict) else None
+    elif backend in payload:
+        payload = payload[backend]
+    elif not command:
+        provider = cfg.get("provider")
+        if backend != "pi" or provider not in (None, "minimax", "minimax-cn"): return False
+        payload = payload.get("minimax")
+        if isinstance(payload, dict) and any(key in payload for key in ("interval_pct", "weekly_pct")):
+            # health-loop's coding_plan/remains percentages are quota remaining,
+            # not usage. Both the short and weekly window must have headroom.
+            payload = dict(payload, five_hour={"remaining_pct": payload.get("interval_pct")},
+                           seven_day={"remaining_pct": payload.get("weekly_pct")})
+    elif any(key in payload for key in ("pi", "codex", "claude", "agy", "ocgo", "deepseek")):
+        return False
+
+    if not command:
+        observed_at = payload.get("observed_at") if isinstance(payload, dict) else None
+        if (not isinstance(observed_at, (int, float)) or isinstance(observed_at, bool)
+                or not math.isfinite(observed_at) or observed_at <= held_at
+                or not 0 <= time.time() - observed_at <= 900): return False
+
+    def available(row):
+        if not isinstance(row, dict): return False
+        if row.get("lane", lane) != lane or row.get("backend", backend) != backend: return False
+        if row.get("stale") is True: return False
+        states = []
+        exhausted = row.get("exhausted")
+        if isinstance(exhausted, bool): states.append(not exhausted)
+        for key, limit, remaining in (("used_percentage", 100, False), ("used_percent", 100, False),
+                                      ("remaining_pct", 100, True), ("used", 1, False)):
+            value = row.get(key)
+            if isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value):
+                states.append(0 < value <= limit if remaining else 0 <= value < limit)
+        # Only defined quota containers are inspected; metadata and sibling
+        # backends cannot establish availability. A null advertised window is unknown.
+        for key in ("five_hour", "seven_day", "window", "windows", "quota", "quotas", "rate_limits"):
+            if key in row:
+                child = row[key]
+                if key == "windows" and isinstance(child, dict):
+                    states.append(bool(child) and all(available(value) for value in child.values()))
+                else:
+                    states.append(available(child))
+        return bool(states) and all(states)
+
+    return available(payload)
+
+def budget_holds(state):
+    holds = state.get("_budget_requeue")
+    if not isinstance(holds, dict): holds = {}; state["_budget_requeue"] = holds
+    counts = state.get("_budget_failures")
+    if not isinstance(counts, dict): counts = {}; state["_budget_failures"] = counts
+    return holds, counts
+
+def clear_budget_history(state, issue):
+    """Forget the consecutive budget failures when a card reaches another terminal flow."""
+    holds, counts = budget_holds(state)
+    holds.pop(str(issue), None); counts.pop(str(issue), None)
+
+def release_recovered_budget_holds(state, lanes):
+    """Return held cards to lane-ready only after the window query confirms recovery."""
+    holds, _ = budget_holds(state)
+    for issue, hold in list(holds.items()):
+        if not isinstance(hold, dict): continue
+        lane = hold.get("lane")
+        cfg = lanes.get(lane, {})
+        if not hold.get("terminal_pending"):
+            recovered = budget_window_open(lane, cfg, hold)
+            held_at = hold.get("at")
+            if (not isinstance(held_at, (int, float)) or isinstance(held_at, bool)
+                    or not math.isfinite(held_at) or held_at > time.time()):
+                held_at = hold["at"] = time.time()
+            try:
+                max_hours = max(1, int(os.environ.get("AD_BUDGET_HOLD_MAX_HOURS", "6")))
+            except ValueError:
+                max_hours = 6
+            elapsed = time.time() - held_at
+            if not recovered and elapsed > max_hours * 3600:
+                hold["terminal_pending"] = True
+                hold["terminal_reason"] = "hold_expired"
+                hold["hold_hours"] = elapsed / 3600
+                save_state(state)
+            elif not recovered:
+                continue
+        if hold.get("terminal_pending"):
+            lane = hold.get("lane", "lane")
+            host = (lanes.get(lane) or {}).get("host", "unknown")
+            body = (f"Lane {lane} ({host}, run `{hold.get('run')}`) ended `{hold.get('status')}` without a commit "
+                    f"after {hold.get('tries')} budget-window failures (error_class `{hold.get('error_class')}`).\n\n"
+                    f"Executor summary: {hold.get('summary', '')}\n\nLabel `lane-failed`; re-add `lane-ready` to retry.")
+            rc, _, err = gh(["issue", "edit", str(issue), "--remove-label", "in-progress",
+                             "--remove-label", "lane-ready", "--add-label", "lane-failed"])
+            if rc:
+                log(f"budget failure #{issue}: terminal label write failed ({err.strip()[-120:]}); retaining hold", brain=False)
+                continue
+            if hold.get("terminal_reason") == "hold_expired":
+                body = (f"Budget hold expired after {hold['hold_hours']:.2f} hours without confirmed recovery "
+                        f"(hold_expired). Label `lane-failed`; re-add `lane-ready` to retry.")
+                log(f"budget hold #{issue}: {hold['hold_hours']:.2f} hours reason=hold_expired", brain=False)
+            gh(["issue", "comment", str(issue), "--body", body])
+            _, counts = budget_holds(state)
+            holds.pop(issue, None); counts.pop(str(issue), None)
+            mark_done(state, int(issue))
+            continue
+        rc, _, err = gh(["issue", "edit", str(issue), "--remove-label", "in-progress"])
+        if rc:
+            log(f"budget hold #{issue}: window recovered but labels could not be updated ({err.strip()[-120:]})", brain=False)
+            continue
+        holds.pop(issue, None)
+        log(f"budget hold #{issue}: backend window recovered; returned to lane-ready", brain=False)
+    save_state(state)
+
+def budget_failure(info):
+    """Recognize an executor budget death without classifying quota or real failures.
+
+    An explicit `error_class` is authoritative: a run the executor classified as a
+    real failure (or as a quota problem) keeps the ordinary failure flow, whatever
+    its status or its summary text says.  Only a run without an error class is
+    judged by the status and the summary.
+    """
+    error_class = str(info.get("error_class") or "").strip().lower()
+    if error_class: return error_class == "budget_exceeded"
+    if str(info.get("status") or "").strip().lower() == "budget_exceeded": return True
+    return bool(re.search(r"\b(?:budget_exceeded|token plan.{0,40}(?:limit|quota)|budget window exhausted)\b",
+                          str(info.get("summary") or ""), re.I))
+
+def terminal_budget_failure(n, lane, cfg, st, info, state, tries):
+    """Schedule the terminal label on the next tick; retain the durable count meanwhile."""
+    holds, _ = budget_holds(state)
+    holds[str(n)] = {"issue": n, "lane": lane, "run": st["run"], "tries": tries,
+                     "terminal_pending": True, "status": info.get("status"),
+                     "error_class": info.get("error_class"), "summary": info.get("summary", ""),
+                     "at": time.time()}
+    save_state(state)
+    return {"done": True, "status": "budget-terminal-pending", "error": None, "missing": []}
+
+def hold_budget_failure(lane, cfg, st, info, state):
+    """Free the lane while keeping the issue claimed until its backend window recovers."""
+    n = st["issue"]
+    holds, counts = budget_holds(state)
+    key = str(n)
+    tries = int(counts.get(key, 0) or 0) + 1
+    counts[key] = tries
+    maximum = int(os.environ.get("AD_BUDGET_REQUEUE_MAX", "2"))
+    if tries >= max(1, maximum):
+        return terminal_budget_failure(n, lane, cfg, st, info, state, tries)
+    holds[key] = {"issue": n, "lane": lane, "run": st["run"], "tries": tries,
+                  "at": time.time(), "summary": info.get("summary", "")}
+    save_state(state)
+    log(f"{lane} #{n} run {st['run']} budget-exceeded ({tries}/{maximum}); held pending window recovery", brain=False)
+    return {"done": True, "status": "budget-held", "error": None, "missing": []}
+
 def harvest_fetch(lane, n, fetch, st, cfg=None):
     """Fetch a finished lane branch with bounded attempts.
 
@@ -2299,6 +2602,132 @@ def block_pr_validation(lane, cfg, st, info, state, title, body, missing):
 # (.lane-review/PR-N.md).  The rules are a list constant: one more artifact kind is
 # one more pattern. This legacy AD owns its filtering rules.
 HARVEST_EXCLUDE_PATTERNS = [re.compile(r"(^|/)[^/]*\.so$"), re.compile(r"(^|/)\.lane-review/")]
+# The collapse guard of the fix/rebase harvest (Refs #1833).  A fix/rebase round that
+# does not continue on the head the PR had, but only produces an incremental patch,
+# replaces the whole PR when the AD pushes the harvest back (2026-11-03: #1807 8 files/
+# 1780 lines -> 1/11, #1804 6/1401 -> 3/39, #1715 8/868 -> 2/23, #1755 8/746 -> 1/19,
+# #1653 6/200 -> 2/19, #1824 9/835 -> 1/17).  Before such a push the AD checks:
+#   1. the new head contains the head the PR had before the round
+#      (`git merge-base --is-ancestor`), otherwise the harvest replaced the PR;
+#   2. the changed files and the changed lines relative to the base do not collapse:
+#      one of the two dimensions dropping by more than the threshold (50% by default)
+#      refuses the push (the dimensions are independent: "or", not "and");
+#   3. a failing git command refuses the push as well (fail closed);
+#   4. a card whose body cannot be read or parsed is not an empty card: without it the
+#      target PR of the round is unknown, so the harvest is refused.
+# A card that declares an overall rewrite is exempt.
+HARVEST_COLLAPSE_THRESHOLD = float(os.environ.get("AD_HARVEST_COLLAPSE_THRESHOLD", "0.5"))
+# The card of a fix/rebase round names the PR it works on ("重基PR：#1845 fleet/...").
+# Only such a card is compared with a PR head: an ordinary card that mentions a PR
+# must not be harvested against the head of a foreign PR.
+HARVEST_TARGET_PR = re.compile(
+    r"(?:重基\s*PR|(?:fix\s*/\s*rebase|rebase|fix)\s*(?:PR|pull\s+request))\s*[：:# ]+\s*#?(\d+)\b", re.I)
+HARVEST_REWRITE_MARKER = re.compile(r"整体重写\s*[:：]?\s*(?:是|true|yes|允许|豁免)", re.I)
+
+def harvest_card_body(issue):
+    """Read the card of an issue; returns (body, reason).
+
+    A reason means the card could not be read or parsed: that is not an empty card,
+    the caller must not treat it as one (Refs #1833)."""
+    try:
+        rc, out, err = gh(["issue", "view", str(issue), "--json", "body"])
+    except (OSError, subprocess.SubprocessError) as error:
+        return "", f"the card of #{issue} cannot be read: {error!r}"
+    if rc:
+        return "", f"the card of #{issue} cannot be read (gh rc={rc}): {err.strip()[-160:]}"
+    try:
+        payload = json.loads(out)
+    except ValueError as error:
+        return "", f"the card of #{issue} cannot be parsed: {error}"
+    body = payload.get("body") if isinstance(payload, dict) else None
+    if not isinstance(body, str):
+        return "", f"the card of #{issue} carries no body"
+    return body, ""
+
+def harvest_collapse_guard(issue, ref):
+    """Return (allowed, detail) for the harvest of a fix/rebase round (Refs #1833).
+
+    `ref` is the head that would actually be pushed after artifact filtering.
+    Rebuilt commits must also contain the old PR head. Every doubt refuses the push."""
+    body, reason = harvest_card_body(issue)
+    if reason: return False, reason
+    if HARVEST_REWRITE_MARKER.search(body):
+        return True, "the card declares an overall rewrite: the guard is waived"
+    match = HARVEST_TARGET_PR.search(body)
+    if not match:
+        return True, "the card names no target PR: there is nothing to compare with"
+    pr = match.group(1)
+    try:
+        # pr view exposes no baseRefOid. REST provides both SHAs in one response;
+        # call sh directly because gh api has no -R option (the gh helper adds it).
+        rc, out, err = sh(["gh", "api", f"repos/{REPO}/pulls/{pr}"], timeout=60)
+    except (OSError, subprocess.SubprocessError) as error:
+        return False, f"PR #{pr} cannot be read: {error!r}"
+    if rc:
+        return False, f"PR #{pr} cannot be read (gh rc={rc}): {err.strip()[-160:]}"
+    try:
+        pr_data = json.loads(out)
+        old, base = pr_data["head"]["sha"], pr_data["base"]["sha"]
+        if not isinstance(old, str) or not isinstance(base, str) or not old or not base:
+            raise ValueError("missing PR head/base SHA")
+    except (ValueError, KeyError, TypeError) as error:
+        return False, f"PR #{pr} metadata cannot be parsed: {error}"
+
+    def git(*args):
+        code, stdout, stderr = sh(["git", "-C", LOCAL, *args])
+        if code: raise RuntimeError(stderr.strip()[-160:] or f"git {args[0]} failed")
+        return stdout.strip()
+    try:
+        new_sha = git("rev-parse", "--verify", f"{ref}^{{commit}}")
+        before_size = diff_size(base, old)
+        after_size = diff_size(base, ref)
+    except (RuntimeError, OSError, subprocess.SubprocessError) as error:
+        return False, f"PR #{pr} cannot be checked: {error}"
+    ancestry_failure = (f"PR #{pr}: the ancestry check failed, refusing the push "
+                        f"({old[:12]}->{new_sha[:12]}, sizes {before_size}->{after_size})")
+    try:
+        rc, _, err = sh(["git", "-C", LOCAL, "merge-base", "--is-ancestor", old, new_sha])
+    except (OSError, subprocess.SubprocessError) as error:
+        return False, f"{ancestry_failure}: {error}"
+    if rc == 1:
+        return False, (f"PR #{pr}: the new head {new_sha[:12]} does not contain "
+                       f"the head the PR had {old[:12]} (sizes {before_size}->{after_size})")
+    if rc:
+        return False, f"{ancestry_failure}: {err.strip()[-160:]}"
+    reasons = []
+    for name, index in (("files", 0), ("lines", 1)):
+        before, after = before_size[index], after_size[index]
+        if before and after < before * (1 - HARVEST_COLLAPSE_THRESHOLD):
+            reasons.append(f"{name} collapsed {before}->{after}")
+    if reasons:
+        return False, (f"PR #{pr}: the change collapsed ({'; '.join(reasons)}), sizes "
+                       f"{before_size}->{after_size} ({old[:12]}->{new_sha[:12]})")
+    return True, (f"PR #{pr}: the new head {new_sha[:12]} contains the head the PR had {old[:12]} "
+                  f"and the size holds ({before_size}->{after_size})")
+
+def harvest_guard_record(run, detail):
+    """Append the verdict of the guard to the run log: the failure trail of the AD.
+
+    The brain log carries the verdict for the operator, the run log keeps it next to
+    the run the lane produced (Refs #1833)."""
+    try:
+        os.makedirs(f"{D}/runs", exist_ok=True)
+        with open(f"{D}/runs/{run}.log", "a") as f:
+            f.write(f"{time.strftime('%F %T')} harvest-collapse-guard: {detail}\n")
+    except OSError as e:
+        log(f"run {run}: harvest guard record not written ({e!r})", brain=False)
+
+def diff_size(base, head):
+    """Count changed paths and inserted+deleted lines relative to base."""
+    rc, paths, err = sh(["git", "-C", LOCAL, "diff", "--no-renames", "--name-only", base, head])
+    if rc: raise RuntimeError(err.strip()[-160:] or "git diff name-only failed")
+    rc, stats, err = sh(["git", "-C", LOCAL, "diff", "--no-renames", "--numstat", base, head])
+    if rc: raise RuntimeError(err.strip()[-160:] or "git diff numstat failed")
+    lines = 0
+    for row in stats.splitlines():
+        added, deleted, *_ = row.split("\t")
+        if added.isdigit() and deleted.isdigit(): lines += int(added) + int(deleted)
+    return len(paths.splitlines()) if paths else 0, lines
 
 def filter_harvest(ref, base):
     """Rebuild the harvested branch without the artifacts that never enter a PR.
@@ -2353,6 +2782,15 @@ def filter_harvest(ref, base):
             parent = git("commit-tree", tree, "-p", parent, env=commit_env, inp=message).strip().decode()
     return parent, removed, tree_of(parent) == tree_of(base)
 
+def requeue_executor_start_failure(lane, n, run):
+    """Requeue an executor startup failure without counting a task attempt."""
+    rc, _, err = gh(["issue", "edit", str(n), "--remove-label", "in-progress",
+                     "--remove-label", "lane-failed", "--add-label", "lane-ready"])
+    if rc:
+        return {"done": False, "status": "requeue-failed", "error": err, "missing": []}
+    log(f"{lane} executor failed to start #{n} (run {run}) → lane-ready, lane paused 600s")
+    return {"done": True, "status": "lane-ready", "error": None, "missing": []}
+
 def origin_branch_head(branch):
     """Return the head commit of a branch on origin ("" when the branch is not there).
 
@@ -2399,6 +2837,11 @@ def finish(lane, cfg, st, info, state):
     "missing": [...]}. `done` means the lane slot is free again; `error` carries the
     explicit reason back to the caller (Refs #1704)."""
     n, run = st["issue"], st["run"]
+    if info.get("error_class") == "executor_start_failed":
+        pause_executor_start_lane(lane)
+        # Even a commit made during the startup grace period is not a completed
+        # task. Leave the run's work intact and return the card for another attempt.
+        return requeue_executor_start_failure(lane, n, run)
     if st.get("class") == "verify":
         missing = review_evidence_errors(info.get("evidence"))
         if missing:
@@ -2411,16 +2854,37 @@ def finish(lane, cfg, st, info, state):
         try:
             head, removed, empty = filter_harvest(f"refs/fleet/{lane}", st.get("base"))
         except (OSError, subprocess.SubprocessError, RuntimeError) as error:
-            # fail closed: an undecided filter never pushes anything
-            log(f"{lane} #{n} run {run} harvest filter failed: {error}")
-            return {"done": False, "status": "filter-failed", "error": str(error), "missing": []}
+            # Fail closed before the collapse guard as well: record the refusal and
+            # release the lane instead of retrying an uncheckable harvest forever.
+            detail = f"harvest filter failed: {error}"
+            harvest_guard_record(run, detail)
+            log(f"{lane} #{n} run {run} {detail}")
+            label_lane_failed(n, f"Lane {lane} run `{run}` harvest refused: {detail}\n\n"
+                               "Label `lane-failed`; re-add `lane-ready` to retry.")
+            mark_done(state, n)
+            return {"done": True, "status": "filter-failed", "error": str(error), "missing": []}
         if removed:
             log(f"{lane} #{n} run {run} harvest excluded: {json.dumps(removed, ensure_ascii=True)}")
+        # An empty diff can be a fix that undoes the entire PR. Check it before
+        # the empty-harvest exit so the refusal records the PR, heads and sizes.
+        allowed, guard_detail = harvest_collapse_guard(n, head)
+        if not allowed:
+            log(f"{lane} #{n} run {run} harvest collapse guard rejected: {guard_detail}")
+            harvest_guard_record(run, guard_detail)
+            label_lane_failed(n, f"Lane {lane} run `{run}` harvest refused by #1833 collapse guard: {guard_detail}\n\nLabel `lane-failed`; re-add `lane-ready` to retry.")
+            mark_done(state, n)
+            return {"done": True, "status": "harvest-collapse-rejected", "error": guard_detail, "missing": []}
         if empty:
-            label_lane_failed(n, f"Lane {lane} run `{run}` has no effective change after the artifact filter "
-                               f"({len(removed)} excluded path(s)).\n\nLabel `lane-failed`; re-add `lane-ready` to retry.")
+            detail = (f"no effective change after the artifact filter ({len(removed)} excluded path(s)); "
+                      f"{guard_detail}")
+            log(f"{lane} #{n} run {run} harvest refused: {detail}")
+            harvest_guard_record(run, detail)
+            label_lane_failed(n, f"Lane {lane} run `{run}` has {detail}.\n\n"
+                               "Label `lane-failed`; re-add `lane-ready` to retry.")
+            clear_budget_history(state, n)
             mark_done(state, n)
             return {"done": True, "status": "lane-failed", "error": "empty after artifact filtering", "missing": []}
+        log(f"{lane} #{n} run {run} harvest collapse guard: {guard_detail}", brain=False)
         pushed, push_error = harvest_push(lane, n, b, head)
         if not pushed: return {"done": False, "status": "push-failed", "error": push_error, "missing": []}
         _, lj, _ = gh(["issue", "view", str(n), "--json", "labels"])
@@ -2446,12 +2910,16 @@ def finish(lane, cfg, st, info, state):
         rc, out, err = gh(["pr", "create", "--base", "main", "--head", b, "--title", title, "--body", body])
         url = (out.strip().splitlines() or [""])[-1] if not rc else f"(pr create failed: {err.strip()[-160:]})"
         gh(["issue", "edit", str(n), "--remove-label", "in-progress", "--remove-label", "lane-ready", "--add-label", "lane-pr"])
+        clear_budget_history(state, n)
         record_verify_time(state, n, "evidence_ready")
         log(f"{lane} finished #{n} (run {run}, {info.get('status')}) → {url}"); mark_done(state, n)
         return {"done": True, "status": "pr-created", "error": None, "missing": []}
     else:
+        if budget_failure(info):
+            return hold_budget_failure(lane, cfg, st, info, state)
         label_lane_failed(n, f"Lane {lane} ({cfg['host']}, run `{run}`) ended `{info.get('status')}` without a commit "
             f"(error_class `{info.get('error_class')}`).\n\nExecutor summary: {info.get('summary')}\n\nLabel `lane-failed`; re-add `lane-ready` to retry.")
+        clear_budget_history(state, n)
         mark_done(state, n); log(f"{lane} ended #{n} without a commit (run {run}, {info.get('status')}/{info.get('error_class')}) → labelled lane-failed")
         return {"done": True, "status": "lane-failed", "error": None, "missing": []}
 
@@ -2658,6 +3126,7 @@ def run_tick(lanes, state, last_warn, publisher):
         release_unreachable_pauses(h, host_pause_paths(h, lanes_of_host(lanes, h)))
         mark_recovery_runs(state, h, lanes)
         scopes = paused_scopes()  # the released pause opens the host again
+    release_recovered_budget_holds(state, lanes)
     publisher.publish(res=res, phase="harvest")  # the remote probe of every lane is done
     q = None
     queue_failed = False
@@ -2676,20 +3145,22 @@ def run_tick(lanes, state, last_warn, publisher):
         nonlocal q, queue_failed, queue_error
         if q is not None: return True
         if queue_failed: return False
-        try: q = queue()
+        try: q = queue(state)
         except Exception as e:
             queue_failed = True; queue_error = str(e)
             log(f"queue error: {e}", brain=False)
             return False
-        for i in q: i["deps_ok"] = deps_met(i)
+        save_state(state)  # admission clocks survive --once and failures later in the tick
+        for i in q:
+            if "deps_ok" not in i: i["deps_ok"] = deps_met(i)
         metrics = verify_metrics(state)
         for item in q:
             if item.get("verify"):
                 # Use the order time, including time spent waiting while AD was stopped.
                 queued = item.get("queued")
                 metrics["cards"].setdefault(str(item["n"]), {"issue": item["n"], "queued": now if queued is None else queued})
-        # one authoritative read per issue per tick, shared by all dispatches and the count
-        prefetch_labels([i["n"] for i in q])
+        # Dispatch reads labels in score order before freshen_queue uses the remaining
+        # read budget. Prefetching by issue number can starve a high-scoring old card.
         q = freshen_queue(q, state)
         blocked = sum(not i["deps_ok"] for i in q)
         publisher.publish(res=res, ready=len(q) - blocked, blocked=blocked, phase="deps")
@@ -2779,6 +3250,7 @@ def run_tick(lanes, state, last_warn, publisher):
         record = {"issue": pick["n"], "run": run, "host": cfg["host"], "base": commit, "at": time.strftime("%F %T"), "verify": ver, "class": "verify" if pick.get("verify") else "work"}
         with publisher._lock:
             state[L] = record
+            state["_pool_entered_at"].pop(str(pick["n"]), None)
             metrics = verify_metrics(state)
             # The snapshot and saved state must reflect the slot just occupied.
             if AD_VERIFY_SHARE_ENABLED: metrics["deficit"] = queue_class_limits(lanes, state, idle)[0]
@@ -2795,7 +3267,9 @@ def run_tick(lanes, state, last_warn, publisher):
             if idle_s > IDLE_LOG_MIN_S:
                 log(f"{L} idle {idle_s:.0f}s before dispatch (reason: {reason})", brain=True)
         if AD_VERIFY_SHARE_ENABLED: log(f"queue share: dispatched {state[L]['class']} #{pick['n']} on {L}", brain=False)
-        save_state(state); log(f"dispatched #{pick['n']} → {L} ({cfg['host']}) run {run} base {commit[:8]}")
+        score, basis = priority_score(cfg["backend"], pick)
+        save_state(state); log(f"dispatched #{pick['n']} → {L} ({cfg['host']}) run {run} base {commit[:8]} "
+                               f"priority={score:g} basis={json.dumps(basis, sort_keys=True)}")
         return "dispatched"
 
     # 1) Re-dispatch each freed lane before harvesting the next one (Refs #1688).
@@ -2811,6 +3285,9 @@ def run_tick(lanes, state, last_warn, publisher):
             # the run ended: the lane is idle from its own end time on (Refs #1688)
             idle_open(state, L, r["run"].get("ended_at"), now, last_alive)
             result = finish(L, lanes[L], st, r["run"], state)
+            # the harvest may have cooled down a lane (a startup failure pauses its
+            # lane): the pause must be visible to the rest of this tick
+            scopes = paused_scopes()
             if result.get("done"):
                 recovery_runs(state).pop(L, None)
                 state.pop(L); save_state(state); freed = True
@@ -2851,6 +3328,7 @@ def run_tick(lanes, state, last_warn, publisher):
         idle_account(state, L, window, now, outcomes.get(L, "no-capacity"), last_alive)
     # stale search rows are not dispatchable: drop them (and log the skip) before counting
     q = freshen_queue(q, state)
+    state["_pool_entered_at"] = {str(item["n"]): item["pool_entered_at"] for item in q if item.get("deps_ok", True) and "pool_entered_at" in item}
     blocked = sum(not i["deps_ok"] for i in q)
     memory_blocks = {}
     for item in q:

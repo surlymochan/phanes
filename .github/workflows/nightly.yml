@@ -1,0 +1,55 @@
+name: Nightly Swrm
+on:
+  schedule:
+    - cron: '0 20 * * *'
+  workflow_dispatch:
+concurrency:
+  group: nightly-swrm
+  cancel-in-progress: false
+permissions:
+  contents: read
+jobs:
+  swrm:
+    name: Swrm tests (${{ matrix.os }}, Python ${{ matrix.python }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, macos-latest]
+        python: ["3.9", "3.12", "3.14"]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - run: bash tools/ci-swrm.sh
+  report-failure:
+    needs: swrm
+    if: failure()
+    runs-on: ubuntu-24.04
+    permissions:
+      issues: write
+      actions: read
+    steps:
+      - uses: actions/github-script@v7
+        with:
+          script: |
+            const {owner, repo} = context.repo;
+            const date = new Date().toISOString().slice(0, 10);
+            const title = `Nightly 全矩阵失败 ${date}`;
+            const jobs = await github.paginate(github.rest.actions.listJobsForWorkflowRun, {
+              owner, repo, run_id: context.runId, filter: 'latest'
+            });
+            const failed = jobs.filter(job => job.conclusion === 'failure').map(job => job.name);
+            const body = `Run: ${context.serverUrl}/${owner}/${repo}/actions/runs/${context.runId}\n\n失败的 job:\n${failed.map(name => `- ${name}`).join('\n')}`;
+            const issues = await github.paginate(github.rest.issues.listForRepo, {
+              owner, repo, state: 'open', per_page: 100
+            });
+            const existing = issues.find(issue => !issue.pull_request && issue.title === title);
+            if (existing) {
+              await github.rest.issues.createComment({owner, repo, issue_number: existing.number, body});
+            } else {
+              await github.rest.issues.create({owner, repo, title, body});
+            }

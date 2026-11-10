@@ -57,6 +57,18 @@
     "state_ttl_minutes": 10,
     "breaker_minutes": 30
   },
+  "resources": {
+    "_doc": "Fleet health watermarks. `swrm fleet health` pauses a host over the pause watermark and releases it under the resume watermark (Refs #1367).",
+    "health": {
+      "disk_pause_pct": 95,
+      "disk_resume_pct": 92,
+      "inode_pause_pct": 95,
+      "inode_resume_pct": 92,
+      "mem_pause_mb": 512,
+      "mem_resume_mb": 640,
+      "ssh_fail_pause_streak": 3
+    }
+  },
   "routing": {
     "ocgo_first_types": [
       "mechanical",
