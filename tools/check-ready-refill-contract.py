@@ -137,7 +137,7 @@ def check_unreadable_queue_is_bounded(module, temp_dir):
     module.gh = lambda args, timeout=60: (0, "", "")
     module.sh = lambda *args, **kwargs: (0, "", "")
 
-    def broken_queue():
+    def broken_queue(*args, **kwargs):
         raise RuntimeError("gh: API rate limit exceeded")
 
     module.queue = broken_queue

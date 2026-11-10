@@ -258,7 +258,7 @@ class ReplenishTriggerTests(unittest.TestCase):
             if args[:2] == ["issue", "create"]:
                 server.append(args)  # the server created the issue either way
                 return answers.pop(0)
-            if args[:2] == ["issue", "list"] and "--search" in args:
+            if args[:2] == ["issue", "list"] and "--json" in args and "number,body,createdAt" in args:
                 return listing(server, args)
             return self.fake_gh(args)
 
@@ -267,7 +267,7 @@ class ReplenishTriggerTests(unittest.TestCase):
 
     @staticmethod
     def issue_of(args, number):
-        return {"number": number, "title": args[3], "body": args[5]}
+        return {"number": number, "title": args[3], "body": args[5], "createdAt": "2999-01-01T00:00:00Z"}
 
     def test_a_lost_create_answer_does_not_file_the_repo_card_twice_across_ticks(self):
         """The server creates the issue but the client sees a timeout: the next tick must find it, not file again."""
@@ -286,15 +286,12 @@ class ReplenishTriggerTests(unittest.TestCase):
         self.assertEqual(autodispatch.replenish(1, state), [])
         self.assertEqual(len(server), 1)
 
-    def test_a_pending_card_is_filed_again_only_after_the_search_had_time_to_find_it(self):
+    def test_a_pending_card_is_filed_again_only_when_the_listing_proves_it_is_missing(self):
+        """A short listing that holds no marker proves absence; only then is the card created again."""
         text, path, server, answers = self.lost_answer_setup("Never created", lambda server, args: (0, "[]", ""))
         answers += [(1, "", "connection refused"), (0, "https://example.com/issues/778", "")]
         state = {}
         self.assertEqual(autodispatch.replenish(1, state), [])
-        self.assertEqual(autodispatch.replenish(1, state), [])     # the index may lag: still waiting
-        self.assertEqual(len(server), 1)
-        for marker in state["_import_pending"]:
-            state["_import_pending"][marker] -= autodispatch.PENDING_WAIT + 1
         self.assertEqual(autodispatch.replenish(1, state), ["#778"])
         self.assertEqual(len(server), 2)
         self.assertEqual(state["_imported"], [path])
@@ -322,25 +319,39 @@ class ReplenishTriggerTests(unittest.TestCase):
         self.assertEqual(autodispatch.replenish(1, restart), ["#779(already filed)"])
         self.assertEqual(len(server), 1)
 
-    def test_a_full_search_page_without_the_marker_does_not_prove_the_card_is_missing(self):
-        others = [{"number": n, "title": "x", "body": "other"} for n in range(1, 101)]
-        text, path, server, answers = self.lost_answer_setup("Crowded", lambda server, args: (0, json.dumps(others), ""))
+    def test_a_full_page_that_does_not_reach_back_past_the_attempt_never_retries(self):
+        recent = [{"number": n, "title": "x", "body": "other", "createdAt": "2999-01-01T00:00:00Z"} for n in range(1, 201)]
+        text, path, server, answers = self.lost_answer_setup("Crowded", lambda server, args: (0, json.dumps(recent), ""))
         answers += [(1, "", "timeout")]
         state = {}
         self.assertEqual(autodispatch.replenish(1, state), [])
-        for marker in state["_import_pending"]:
-            state["_import_pending"][marker] -= autodispatch.PENDING_WAIT + 1
-        self.assertEqual(autodispatch.replenish(1, state), [])     # truncated: cannot tell, stays pending
+        for _ in range(3):
+            self.assertEqual(autodispatch.replenish(1, state), [])  # unknown: never created again, however long it takes
         self.assertEqual(len(server), 1)
+
+    def test_a_failed_listing_never_retries(self):
+        text, path, server, answers = self.lost_answer_setup("Unreadable", lambda server, args: (1, "", "rate limit"))
+        answers += [(1, "", "timeout")]
+        state = {}
+        for _ in range(3):
+            self.assertEqual(autodispatch.replenish(1, state), [])
+        self.assertEqual(len(server), 1)
+
+    def test_a_full_page_reaching_back_past_the_attempt_proves_absence(self):
+        old = [{"number": n, "title": "x", "body": "other", "createdAt": "2000-01-01T00:00:00Z"} for n in range(1, 201)]
+        text, path, server, answers = self.lost_answer_setup("Old page", lambda server, args: (0, json.dumps(old), ""))
+        answers += [(1, "", "timeout"), (0, "https://example.com/issues/781", "")]
+        state = {}
+        self.assertEqual(autodispatch.replenish(1, state), [])
+        self.assertEqual(autodispatch.replenish(1, state), ["#781"])
+        self.assertEqual(len(server), 2)
 
     def test_an_issue_of_the_same_title_from_another_card_is_not_taken_for_this_card(self):
         other = {"number": 5, "title": "Same title", "body": "written by hand"}
-        text, path, server, answers = self.lost_answer_setup("Same title", lambda server, args: (0, json.dumps([other]), ""))
+        text, path, server, answers = self.lost_answer_setup("Same title", lambda server, args: (0, json.dumps([dict(other, createdAt="2999-01-01T00:00:00Z")]), ""))
         answers += [(1, "", "timeout"), (0, "https://example.com/issues/780", "")]
         state = {}
         self.assertEqual(autodispatch.replenish(1, state), [])
-        for marker in state["_import_pending"]:
-            state["_import_pending"][marker] -= autodispatch.PENDING_WAIT + 1
         self.assertEqual(autodispatch.replenish(1, state), ["#780"])
         self.assertEqual(state["_imported"], [path])
 

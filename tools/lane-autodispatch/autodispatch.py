@@ -3290,19 +3290,25 @@ def file_issue(text, extra=()):
     return "#" + o.strip().rsplit("/", 1)[-1]
 
 CARD_MARK = "ad-card:"
-PENDING_WAIT = 600  # seconds a card stays pending while the search cannot find it yet (index lag)
+LOOKBACK_SKEW_S = 300  # clock skew allowed between this host and the server when a listing is used as proof
 
 def card_marker(key, text):
     """The identity of one card: its source and its text (written into the body of the issue)."""
     return hashlib.sha256((key + "\n" + text).encode("utf-8")).hexdigest()[:16]
 
-def find_issue_by_marker(marker):
-    """The issue whose body carries this card marker: "#N", "" when none exists, None when it cannot be told.
+def iso_epoch(value):
+    """Epoch seconds of a UTC ISO-8601 stamp such as 2026-11-10T01:02:03Z, else None."""
+    try: return datetime.strptime(str(value)[:19], "%Y-%m-%dT%H:%M:%S").replace(tzinfo=timezone.utc).timestamp()
+    except ValueError: return None
 
-    The search is capped: a full page without a match cannot prove that the issue does not exist."""
-    limit = 100
-    rc, o, _ = gh(["issue", "list", "--state", "all", "--search", f'"{CARD_MARK}{marker}" in:body',
-                   "--limit", str(limit), "--json", "number,body"])
+def find_issue_by_marker(marker, since):
+    """The issue whose body carries this card marker: "#N", "" when it provably does not exist, None when unknown.
+
+    The newest issues are listed (the list is read-your-writes consistent, unlike the search index, so a lag
+    cannot hide an issue). Absence is proven only when the page is not full or reaches back to before the
+    creation attempt (`since`, epoch seconds); otherwise the answer is unknown and the card must not be retried."""
+    limit = 200
+    rc, o, _ = gh(["issue", "list", "--state", "all", "--limit", str(limit), "--json", "number,body,createdAt"])
     if rc: return None
     try: rows = json.loads(o)
     except ValueError: return None
@@ -3310,31 +3316,33 @@ def find_issue_by_marker(marker):
     for row in rows:
         if isinstance(row, dict) and row.get("number") is not None and f"{CARD_MARK}{marker}" in str(row.get("body") or ""):
             return "#" + str(row["number"])
-    return None if len(rows) >= limit else ""
+    if len(rows) < limit: return ""
+    created = [iso_epoch(row.get("createdAt")) if isinstance(row, dict) else None for row in rows]
+    if created and all(c is not None for c in created) and min(created) <= float(since) - LOOKBACK_SKEW_S:
+        return ""
+    return None
 
 def file_issue_once(text, key, state):
     """File the card once, even when the answer of `gh issue create` is lost or the process stops (Refs #1662).
 
     The body of the issue carries a marker of the card. Before the call the card is persisted as pending;
     after it, in ONE save, the pending record is replaced by a done record, so a stop between the two
-    leaves either a pending card (looked up by its marker) or a done one, never nothing. A pending card
-    that the search does not find yet is retried until PENDING_WAIT has passed, because the search index
-    may lag behind the server. Returns the issue, or None when the card must wait for the next tick."""
+    leaves either a pending card (looked up by its marker) or a done one, never nothing. A pending card is
+    created again only when the listing of the newest issues proves that it does not exist; an unknown answer
+    (failed or truncated listing) never retries. Returns the issue, or None when the card must wait for the next tick."""
     pending = state.setdefault("_import_pending", {})
     done = state.setdefault("_import_done", {})
     marker = card_marker(key, text)
     if marker in done:
         return done[marker] + "(already filed)"
     if marker in pending:
-        found = find_issue_by_marker(marker)
+        found = find_issue_by_marker(marker, float(pending[marker]))
         if found is None:
-            log(f"card {key}: a pending creation cannot be checked (issue list failed or truncated); retried next tick", brain=False); return None
+            log(f"card {key}: a pending creation cannot be checked (issue list failed or truncated); not created again, checked next tick", brain=False); return None
         if found:
             done[marker] = found; pending.pop(marker, None); save_state(state)
             log(f"card {key}: the earlier creation reached the server as {found}; not filed again", brain=False)
             return found + "(already filed)"
-        if time.time() - float(pending[marker]) < PENDING_WAIT:
-            log(f"card {key}: a pending creation is not visible yet; retried next tick", brain=False); return None
     pending[marker] = time.time(); save_state(state)
     issue = file_issue(text.rstrip("\n") + f"\n\n<!-- {CARD_MARK}{marker} -->\n")
     done[marker] = issue; pending.pop(marker, None); save_state(state)
