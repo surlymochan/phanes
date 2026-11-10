@@ -114,7 +114,7 @@ class ReplenishTriggerTests(unittest.TestCase):
         needs = []
         self.patch("LOW", 30)
         self.patch("TARGET", 20)
-        self.patch("queue", lambda: [{"n": n, "body": ""} for n in range(25)])
+        self.patch("queue", lambda *args, **kwargs: [{"n": n, "body": ""} for n in range(25)])
         self.patch("prefetch_labels", lambda numbers: None)
         self.patch("freshen_queue", lambda q, state: q)
         self.patch("replenish", lambda k, state: needs.append(k) or [])
@@ -169,7 +169,7 @@ class ReplenishTriggerTests(unittest.TestCase):
 
     def test_the_tick_refills_the_pool_when_it_drops_below_the_threshold(self):
         needs = []
-        self.patch("queue", lambda: [])
+        self.patch("queue", lambda *args, **kwargs: [])
         self.patch("replenish", lambda k, state: needs.append(k) or [])
 
         autodispatch.tick({}, {}, 0)
@@ -365,7 +365,7 @@ class ReplenishUnreadableQueueTests(unittest.TestCase):
         self.needs = []
         self.patch("replenish", lambda k, state: self.needs.append(k) or ["#501"])
 
-        def broken_queue():
+        def broken_queue(*args, **kwargs):
             raise RuntimeError("gh: API rate limit exceeded")
 
         self.patch("queue", broken_queue)
@@ -419,7 +419,7 @@ class ReplenishUnreadableQueueTests(unittest.TestCase):
         state = {"_ready": 5}
         autodispatch.tick({}, state, 0)
 
-        self.patch("queue", lambda: [])
+        self.patch("queue", lambda *args, **kwargs: [])
         autodispatch.tick({}, state, 0)
 
         self.assertEqual(state["_queue_failures"], 0)
