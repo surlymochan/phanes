@@ -32,6 +32,17 @@ if marker and not os.path.exists(marker):
     ignore_probe = True
 
 
+# CX9 replay: discovery works but the first process cannot create sessions.
+session_failure = os.environ.get("FAKE_APP_SERVER_SESSION_FAILURE")
+session_marker = os.environ.get("FAKE_APP_SERVER_SESSION_FAILURE_ONCE_FILE")
+if session_marker:
+    if os.path.exists(session_marker):
+        session_failure = None
+    else:
+        with open(session_marker, "w") as stream:
+            stream.write("first server cannot create sessions")
+
+
 def probe_response(req):
     if not hung and not ignore_probe:
         response(req, {"data": []})
@@ -55,6 +66,14 @@ for line in sys.stdin:
     elif method == "initialized":
         continue
     elif method in ("thread/start", "thread/resume"):
+        if session_failure and method == "thread/start":
+            if session_failure == "error":
+                send({"jsonrpc": "2.0", "id": req.get("id"),
+                      "error": {"message": "fixture cannot create sessions"}})
+            continue
+        if str(req.get("id", "")).startswith("health-session-"):
+            response(req, {"thread": {"id": "health-thread"}})
+            continue
         cwd = params.get("cwd", cwd)
         model = params.get("model")
         send({"jsonrpc": "2.0", "method": "fixture/unrelated", "params": {"before": method}})
@@ -110,6 +129,10 @@ for line in sys.stdin:
             control = json.loads(control_line)
             if control.get("method") == "model/list":
                 probe_response(control)
+                continue
+            if (control.get("method") == "thread/start"
+                    and str(control.get("id", "")).startswith("health-session-")):
+                response(control, {"thread": {"id": "health-thread"}})
                 continue
             if control.get("method") == "turn/steer":
                 steered = (control.get("params", {}).get("input") or [{}])[0].get("text", "")

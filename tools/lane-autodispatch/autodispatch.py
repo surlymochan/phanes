@@ -1460,6 +1460,9 @@ out={"lane":None,"run":None}
 try:
   ls=json.load(open(f"{O}/lanes/{L}/state.json")); out["lane"]=ls.get("state"); out["current_run"]=ls.get("current_run")
   if R and ls.get("current_run")==R: out["last_activity"]=ls.get("last_activity")
+  out["server_alive"]=ls.get("server_alive")
+  out["server_last_success"]=ls.get("server_last_success")
+  out["server_restart_count"]=ls.get("server_restart_count",0)
 except Exception as e: out["lane"]="unknown"
 if R:
   p=f"{O}/runs/{R}/result.json"
@@ -2310,6 +2313,12 @@ def status_snapshot(lanes, state, res, ready, blocked, records=None):
     """Build the observable lane status row, including this process's stale skips."""
     lanes = lanes or {}
     status = {L: (("stale #%s (review required)" if "stale_since" in state[L] else "busy #%s") % state[L]["issue"]) if state.get(L) else (res[L].get("error") or res[L].get("lane") or "?") for L in lanes}
+    # Preserve legacy string rows; carry Codex server health separately.
+    status["_server_health"] = {
+        L: {"server_alive": res.get(L, {}).get("server_alive"),
+            "server_last_success": res.get(L, {}).get("server_last_success"),
+            "server_restart_count": res.get(L, {}).get("server_restart_count", 0)}
+        for L, cfg in lanes.items() if cfg.get("backend") == "codex"}
     status["_busy"] = sum(1 for L in lanes if state.get(L) and "stale_since" not in state[L])
     status["_stale"] = sum(1 for L in lanes if state.get(L) and "stale_since" in state[L])
     status["_ready"] = ready
