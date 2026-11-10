@@ -53,7 +53,7 @@ def _git(repo: Path, *args: str) -> subprocess.CompletedProcess:
 
 def extract_result_object(text: str) -> dict | None:
     decoder = json.JSONDecoder()
-    receipts = []
+    found = None
     for index, char in enumerate(text):
         if char != "{":
             continue
@@ -62,44 +62,13 @@ def extract_result_object(text: str) -> dict | None:
         except json.JSONDecodeError:
             continue
         if _is_result_receipt(obj):
-            receipts.append(obj)
-    if not receipts:
-        return None
-    # Telemetry objects can imitate a receipt (id + terminal status + run_dir).
-    # A real receipt carries run-result markers, so keep the best evidenced
-    # receipt and the latest one among equally evidenced receipts.
-    best = max(_receipt_evidence(obj) for obj in receipts)
-    for obj in reversed(receipts):
-        if _receipt_evidence(obj) == best:
-            return obj
-    return None
+            found = obj
+    return found
 
 
 def _is_event_record(obj: dict) -> bool:
     """Telemetry events carry an "event" field; a run receipt never does."""
     return "event" in obj
-
-
-def _receipt_evidence(obj: dict) -> int:
-    """Count the run-result markers a receipt candidate carries.
-
-    Bare objects that only look like a receipt (id + terminal status +
-    run_dir) carry no marker, so they lose against a real receipt. The run
-    directory of a run is named after the run id, so a matching name is a
-    marker as well.
-    """
-    evidence = 0
-    attempts = obj.get("attempts")
-    if isinstance(attempts, list) and attempts:
-        evidence += 1
-    if isinstance(obj.get("workspace"), dict):
-        evidence += 1
-    if isinstance(obj.get("decision"), dict):
-        evidence += 1
-    run_dir = obj.get("run_dir")
-    if isinstance(run_dir, str) and run_dir.strip() and Path(run_dir).name == obj.get("id"):
-        evidence += 1
-    return evidence
 
 
 def _is_result_receipt(obj: object) -> bool:
@@ -125,10 +94,20 @@ def _is_result_receipt(obj: object) -> bool:
             and "skipped" in decision and "planner" in decision and "profile" in decision
             and "scope" in obj):
         return True
-    # Statusless receipts must include executor attempts; run context alone is
-    # also common on unrelated telemetry events.
+    # Statusless receipts must include executor attempts and a top-level usage
+    # summary; run context alone is also common on unrelated telemetry events.
     attempts = obj.get("attempts")
-    return isinstance(attempts, list) and bool(attempts)
+    has_executor_attempts = isinstance(attempts, list) and bool(attempts) and all(
+        isinstance(attempt, dict)
+        and isinstance(attempt.get("backend"), str)
+        and bool(attempt["backend"].strip())
+        and "model" in attempt
+        and isinstance(attempt.get("meta"), dict)
+        for attempt in attempts
+    )
+    if not has_executor_attempts:
+        return False
+    return obj.get("status") in TERMINAL_STATUSES or looks_like_usage(obj.get("usage"))
 
 
 def executor_calls(result: dict) -> list[dict]:

@@ -190,12 +190,16 @@ class SwrmFinishReceiptTests(unittest.TestCase):
         self.assertEqual(extract_result_object(stdout), receipt)
         self.assertIsNone(extract_result_object(json.dumps(telemetry)))
 
-    def test_bare_telemetry_object_does_not_replace_the_receipt(self):
-        receipt = {"id": "run-123", "status": "done", "run_dir": "/tmp/swrm/runs/run-123"}
-        telemetry = {"id": "metrics-456", "status": "done", "run_dir": "/tmp/swrm/runs/run-123"}
-        stdout = json.dumps(receipt) + "\n" + json.dumps(telemetry)
+    def test_latest_valid_receipt_wins_over_older_richer_receipt(self):
+        old = {"id": "old", "status": "done", "run_dir": "runs/old",
+               "workspace": {"mode": "worktree"},
+               "attempts": [{"backend": "cursor", "model": "model", "meta": {}}]}
+        new = {"id": "new", "status": "done", "run_dir": "runs/new"}
 
-        self.assertEqual(extract_result_object(stdout), receipt)
+        self.assertEqual(extract_result_object(json.dumps(old) + "\n" + json.dumps(new)), new)
+
+    def test_statusless_null_attempt_is_not_a_receipt(self):
+        self.assertIsNone(extract_result_object(json.dumps({"id": "metrics", "attempts": [None]})))
 
     def test_finish_merges_the_receipt_branch_not_the_telemetry_branch(self):
         with tempfile.TemporaryDirectory() as temp:
