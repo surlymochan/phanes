@@ -2,6 +2,7 @@
 """The artifact filter of the harvest (Refs #1835): the artifacts of the lane (the hidden
 build leftovers, the review products) never enter a PR."""
 import importlib.util
+import json
 import os
 from pathlib import Path
 import subprocess
@@ -16,6 +17,12 @@ spec.loader.exec_module(ad)
 ARTIFACTS = {"swrm/tests/.dde4xxx-00000000.so": "binary\n",
              "swrm/lib/native-extension.so": "binary\n",
              ".lane-review/PR-1.md": "VERDICT: APPROVE\n"}
+
+
+def fake_gh(args, timeout=60):
+    """The AD reads the card before it pushes (Refs #1833): the fake answers with a card."""
+    if args[:2] == ["issue", "view"]: return 0, json.dumps({"body": "# card"}), ""
+    return 0, "", ""
 
 
 class HarvestFilterTest(unittest.TestCase):
@@ -86,7 +93,7 @@ class HarvestFilterTest(unittest.TestCase):
         st = {"issue": 1, "run": "run", "base": self.base}
         info = {"branch": "branch", "commit": "commit", "repo": "repo"}
         with mock.patch.object(ad, "harvest_fetch", return_value=(True, "", 0)), \
-             mock.patch.object(ad, "log") as log, mock.patch.object(ad, "gh", return_value=(0, "", "")), \
+             mock.patch.object(ad, "log") as log, mock.patch.object(ad, "gh", side_effect=fake_gh), \
              mock.patch.object(ad, "pr_validation_mode", return_value="warn"), \
              mock.patch.object(ad, "sh", return_value=(0, "", "")) as sh:
             result = ad.finish("lane", {"host": "host"}, st, info, {})
@@ -102,7 +109,7 @@ class HarvestFilterTest(unittest.TestCase):
         info = {"branch": "branch", "commit": "commit", "repo": "repo"}
         state = {}
         with mock.patch.object(ad, "harvest_fetch", return_value=(True, "", 0)), \
-             mock.patch.object(ad, "log"), mock.patch.object(ad, "gh", return_value=(0, "", "")), \
+             mock.patch.object(ad, "log"), mock.patch.object(ad, "gh", side_effect=fake_gh), \
              mock.patch.object(ad, "sh", return_value=(0, "", "")) as sh:
             result = ad.finish("lane", {"host": "host"}, st, info, state)
         self.assertEqual(result["status"], "lane-failed")

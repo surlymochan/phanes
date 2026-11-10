@@ -2106,6 +2106,132 @@ def block_pr_validation(lane, cfg, st, info, state, title, body, missing):
 # (.lane-review/PR-N.md).  The rules are a list constant: one more artifact kind is
 # one more pattern. This legacy AD owns its filtering rules.
 HARVEST_EXCLUDE_PATTERNS = [re.compile(r"(^|/)[^/]*\.so$"), re.compile(r"(^|/)\.lane-review/")]
+# The collapse guard of the fix/rebase harvest (Refs #1833).  A fix/rebase round that
+# does not continue on the head the PR had, but only produces an incremental patch,
+# replaces the whole PR when the AD pushes the harvest back (2026-11-03: #1807 8 files/
+# 1780 lines -> 1/11, #1804 6/1401 -> 3/39, #1715 8/868 -> 2/23, #1755 8/746 -> 1/19,
+# #1653 6/200 -> 2/19, #1824 9/835 -> 1/17).  Before such a push the AD checks:
+#   1. the new head contains the head the PR had before the round
+#      (`git merge-base --is-ancestor`), otherwise the harvest replaced the PR;
+#   2. the changed files and the changed lines relative to the base do not collapse:
+#      one of the two dimensions dropping by more than the threshold (50% by default)
+#      refuses the push (the dimensions are independent: "or", not "and");
+#   3. a failing git command refuses the push as well (fail closed);
+#   4. a card whose body cannot be read or parsed is not an empty card: without it the
+#      target PR of the round is unknown, so the harvest is refused.
+# A card that declares an overall rewrite is exempt.
+HARVEST_COLLAPSE_THRESHOLD = float(os.environ.get("AD_HARVEST_COLLAPSE_THRESHOLD", "0.5"))
+# The card of a fix/rebase round names the PR it works on ("重基PR：#1845 fleet/...").
+# Only such a card is compared with a PR head: an ordinary card that mentions a PR
+# must not be harvested against the head of a foreign PR.
+HARVEST_TARGET_PR = re.compile(
+    r"(?:重基\s*PR|(?:fix\s*/\s*rebase|rebase|fix)\s*(?:PR|pull\s+request))\s*[：:# ]+\s*#?(\d+)\b", re.I)
+HARVEST_REWRITE_MARKER = re.compile(r"整体重写\s*[:：]?\s*(?:是|true|yes|允许|豁免)", re.I)
+
+def harvest_card_body(issue):
+    """Read the card of an issue; returns (body, reason).
+
+    A reason means the card could not be read or parsed: that is not an empty card,
+    the caller must not treat it as one (Refs #1833)."""
+    try:
+        rc, out, err = gh(["issue", "view", str(issue), "--json", "body"])
+    except (OSError, subprocess.SubprocessError) as error:
+        return "", f"the card of #{issue} cannot be read: {error!r}"
+    if rc:
+        return "", f"the card of #{issue} cannot be read (gh rc={rc}): {err.strip()[-160:]}"
+    try:
+        payload = json.loads(out)
+    except ValueError as error:
+        return "", f"the card of #{issue} cannot be parsed: {error}"
+    body = payload.get("body") if isinstance(payload, dict) else None
+    if not isinstance(body, str):
+        return "", f"the card of #{issue} carries no body"
+    return body, ""
+
+def harvest_collapse_guard(issue, ref):
+    """Return (allowed, detail) for the harvest of a fix/rebase round (Refs #1833).
+
+    `ref` is the head that would actually be pushed after artifact filtering.
+    Rebuilt commits must also contain the old PR head. Every doubt refuses the push."""
+    body, reason = harvest_card_body(issue)
+    if reason: return False, reason
+    if HARVEST_REWRITE_MARKER.search(body):
+        return True, "the card declares an overall rewrite: the guard is waived"
+    match = HARVEST_TARGET_PR.search(body)
+    if not match:
+        return True, "the card names no target PR: there is nothing to compare with"
+    pr = match.group(1)
+    try:
+        # pr view exposes no baseRefOid. REST provides both SHAs in one response;
+        # call sh directly because gh api has no -R option (the gh helper adds it).
+        rc, out, err = sh(["gh", "api", f"repos/{REPO}/pulls/{pr}"], timeout=60)
+    except (OSError, subprocess.SubprocessError) as error:
+        return False, f"PR #{pr} cannot be read: {error!r}"
+    if rc:
+        return False, f"PR #{pr} cannot be read (gh rc={rc}): {err.strip()[-160:]}"
+    try:
+        pr_data = json.loads(out)
+        old, base = pr_data["head"]["sha"], pr_data["base"]["sha"]
+        if not isinstance(old, str) or not isinstance(base, str) or not old or not base:
+            raise ValueError("missing PR head/base SHA")
+    except (ValueError, KeyError, TypeError) as error:
+        return False, f"PR #{pr} metadata cannot be parsed: {error}"
+
+    def git(*args):
+        code, stdout, stderr = sh(["git", "-C", LOCAL, *args])
+        if code: raise RuntimeError(stderr.strip()[-160:] or f"git {args[0]} failed")
+        return stdout.strip()
+    try:
+        new_sha = git("rev-parse", "--verify", f"{ref}^{{commit}}")
+        before_size = diff_size(base, old)
+        after_size = diff_size(base, ref)
+    except (RuntimeError, OSError, subprocess.SubprocessError) as error:
+        return False, f"PR #{pr} cannot be checked: {error}"
+    ancestry_failure = (f"PR #{pr}: the ancestry check failed, refusing the push "
+                        f"({old[:12]}->{new_sha[:12]}, sizes {before_size}->{after_size})")
+    try:
+        rc, _, err = sh(["git", "-C", LOCAL, "merge-base", "--is-ancestor", old, new_sha])
+    except (OSError, subprocess.SubprocessError) as error:
+        return False, f"{ancestry_failure}: {error}"
+    if rc == 1:
+        return False, (f"PR #{pr}: the new head {new_sha[:12]} does not contain "
+                       f"the head the PR had {old[:12]} (sizes {before_size}->{after_size})")
+    if rc:
+        return False, f"{ancestry_failure}: {err.strip()[-160:]}"
+    reasons = []
+    for name, index in (("files", 0), ("lines", 1)):
+        before, after = before_size[index], after_size[index]
+        if before and after < before * (1 - HARVEST_COLLAPSE_THRESHOLD):
+            reasons.append(f"{name} collapsed {before}->{after}")
+    if reasons:
+        return False, (f"PR #{pr}: the change collapsed ({'; '.join(reasons)}), sizes "
+                       f"{before_size}->{after_size} ({old[:12]}->{new_sha[:12]})")
+    return True, (f"PR #{pr}: the new head {new_sha[:12]} contains the head the PR had {old[:12]} "
+                  f"and the size holds ({before_size}->{after_size})")
+
+def harvest_guard_record(run, detail):
+    """Append the verdict of the guard to the run log: the failure trail of the AD.
+
+    The brain log carries the verdict for the operator, the run log keeps it next to
+    the run the lane produced (Refs #1833)."""
+    try:
+        os.makedirs(f"{D}/runs", exist_ok=True)
+        with open(f"{D}/runs/{run}.log", "a") as f:
+            f.write(f"{time.strftime('%F %T')} harvest-collapse-guard: {detail}\n")
+    except OSError as e:
+        log(f"run {run}: harvest guard record not written ({e!r})", brain=False)
+
+def diff_size(base, head):
+    """Count changed paths and inserted+deleted lines relative to base."""
+    rc, paths, err = sh(["git", "-C", LOCAL, "diff", "--no-renames", "--name-only", base, head])
+    if rc: raise RuntimeError(err.strip()[-160:] or "git diff name-only failed")
+    rc, stats, err = sh(["git", "-C", LOCAL, "diff", "--no-renames", "--numstat", base, head])
+    if rc: raise RuntimeError(err.strip()[-160:] or "git diff numstat failed")
+    lines = 0
+    for row in stats.splitlines():
+        added, deleted, *_ = row.split("\t")
+        if added.isdigit() and deleted.isdigit(): lines += int(added) + int(deleted)
+    return len(paths.splitlines()) if paths else 0, lines
 
 def filter_harvest(ref, base):
     """Rebuild the harvested branch without the artifacts that never enter a PR.
@@ -2232,16 +2358,36 @@ def finish(lane, cfg, st, info, state):
         try:
             head, removed, empty = filter_harvest(f"refs/fleet/{lane}", st.get("base"))
         except (OSError, subprocess.SubprocessError, RuntimeError) as error:
-            # fail closed: an undecided filter never pushes anything
-            log(f"{lane} #{n} run {run} harvest filter failed: {error}")
-            return {"done": False, "status": "filter-failed", "error": str(error), "missing": []}
+            # Fail closed before the collapse guard as well: record the refusal and
+            # release the lane instead of retrying an uncheckable harvest forever.
+            detail = f"harvest filter failed: {error}"
+            harvest_guard_record(run, detail)
+            log(f"{lane} #{n} run {run} {detail}")
+            label_lane_failed(n, f"Lane {lane} run `{run}` harvest refused: {detail}\n\n"
+                               "Label `lane-failed`; re-add `lane-ready` to retry.")
+            mark_done(state, n)
+            return {"done": True, "status": "filter-failed", "error": str(error), "missing": []}
         if removed:
             log(f"{lane} #{n} run {run} harvest excluded: {json.dumps(removed, ensure_ascii=True)}")
+        # An empty diff can be a fix that undoes the entire PR. Check it before
+        # the empty-harvest exit so the refusal records the PR, heads and sizes.
+        allowed, guard_detail = harvest_collapse_guard(n, head)
+        if not allowed:
+            log(f"{lane} #{n} run {run} harvest collapse guard rejected: {guard_detail}")
+            harvest_guard_record(run, guard_detail)
+            label_lane_failed(n, f"Lane {lane} run `{run}` harvest refused by #1833 collapse guard: {guard_detail}\n\nLabel `lane-failed`; re-add `lane-ready` to retry.")
+            mark_done(state, n)
+            return {"done": True, "status": "harvest-collapse-rejected", "error": guard_detail, "missing": []}
         if empty:
-            label_lane_failed(n, f"Lane {lane} run `{run}` has no effective change after the artifact filter "
-                               f"({len(removed)} excluded path(s)).\n\nLabel `lane-failed`; re-add `lane-ready` to retry.")
+            detail = (f"no effective change after the artifact filter ({len(removed)} excluded path(s)); "
+                      f"{guard_detail}")
+            log(f"{lane} #{n} run {run} harvest refused: {detail}")
+            harvest_guard_record(run, detail)
+            label_lane_failed(n, f"Lane {lane} run `{run}` has {detail}.\n\n"
+                               "Label `lane-failed`; re-add `lane-ready` to retry.")
             mark_done(state, n)
             return {"done": True, "status": "lane-failed", "error": "empty after artifact filtering", "missing": []}
+        log(f"{lane} #{n} run {run} harvest collapse guard: {guard_detail}", brain=False)
         pushed, push_error = harvest_push(lane, n, b, head)
         if not pushed: return {"done": False, "status": "push-failed", "error": push_error, "missing": []}
         _, lj, _ = gh(["issue", "view", str(n), "--json", "labels"])
