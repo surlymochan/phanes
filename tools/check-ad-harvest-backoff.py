@@ -15,6 +15,7 @@ inside a scratch directory.  It never reads or writes the live lane state
 from __future__ import annotations
 
 import importlib.util
+import json
 import pathlib
 import subprocess
 import tempfile
@@ -29,13 +30,13 @@ TRANSIENT_ERRORS = (
     "fetch-pack: unexpected disconnect while reading sideband packet",
     "fatal: bad pack header at offset 0",
     "error: RPC failed; curl 92 HTTP/2 stream 5 was not closed cleanly",
-    "ssh: connect to host instabox port 22: Connection reset by peer",
+    "ssh: connect to host worker port 22: Connection reset by peer",
 )
 FATAL_ERROR = "fatal: could not read from remote repository"
 
 LANE = "M4"
 ISSUE = 947
-CFG = {"host": "instabox", "fleet": "fleet", "repo": "repo"}
+CFG = {"host": "worker", "fleet": "fleet", "repo": "repo"}
 INFO = {"branch": "fleet/M4-issue947-run947", "commit": "deadbeef", "status": "ok", "summary": "fake summary",
         "repo": "repo"}
 
@@ -113,6 +114,8 @@ class FakeHarvest:
 
     def _gh(self, args, timeout=60):
         self.gh_calls.append(list(args))
+        # the AD reads the card before it pushes (Refs #1833): the fake answers with a card
+        if args[:2] == ["issue", "view"]: return 0, json.dumps({"body": "# card"}), ""
         return 0, "", ""
 
     def lane_failed_edits(self):

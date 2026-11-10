@@ -8,6 +8,7 @@ scenario below is fake (no network, no git): the git calls are replaced by canne
 answers, so the check runs offline on any host.
 """
 import importlib.util
+import json
 from pathlib import Path
 from unittest import mock
 
@@ -49,7 +50,9 @@ def run_finish(ad, sh_impl):
          mock.patch.object(ad, "filter_harvest", return_value=(HEAD, [], False)), \
          mock.patch.object(ad, "pr_validation_mode", return_value="warn"), \
          mock.patch.object(ad, "log"), \
-         mock.patch.object(ad, "gh", return_value=(0, "", "")) as gh:
+         mock.patch.object(ad, "gh", side_effect=lambda args, timeout=60:
+                           (0, json.dumps({"body": "# card"}), "")
+                           if args[:2] == ["issue", "view"] else (0, "", "")) as gh:
         result = ad.finish("lane", {"host": "host"}, st, info, {})
     return result, gh
 
@@ -114,7 +117,8 @@ def main():
                      {"local_rc": 1}, {"push_err": "! [rejected] non-fast-forward"}):
         result, gh = run_finish(ad, fake_git(push_rc=1, **scenario))
         assert result["status"] == "push-failed" and not result["done"], result
-        gh.assert_not_called()
+        # The collapse guard reads the card body (read-only); nothing else may reach GitHub.
+        assert all(call.args[0][:2] == ["issue", "view"] for call in gh.call_args_list), gh.call_args_list
 
     # 10. whitespace-only stderr is empty; one push and one authoritative read
     #     of the exact destination suffice, with no repeated push in this harvest.
