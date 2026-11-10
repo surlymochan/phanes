@@ -8478,15 +8478,6 @@ def lane_codex_health_alert(lane, policy, reason):
     with open(os.path.join(lane_root(lane["name"]), "brain.jsonl"), "a") as f:
         f.write(json.dumps(alert, ensure_ascii=False) + "\n")
     print(f"ALERT lane {lane['name']} paused: {reason}", file=sys.stderr, flush=True)
-    command = (policy.get("lane_health_probe") or {}).get("alert_command")
-    if command:
-        try:
-            if not isinstance(command, list) or not all(isinstance(arg, str) for arg in command):
-                raise ValueError("lane_health_probe.alert_command must be an argv list")
-            subprocess.run(command, input=json.dumps(alert), text=True, capture_output=True,
-                           timeout=5, check=True)
-        except (OSError, ValueError, subprocess.SubprocessError) as e:
-            print(f"ALERT delivery failed for lane {lane['name']}: {e}", file=sys.stderr, flush=True)
 
 
 def lane_start_codex_health_monitor(lane, child, policy):
