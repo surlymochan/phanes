@@ -1396,7 +1396,90 @@ def save_state(s):
     with open(tmp, "w") as stream: json.dump(s, stream, indent=1, ensure_ascii=False)
     os.replace(tmp, f"{D}/state.json")
 def gh(args, timeout=60):
-    return sh(["gh"] + args + ["-R", REPO], timeout=timeout)
+    return sh(["gh"] + args + ([] if args[0] == "api" else ["-R", REPO]), timeout=timeout)
+
+# Refs #1772: port the old paginated lookup, without its stale map cache.
+def open_pr_for_issue(n, runner=None, repo=None):
+    """Return an OPEN PR number, or None; every failed/incomplete read raises."""
+    runner = runner or gh; repo = repo or REPO
+    owner, name = repo.split("/")
+    cursor, seen = "", set()
+    while True:
+        query = ('query{repository(owner:%s,name:%s){pullRequests(states:OPEN,first:100%s){'
+                 'nodes{number state body headRefName closingIssuesReferences(first:100){nodes{number}}}'
+                 'pageInfo{hasNextPage endCursor}}}}' %
+                 (json.dumps(owner), json.dumps(name), ',after:' + json.dumps(cursor) if cursor else ''))
+        # api does not accept -R; the injected runner follows the normal gh contract.
+        rc, out, err = runner(["api", "graphql", "-f", "query=" + query])
+        if rc: raise RuntimeError("open PR lookup failed")
+        data = json.loads(out)
+        if data.get("errors"): raise RuntimeError("open PR GraphQL errors")
+        connection = data["data"]["repository"]["pullRequests"]
+        for pr in connection["nodes"]:
+            if pr.get("state") != "OPEN": continue
+            linked = {row["number"] for row in pr["closingIssuesReferences"]["nodes"]}
+            linked.update(int(m.group(1)) for m in CLOSING_RE.finditer(pr.get("body") or ""))
+            linked.update(int(x) for x in re.findall(r"(?:^|[/\-])issue([1-9]\d*)(?=[-/_]|$)", pr.get("headRefName") or ""))
+            if int(n) in linked: return pr["number"]
+        page = connection["pageInfo"]
+        if not page["hasNextPage"]: return None
+        cursor = page["endCursor"]
+        if not cursor or cursor in seen: raise RuntimeError("open PR pagination did not advance")
+        seen.add(cursor)
+
+def pr_allows_requeue(n):
+    pr = open_pr_for_issue(n)
+    if pr is None: return True
+    log(f"skip #{n}: open PR #{pr} already delivers it; not dispatched/requeued", brain=False)
+    if not ensure_delivery_state(n): raise RuntimeError("lane-pr repair unverified")
+    return False
+
+def clear_workflow_label(n, label):
+    rc, _, _ = gh(["issue", "edit", str(n), "--remove-label", label])
+    status, detail = read_issue(n)
+    if rc or status == "error" or label in label_names(detail):
+        raise RuntimeError(f"{label} removal unverified")
+
+def guarded_requeue(n):
+    """Fail closed before writes; undo and verify uncertain writes afterwards."""
+    try:
+        if not pr_allows_requeue(n): return True
+        rc, _, _ = gh(["issue", "edit", str(n), "--remove-label", "in-progress",
+                       "--remove-label", "lane-failed", "--add-label", "lane-ready"])
+        if rc: return False
+        try: pr_allows_requeue(n)
+        except Exception:
+            clear_workflow_label(n, "lane-ready")
+            raise
+        return True
+    except Exception as exc:
+        log(f"WARNING #{n} requeue unverified ({exc}); retry next tick", brain=True)
+        return False
+
+def cancel_guarded_dispatch(lane, cfg, st):
+    """Keep the lane claimed until abort and fresh remote state confirm it stopped."""
+    try:
+        probe = remote(lane, cfg, st["run"])
+        if probe.get("runner_alive") is False and probe.get("lane") == "idle":
+            if not pr_allows_requeue(st["issue"]): return True
+            clear_workflow_label(st["issue"], "in-progress")
+            return True
+        rc, out, _ = sh(ssh_argv(ssh_opts(cfg["host"]), cfg["host"],
+                              f"{cfg.get('fleet', '~/.local/bin/swrm-fleet')} stop {shlex.quote(st['run'])}"))
+        if rc or not json.loads(out).get("signalled"): raise RuntimeError("abort not acknowledged")
+        probe = remote(lane, cfg, st["run"])
+        if probe.get("runner_alive") is not False or probe.get("lane") != "idle":
+            raise RuntimeError("run termination unverified")
+        if not pr_allows_requeue(st["issue"]): return True
+        clear_workflow_label(st["issue"], "in-progress")
+        return True
+    except Exception as exc:
+        log(f"WARNING #{st['issue']} dispatch cancellation unverified ({exc}); retry next tick", brain=True)
+        try:
+            clear_workflow_label(st["issue"], "in-progress")
+            clear_workflow_label(st["issue"], "lane-ready")
+        except Exception as error: log(f"WARNING #{st['issue']} cleanup failed ({error})", brain=True)
+        return False
 
 # Ported from refs/old/1774; only workflow labels participate in delivery.
 DELIVERY_LABELS = {"lane-ready", "in-progress", "lane-pr"}
@@ -1925,8 +2008,7 @@ def requeue_lost_run(L, st, r, state, why="orphaned"):
     try: j = json.loads(out); labels = {l["name"] for l in j["labels"]}
     except Exception: return False
     if j["state"] == "OPEN" and "lane-pr" not in labels:
-        rc, _, _ = gh(["issue", "edit", str(n), "--remove-label", "in-progress", "--add-label", "lane-ready"])
-        if rc: return False
+        if not guarded_requeue(n): return False
         what = "requeued (lane-ready)"
     else: what = f"already {j['state'].lower()}/{'lane-pr' if 'lane-pr' in labels else '-'}; dropped"
     log(f"{L} #{n} run {st['run']} {why} (remote lane {r.get('lane')}, current_run={r.get('current_run')}, run_state={r.get('run_state')}, runner dead) → {what}")
@@ -2934,7 +3016,8 @@ def release_recovered_budget_holds(state, lanes):
             holds.pop(issue, None); counts.pop(str(issue), None)
             mark_done(state, int(issue))
             continue
-        rc, _, err = gh(["issue", "edit", str(issue), "--remove-label", "in-progress"])
+        rc = not guarded_requeue(int(issue))
+        err = "PR guard unverified"
         if rc:
             log(f"budget hold #{issue}: window recovered but labels could not be updated ({err.strip()[-120:]})", brain=False)
             continue
@@ -3060,10 +3143,11 @@ def block_pr_validation(lane, cfg, st, info, state, title, body, missing, error_
               "at": time.strftime("%F %T")}
     record_pr_validation(cfg, run, record)
     state["_pr_validation"] = (state.get("_pr_validation", []) + [record])[-200:]
-    gh(["issue", "edit", str(n), "--remove-label", "in-progress", "--remove-label", "lane-failed", "--add-label", "lane-ready"])
+    requeued = guarded_requeue(n)
     gh(["issue", "comment", str(n), "--body", f"Lane {lane} (run `{run}`) 的 PR 未通过提交前校验，未创建 PR：\n\n"
         + "".join(f"- {item}\n" for item in missing)
-        + f"\n按可快速修复类（`{error_class}`）处理，不计评审轮次，不计入 lane-failed 统计；已重新标记 `lane-ready`。"])
+        + f"\n按可快速修复类（`{error_class}`）处理，不计评审轮次，不计入 lane-failed 统计；重排结果：{'已核验' if requeued else '待下周期重试'}。"])
+    if not requeued: return {"done": False, "status": "requeue-pending", "error": "PR guard unverified", "missing": list(missing)}
     mark_done(state, n)
     return {"done": True, "status": "delivery-map-failed" if error_class == DELIVERY_MAP_CLASS else "pr-validation-failed",
             "error": f"PR 提交前校验未通过（{PR_VALIDATION_STRICT}）：{'；'.join(missing)}",
@@ -3256,10 +3340,8 @@ def filter_harvest(ref, base):
 
 def requeue_executor_start_failure(lane, n, run):
     """Requeue an executor startup failure without counting a task attempt."""
-    rc, _, err = gh(["issue", "edit", str(n), "--remove-label", "in-progress",
-                     "--remove-label", "lane-failed", "--add-label", "lane-ready"])
-    if rc:
-        return {"done": False, "status": "requeue-failed", "error": err, "missing": []}
+    if not guarded_requeue(n):
+        return {"done": False, "status": "requeue-failed", "error": "PR guard unverified", "missing": []}
     log(f"{lane} executor failed to start #{n} (run {run}) → lane-ready, lane paused 600s")
     return {"done": True, "status": "lane-ready", "error": None, "missing": []}
 
@@ -3733,6 +3815,12 @@ def run_tick(lanes, state, last_warn, publisher):
             if c not in eligible: continue
             status, detail = label_state(c["n"])
             if status == "fresh":
+                try:
+                    if not pr_allows_requeue(c["n"]):
+                        q.remove(c); continue
+                except Exception as exc:
+                    log(f"WARNING skip #{c['n']}: PR lookup/repair failed ({exc})", brain=True)
+                    continue
                 if hot_verdict(c.get("body", ""), hot_inflight(state))["blocked"]: continue
                 pick = c; break
             if status == "stale":
@@ -3784,12 +3872,24 @@ def run_tick(lanes, state, last_warn, publisher):
         if pick.get("verify"):
             state.setdefault("_review_queued", {})[L] = {"issue": pick["n"]}
             save_state(state)
-        try: run, ver = dispatch(L, cfg, pick, commit)
+        try:
+            if not pr_allows_requeue(pick["n"]): return "no-card"
+            run, ver = dispatch(L, cfg, pick, commit)
         except Exception as e:
             if pick.get("verify"):
                 state["_review_queued"].pop(L, None)
                 save_state(state)
             dispatch_failed(L, cfg, pick, e, busy=bool(LANE_BUSY_RE.search(str(e))))
+            return "no-capacity"
+        try: allowed = pr_allows_requeue(pick["n"])
+        except Exception as exc:
+            log(f"WARNING #{pick['n']} post-dispatch PR lookup failed ({exc}); cancelling", brain=True)
+            allowed = False
+        if not allowed:
+            pending = {"issue": pick["n"], "run": run, "cancel_pending": True}
+            state[L] = pending; save_state(state)
+            if cancel_guarded_dispatch(L, cfg, pending): state.pop(L); save_state(state)
+            q.remove(pick)
             return "no-capacity"
         if L != asked: outcomes[L] = "dispatched"
         q.remove(pick)
@@ -3836,6 +3936,10 @@ def run_tick(lanes, state, last_warn, publisher):
         st = state.get(L)
         if "error" in r: continue
         freed = False
+        if st and st.get("cancel_pending"):
+            if cancel_guarded_dispatch(L, lanes[L], st): state.pop(L); save_state(state)
+            outcomes[L] = "no-capacity"
+            continue
         if not st:
             recovery_runs(state).pop(L, None)  # the lane is free: nothing left to verify
         elif isinstance(r.get("run"), dict):

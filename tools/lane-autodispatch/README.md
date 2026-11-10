@@ -386,3 +386,27 @@ REPORT: dropped — 旧 .lane-review 文件载体已由 main 过滤，按 issue 
 
 验证：`python3 -m unittest discover -s tools/tests -p 'test_lane_pr*.py'`；
 `python3 -m unittest discover -s tools/lane-autodispatch -p 'test_*.py'`。
+
+## 开放 PR 重派守卫（#1772 B/2）
+
+`open_pr_for_issue(n)` 移植旧 #1774 的 OPEN 分页查询，不缓存结果。重排写入前后、候选选择和紧邻 dispatch 前后均检查；未知状态阻断操作。复用 A 卡的换标核验，保留非流转标签。派发事后状态未知也撤销 run，撤销须经远端实读确认；失败保留 `cancel_pending`，下周期先补偿，禁止收割该 run。
+
+根因是旧实现把不完整/失败查询当成无 PR，且只修标签，没有撤销已经启动的执行。本实现区分未知与无 PR，并保留失败补偿状态。当前交付 **partial**：下列新增测试通过，但全套旧夹具未支持查询，尚未完成逐测试移除修复的变异验证；实现加测试超过本卡 150 行预算。
+
+| BLOCKER / 验收 → 修复 | 文件 | 对应测试（tools/tests） |
+| --- | --- | --- |
+| R1 B1 编号 None → 使用卡 n | autodispatch.py | test_lane_pr_validation.ReassignmentGuardTests.test_tick_dispatch_races |
+| R1 B2 遗漏重排与缺 lane-pr → 共用 guarded_requeue | autodispatch.py、../requeue-quota-failed.py | test_requeue_quota_failed.QuotaPrGuardTests.test_open_pr_query_failure_and_write_race |
+| R1 B3 前 100 截断、合并 PR 误判 → OPEN 完整分页 | autodispatch.py | test_lane_pr_validation.ReassignmentGuardTests.test_paginated_open_only_lookup |
+| R1 B4 标签终态 → 复用 A 卡，非流转标签保留（本卡不改） | autodispatch.py | test_lane_pr_relabel.RelabelTests（现有测试） |
+| R1 B5 查询与重排写入竞态 → 写后复核修复 | autodispatch.py | test_lane_pr_validation.ReassignmentGuardTests.test_requeue_write_race_and_failed_readback |
+| R2 B1 校验查询失败仍重排 → 阻断并保留 run | autodispatch.py | test_lane_pr_validation.ReassignmentGuardTests.test_requeue_paths_fail_closed_and_repair |
+| R2 B2 派发竞态、事后查询失败 → 紧邻复核、撤销、告警 | autodispatch.py | test_lane_pr_validation.ReassignmentGuardTests.test_tick_dispatch_races |
+| R2 B3 完整标签集合争议 → 按本卡/Boss 非流转标签保留 | autodispatch.py | test_lane_pr_relabel.py（A 卡既有覆盖） |
+| R2 B4 / R3 B3 缺映射 → 本表 | README.md | test_lane_pr_validation.py、test_requeue_quota_failed.py（本表所列命令） |
+| R3 B1 撤销无核验 → 实读远端、保留补偿状态 | autodispatch.py | test_lane_pr_validation.ReassignmentGuardTests.test_cancel_is_verified_and_retained_for_retry |
+| R3 B2 缺集成失败路径 → tick 与各重排失败注入 | autodispatch.py | test_lane_pr_validation.ReassignmentGuardTests.test_tick_dispatch_races、test_requeue_paths_fail_closed_and_repair |
+| 失败 run、启动失败、校验退回 → 重排统一守卫 | autodispatch.py | test_lane_pr_validation.ReassignmentGuardTests.test_requeue_paths_fail_closed_and_repair |
+| 开放 PR 不派发且日志可见 → 候选拦截并修标签 | autodispatch.py | test_lane_pr_validation.ReassignmentGuardTests.test_tick_dispatch_races |
+
+验证：`python3 -m unittest discover -s tools/tests -p 'test_lane_pr*.py'`（38 通过）；`python3 -m unittest discover -s tools/tests -p 'test_requeue_quota_failed.py'`（6 通过）。`tools/lane-autodispatch` 全套尚未通过；其旧 fake 必须补齐新增 API 响应，不能以放开查询失败路径修测试。`openswarm/lib/dispatch` 已退役：REPORT: dropped。
