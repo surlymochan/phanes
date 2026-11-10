@@ -70,7 +70,7 @@ class CardQualityTest(TestCase):
                 return 0, json.dumps({**rows[1], 'state': 'OPEN'}), ''
             edits.append(args)
             return 0, '', ''
-        with tempfile.TemporaryDirectory(dir=Path(__file__).resolve().parents[2] / '.openswarm-tmp') as directory, ExitStack() as stack:
+        with tempfile.TemporaryDirectory() as directory, ExitStack() as stack:
             dispatch = mock.Mock(return_value=('run', None))
             sh = mock.Mock(side_effect=lambda cmd, **k: (0, '8388608' if '/proc/meminfo' in ' '.join(cmd) else 'a' * 40, ''))
             replacements = dict(D=directory, gh=gh, dispatch=dispatch, sh=sh,
