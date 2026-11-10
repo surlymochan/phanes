@@ -21,8 +21,10 @@ parser.add_argument('--tools', default='read,bash,edit,write,grep,find,ls')
 parser.add_argument('prompt', nargs='?')
 args = parser.parse_args()
 model = os.environ.get('OPENSWARM_PI_ISOLATED_MODEL', 'MiniMax-M3.1-Flash')
-runtime = os.path.realpath(os.environ.get('OPENSWARM_PI_RUNTIME', ''))
-broker = os.path.realpath(os.environ.get('OPENSWARM_PI_BROKER_SOCKET', ''))
+runtime_value = os.environ.get('OPENSWARM_PI_RUNTIME') or os.path.expanduser('~/tools/pi-sandbox')
+broker_value = os.environ.get('OPENSWARM_PI_BROKER_SOCKET') or '/run/swrm-pi/broker.sock'
+runtime = os.path.realpath(runtime_value)
+broker = os.path.realpath(broker_value)
 cwd = os.path.realpath(os.getcwd())
 root_query = subprocess.run(['git', '-C', cwd, 'rev-parse', '--show-toplevel'],
                             capture_output=True, text=True, timeout=10)
@@ -31,13 +33,16 @@ if args.provider != 'minimax-cn' or args.model != model or args.tools != 'read,b
     sys.exit('isolated Pi rejected provider, model or tool configuration')
 if (args.mode == 'json' and (not args.p or args.prompt is None)) or (args.mode == 'rpc' and (args.p or args.prompt is not None)):
     sys.exit('isolated Pi rejected mode or prompt configuration')
-if not shutil.which('bwrap') or not shutil.which('socat') or not os.path.isfile(os.path.join(runtime, 'node_modules/.bin/pi')):
+if not os.path.isfile(os.path.join(runtime, 'node_modules/.bin/pi')):
+    sys.exit(f'isolated Pi dependencies unavailable: OPENSWARM_PI_RUNTIME checked {runtime_value} '
+             '(node_modules/.bin/pi not found)')
+if not shutil.which('bwrap') or not shutil.which('socat'):
     sys.exit('isolated Pi dependencies unavailable')
 try:
     if not stat.S_ISSOCK(os.stat(broker).st_mode):
-        sys.exit('isolated Pi broker socket unavailable')
+        sys.exit(f'isolated Pi broker socket unavailable: OPENSWARM_PI_BROKER_SOCKET checked {broker_value}')
 except OSError:
-    sys.exit('isolated Pi broker socket unavailable')
+    sys.exit(f'isolated Pi broker socket unavailable: OPENSWARM_PI_BROKER_SOCKET checked {broker_value}')
 if worktree == '/' or not os.path.isdir(worktree):
     sys.exit('isolated Pi requires a dedicated worktree')
 config = {'providers': {'minimax-sandbox': {'baseUrl': 'http://127.0.0.1:18765',
