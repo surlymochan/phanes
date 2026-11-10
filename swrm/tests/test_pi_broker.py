@@ -19,6 +19,8 @@ import time
 import unittest
 from datetime import datetime, timedelta, timezone
 
+from _broker_wait import short_tmp_root, wait_for_unix_socket
+
 BROKER = pathlib.Path(__file__).resolve().parents[1] / 'bin' / 'pi-minimax-broker.mjs'
 
 
@@ -72,12 +74,9 @@ https.request = (_options, callback) => {
         env = dict(os.environ, NODE_OPTIONS='--require=' + str(preload),
                    FAKE_ANSWER=base64.b64encode(answer).decode('ascii'))
         proc = subprocess.Popen(['node', str(BROKER), path, str(module), 'allowed-model'],
-                                env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                                env=env, stdout=subprocess.DEVNULL, stderr=self.enterContext(open(path + '.stderr', 'wb')))
         self.addCleanup(self._stop, proc)
-        deadline = time.monotonic() + 5
-        while not os.path.exists(path) and proc.poll() is None and time.monotonic() < deadline:
-            time.sleep(0.02)
-        self.assertTrue(os.path.exists(path), 'broker did not start')
+        wait_for_unix_socket(path, proc=proc, errors=path + '.stderr')
         return path
 
     def _ask(self, path, payload=None):
@@ -128,7 +127,7 @@ https.request = (_options, callback) => {
                                                     'output_tokens': 88888}}],
                              'stop_reason': 'tool_use',
                              'usage': {'input_tokens': 120, 'output_tokens': 34}})
-        with tempfile.TemporaryDirectory() as root:
+        with tempfile.TemporaryDirectory(prefix='pb', dir=short_tmp_root()) as root:
             path = self._broker_with_answer(answer.encode('utf-8'), root)
             self.assertEqual(self._ask(path), 200)
             row = self._logged_rows(path)[-1]
@@ -152,7 +151,7 @@ https.request = (_options, callback) => {
             'event: message_delta\ndata: %s\n\n' % json.dumps(
                 {'type': 'message_delta', 'usage': {'output_tokens': 34}}),
         ])
-        with tempfile.TemporaryDirectory() as root:
+        with tempfile.TemporaryDirectory(prefix='pb', dir=short_tmp_root()) as root:
             path = self._broker_with_answer(answer.encode('utf-8'), root)
             self.assertEqual(self._ask(path), 200)
             row = self._logged_rows(path)[-1]
@@ -167,7 +166,7 @@ https.request = (_options, callback) => {
         Its counters are explicit zeros: the hour of the fleet is a real zero
         burn and not a broken collection (Refs #1671).
         """
-        with tempfile.TemporaryDirectory() as root:
+        with tempfile.TemporaryDirectory(prefix='pb', dir=short_tmp_root()) as root:
             path = self._broker_with_answer(b'{}', root)
             client = UnixHTTP(path)
             client.request('GET', '/refused', '', {})
@@ -182,9 +181,7 @@ https.request = (_options, callback) => {
                              'a refused request burned nothing: %r' % row)
 
     def test_quiet_collector_initializes_log_without_truncation(self):
-        temporary = BROKER.parents[2] / ".swrm-tmp"
-        temporary.mkdir(exist_ok=True)
-        with tempfile.TemporaryDirectory(dir=temporary) as root:
+        with tempfile.TemporaryDirectory(prefix='pb', dir=short_tmp_root()) as root:
             root = pathlib.Path(root)
             module = root / 'auth.mjs'
             module.write_text('export class AuthStorage { static create() { return { getApiKey: async () => "fake-key" }; } }')
@@ -219,9 +216,7 @@ http.createServer = () => ({
                         self.assertEqual(health['log_ino'], log.stat().st_ino)
 
     def test_coverage_survives_restart_but_resets_after_log_loss(self):
-        temporary = BROKER.parents[2] / ".swrm-tmp"
-        temporary.mkdir(exist_ok=True)
-        with tempfile.TemporaryDirectory(dir=temporary) as root:
+        with tempfile.TemporaryDirectory(prefix='pb', dir=short_tmp_root()) as root:
             root = pathlib.Path(root)
             module = root / 'auth.mjs'
             module.write_text('export class AuthStorage { static create() { return { getApiKey: async () => "fake-key" }; } }')
@@ -275,9 +270,7 @@ http.createServer = () => ({ listen(path, ready) { fs.writeFileSync(path, ''); r
 
     def test_audit_retains_window_and_reports_write_failure_without_sockets(self):
         """Exercise the actual audit writer with only the HTTP listener stubbed."""
-        temporary = BROKER.parents[2] / ".swrm-tmp"
-        temporary.mkdir(exist_ok=True)
-        with tempfile.TemporaryDirectory(dir=temporary) as root:
+        with tempfile.TemporaryDirectory(prefix='pb', dir=short_tmp_root()) as root:
             root = pathlib.Path(root)
             module = root / 'auth.mjs'
             module.write_text('export class AuthStorage { static create() { return { getApiKey: async () => "fake-key" }; } }')
@@ -322,7 +315,7 @@ http.createServer = handler => ({
             self.assertIn('append failed', proc.stderr)
 
     def test_beta_request_preserves_upstream_opt_in(self):
-        with tempfile.TemporaryDirectory() as root:
+        with tempfile.TemporaryDirectory(prefix='pb', dir=short_tmp_root()) as root:
             module = pathlib.Path(root, 'auth.mjs')
             module.write_text('export class AuthStorage { static create() { return { getApiKey: async () => "fake-key" }; } }')
             capture = pathlib.Path(root, 'request.json')
@@ -342,12 +335,9 @@ https.request = (options, callback) => {
             path = os.path.join(root, 'broker.sock')
             env = dict(os.environ, NODE_OPTIONS='--require=' + str(preload), REQUEST_CAPTURE=str(capture))
             proc = subprocess.Popen(['node', str(BROKER), path, str(module), 'allowed-model'],
-                                    env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                                    env=env, stdout=subprocess.DEVNULL, stderr=self.enterContext(open(path + '.stderr', 'wb')))
             try:
-                deadline = time.monotonic() + 5
-                while not os.path.exists(path) and proc.poll() is None and time.monotonic() < deadline:
-                    time.sleep(0.02)
-                self.assertTrue(os.path.exists(path))
+                wait_for_unix_socket(path, proc=proc, errors=path + '.stderr')
                 client = UnixHTTP(path)
                 client.request('POST', '/v1/messages?beta=true', json.dumps({'model': 'allowed-model', 'messages': []}),
                                {'anthropic-beta': 'interleaved-thinking-2025-05-14'})
@@ -362,7 +352,7 @@ https.request = (options, callback) => {
                 proc.wait(timeout=5)
 
     def test_aborted_upstream_releases_busy_slot(self):
-        with tempfile.TemporaryDirectory() as root:
+        with tempfile.TemporaryDirectory(prefix='pb', dir=short_tmp_root()) as root:
             module = pathlib.Path(root, 'auth.mjs')
             module.write_text('export class AuthStorage { static create() { return { getApiKey: async () => "fake-key" }; } }')
             preload = pathlib.Path(root, 'fake.cjs')
@@ -387,13 +377,7 @@ https.request = (_options, callback) => {
             proc = subprocess.Popen(['node', str(BROKER), path, str(module), 'allowed-model'],
                                     env=env, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
             try:
-                deadline = time.monotonic() + 5
-                while not os.path.exists(path) and proc.poll() is None and time.monotonic() < deadline:
-                    time.sleep(0.02)
-                if not os.path.exists(path):
-                    status = proc.poll()
-                    detail = proc.stderr.read().decode(errors='replace') if status is not None else 'still running after 5 seconds'
-                    self.fail('broker did not create its socket (exit=%s): %s' % (status, detail))
+                wait_for_unix_socket(path, proc=proc)
                 client = UnixHTTP(path)
                 client.request('POST', '/v1/messages?beta=true', json.dumps({'model': 'allowed-model', 'messages': []}))
                 response = client.getresponse()
@@ -417,17 +401,14 @@ https.request = (_options, callback) => {
                 proc.stderr.close()
 
     def test_rejects_other_paths_and_models(self):
-        with tempfile.TemporaryDirectory() as root:
+        with tempfile.TemporaryDirectory(prefix='pb', dir=short_tmp_root()) as root:
             module = pathlib.Path(root, 'auth.mjs')
             module.write_text('export class AuthStorage { static create() { return { getApiKey: async () => "fake-key" }; } }')
             path = os.path.join(root, 'broker.sock')
             proc = subprocess.Popen(['node', str(BROKER), path, str(module), 'allowed-model'],
-                                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                                    stdout=subprocess.DEVNULL, stderr=self.enterContext(open(path + '.stderr', 'wb')))
             try:
-                deadline = time.monotonic() + 5
-                while not os.path.exists(path) and proc.poll() is None and time.monotonic() < deadline:
-                    time.sleep(0.02)
-                self.assertTrue(os.path.exists(path), 'broker did not start')
+                wait_for_unix_socket(path, proc=proc, errors=path + '.stderr')
                 for url, body in [('/other', {'model': 'allowed-model', 'messages': []}),
                                   ('/v1/messages?beta=false', {'model': 'allowed-model', 'messages': []}),
                                   ('/v1/messages?beta=true', {'model': 'wrong-model', 'messages': []}),
@@ -448,7 +429,7 @@ https.request = (_options, callback) => {
         The log lives next to the broker socket (``<socket>.requests.jsonl``),
         so the burn watchdog finds it without any configuration.
         """
-        with tempfile.TemporaryDirectory() as root:
+        with tempfile.TemporaryDirectory(prefix='pb', dir=short_tmp_root()) as root:
             module = pathlib.Path(root, 'auth.mjs')
             module.write_text('export class AuthStorage { static create() { return { getApiKey: async () => "fake-key" }; } }')
             preload = pathlib.Path(root, 'fake.cjs')
@@ -472,12 +453,9 @@ https.request = (_options, callback) => {
             path = os.path.join(root, 'broker.sock')
             env = dict(os.environ, NODE_OPTIONS='--require=' + str(preload))
             proc = subprocess.Popen(['node', str(BROKER), path, str(module), 'allowed-model'],
-                                    env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                                    env=env, stdout=subprocess.DEVNULL, stderr=self.enterContext(open(path + '.stderr', 'wb')))
             try:
-                deadline = time.monotonic() + 5
-                while not os.path.exists(path) and proc.poll() is None and time.monotonic() < deadline:
-                    time.sleep(0.02)
-                self.assertTrue(os.path.exists(path), 'broker did not start')
+                wait_for_unix_socket(path, proc=proc, errors=path + '.stderr')
                 client = UnixHTTP(path)
                 client.request('POST', '/v1/messages', json.dumps({'model': 'allowed-model', 'messages': []}),
                                {'content-type': 'application/json'})
@@ -516,17 +494,14 @@ https.request = (_options, callback) => {
         The heartbeat tells the burn watchdog that a quiet hour is the zero burn
         of a live collector and not a collector that stopped (Refs #1671).
         """
-        with tempfile.TemporaryDirectory() as root:
+        with tempfile.TemporaryDirectory(prefix='pb', dir=short_tmp_root()) as root:
             module = pathlib.Path(root, 'auth.mjs')
             module.write_text('export class AuthStorage { static create() { return { getApiKey: async () => "fake-key" }; } }')
             path = os.path.join(root, 'broker.sock')
             proc = subprocess.Popen(['node', str(BROKER), path, str(module), 'allowed-model'],
-                                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                                    stdout=subprocess.DEVNULL, stderr=self.enterContext(open(path + '.stderr', 'wb')))
             try:
-                deadline = time.monotonic() + 5
-                while not os.path.exists(path) and proc.poll() is None and time.monotonic() < deadline:
-                    time.sleep(0.02)
-                self.assertTrue(os.path.exists(path), 'broker did not start')
+                wait_for_unix_socket(path, proc=proc, errors=path + '.stderr')
                 heartbeat = pathlib.Path(path + '.requests.jsonl.heartbeat')
                 deadline = time.monotonic() + 5
                 while time.monotonic() < deadline and not (heartbeat.exists() and heartbeat.read_text().strip()):
@@ -538,7 +513,7 @@ https.request = (_options, callback) => {
                 proc.wait(timeout=5)
 
     def test_slow_inference_outlives_upload_timeout(self):
-        with tempfile.TemporaryDirectory() as root:
+        with tempfile.TemporaryDirectory(prefix='pb', dir=short_tmp_root()) as root:
             module = pathlib.Path(root, 'auth.mjs')
             module.write_text('export class AuthStorage { static create() { return { getApiKey: async () => "fake-key" }; } }')
             stub = pathlib.Path(root, 'stub.mjs')
@@ -548,12 +523,9 @@ https.request = (_options, callback) => {
                             "r.statusCode=200; r.headers={'content-type':'application/json'}; callback(r); }, 21000)); return w; };\n")
             path = os.path.join(root, 'broker.sock')
             proc = subprocess.Popen(['node', '--import', str(stub), str(BROKER), path, str(module), 'allowed-model'],
-                                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                                    stdout=subprocess.DEVNULL, stderr=self.enterContext(open(path + '.stderr', 'wb')))
             try:
-                deadline = time.monotonic() + 5
-                while not os.path.exists(path) and proc.poll() is None and time.monotonic() < deadline:
-                    time.sleep(0.02)
-                self.assertTrue(os.path.exists(path), 'broker did not start')
+                wait_for_unix_socket(path, proc=proc, errors=path + '.stderr')
                 client = UnixHTTP(path)
                 client.timeout = 30
                 client.request('POST', '/v1/messages', json.dumps({'model':'allowed-model','messages':[]}),
