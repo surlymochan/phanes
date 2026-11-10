@@ -491,7 +491,9 @@ class LaneTests(unittest.TestCase):
         remote = self.root / "remote.git"
         self.git("init", "--bare", "-q", str(remote))
         self.git("remote", "add", "origin", str(remote))
-        self.git("push", "-q", "origin", f"swrm/{rid}")
+        # The lane workspace is an independent clone: the run branch lives there,
+        # not in the shared repository, so it is pushed from the workspace.
+        self.git("-C", str(wt), "push", "-q", str(remote), f"HEAD:refs/heads/swrm/{rid}")
         state = self.lane_state()
         os.kill(state["supervisor_pid"], signal.SIGKILL)
         os.kill(state["child_pid"], signal.SIGKILL)

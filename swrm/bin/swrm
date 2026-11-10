@@ -8626,7 +8626,8 @@ def lane_begin_turn(lane, child, prompt, worktree, event_file, turn, spec=None):
         conversation = spec.get("conversation_id") if spec and spec.get("_recovered") else None
         if spec and spec.get("_recovered") and not conversation:
             raise RuntimeError("saved headless conversation is missing")
-        turn["conversation_id"] = conversation
+        if conversation:
+            turn["conversation_id"] = conversation
         child.start(prompt, model=lane["model"], effort=lane.get("effort"), conversation=conversation)
     else:
         recovering = bool(spec and spec.get("_recovered"))
