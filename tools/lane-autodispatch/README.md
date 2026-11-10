@@ -274,3 +274,13 @@ python3 tools/lane-autodispatch/test_idle_redispatch.py   # 9 个复现用例（
 | 第 4 轮 B2 | 容量不足仍调用 `host_fail()`：记成主机故障并退避，挡住同主机的其他车道 | `dispatch_failed()` 识别容量耗尽，移除 claim 后静默返回；真实主机故障仍退避 | `test_a_capacity_failure_is_the_reason_of_the_gap`、`test_a_capacity_failure_does_not_block_another_lane_on_the_same_host`、`test_a_transport_failure_still_backs_the_host_off` |
 | 第 4 轮 B3 | 所有车道派发结束后统一关闭窗口，后续车道的耗时虚增前一车道的指标与长空闲日志 | `give_card()` 在本车道派发成功后立即关闭窗口并记录日志 | `test_each_lane_gap_ends_at_its_own_dispatch` |
 | 第 4 轮 B4 | 本轮失败原因被用于上一观察区间（600 秒无卡后才出现的无容量覆盖了已知原因） | `idle_account()` 与 `idle_close()` 一致：按窗口保存的上次结果累计已过时间，再保存本轮结果供下一区间使用 | `test_a_new_capacity_failure_does_not_replace_the_previous_no_card_wait`、`test_an_empty_pool_does_not_replace_the_previous_capacity_wait` |
+
+
+## 交付映射预检（#1849）
+首轮与 fix 轮在推送前检查提交正文的「验收条目→改动文件→测试」表。
+每条验收（含编号列表）须在验收列完整重复，允许 Markdown 标记差异；文件列和测试列必须非空。
+缺表或缺行按 quick_fix/delivery_map 退回 lane-ready，写明原因，不计评审轮次。
+issue 读取或解析失败保留 run 重试，不推送、不换标。strict 为默认，warn 记录缺项。
+映射写进提交信息；PR 评论可供人工复核，但当前自动预检仅读取提交正文。
+REPORT: dropped — 旧 .lane-review 文件载体已由 main 过滤，按 issue 裁定移除；旧 PR 无 dispatch 引擎改动需移植。
+验证：python3 -m pytest -q swrm/tests/test_lane_delivery_map.py tools/tests/test_lane_pr_validation.py
