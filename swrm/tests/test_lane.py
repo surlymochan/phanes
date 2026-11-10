@@ -1818,7 +1818,7 @@ class CodexHealthProbeTests(unittest.TestCase):
                 self.assertFalse(self.state["server_alive"])
                 self.assertEqual(self.session_stats(child), {"created": 0, "released": 0, "live": 0})
 
-    def test_release_failure_is_logged_without_failing_probe(self):
+    def test_release_failure_marks_probe_unhealthy(self):
         for failure in ("error", "timeout"):
             with self.subTest(failure=failure):
                 self.state.clear()
@@ -1826,8 +1826,10 @@ class CodexHealthProbeTests(unittest.TestCase):
                     child = self.spawn()
                 with mock.patch("sys.stderr") as stderr:
                     self.assertIs(self.xs.lane_codex_health_probe(self.lane, child, self.policy), child)
-                self.assertTrue(self.state["server_alive"])
+                self.assertFalse(self.state["server_alive"])
+                self.assertEqual(self.state["server_release_failures"], 1)
                 self.assertEqual(self.state["server_probe_failures"], 0)
+                self.assertEqual(self.state["server_probe_error"], "session release failing")
                 self.assertIn("thread/unsubscribe failed", "".join(
                     call.args[0] for call in stderr.write.call_args_list))
                 self.assertFalse(child.health_waiters)
@@ -1835,7 +1837,7 @@ class CodexHealthProbeTests(unittest.TestCase):
                     self.state["server_probe_at"] = 0
                     with mock.patch("sys.stderr"):
                         self.assertIs(self.xs.lane_codex_health_probe(self.lane, child, self.policy), child)
-                    self.assertEqual(self.state["server_alive"], attempt == 0)
+                    self.assertFalse(self.state["server_alive"])
                 self.assertEqual(self.state["server_release_failures"], 50)
                 self.assertIn("session release failing", self.state["server_probe_error"])
                 self.assertEqual(self.session_stats(child)["created"], 1)
