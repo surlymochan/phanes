@@ -178,6 +178,20 @@ def pause_store_dir(home=None):
     """The swrm pause store ($OPENSWARM_HOME/pauses), the new home of the pause switches."""
     return os.path.join(pause_home(home), "pauses")
 
+def pause_executor_start_lane(lane):
+    """Cool down only the failing executor's lane; the card has not had an attempt."""
+    now = time.time()
+    scope = f"lane:{lane}"
+    directory = pause_store_dir()
+    os.makedirs(directory, exist_ok=True)
+    record = {"scope": scope, "reason": "auto:executor_start_failed", "created_at": now,
+              "expires_at": now + 600}
+    # Write atomically so dispatch never observes a partially written pause.
+    with tempfile.NamedTemporaryFile(mode="w", dir=directory, delete=False) as stream:
+        temporary = stream.name
+        json.dump(record, stream)
+    os.replace(temporary, os.path.join(directory, hashlib.sha256(scope.encode()).hexdigest() + ".json"))
+
 def marker_scope(name):
     """The pause scope of a legacy PAUSE marker file name, or None when it is none."""
     if name == "PAUSE": return "all"
@@ -2341,6 +2355,15 @@ def filter_harvest(ref, base):
             parent = git("commit-tree", tree, "-p", parent, env=commit_env, inp=message).strip().decode()
     return parent, removed, tree_of(parent) == tree_of(base)
 
+def requeue_executor_start_failure(lane, n, run):
+    """Requeue an executor startup failure without counting a task attempt."""
+    rc, _, err = gh(["issue", "edit", str(n), "--remove-label", "in-progress",
+                     "--remove-label", "lane-failed", "--add-label", "lane-ready"])
+    if rc:
+        return {"done": False, "status": "requeue-failed", "error": err, "missing": []}
+    log(f"{lane} executor failed to start #{n} (run {run}) → lane-ready, lane paused 600s")
+    return {"done": True, "status": "lane-ready", "error": None, "missing": []}
+
 def origin_branch_head(branch):
     """Return the head commit of a branch on origin ("" when the branch is not there).
 
@@ -2387,6 +2410,11 @@ def finish(lane, cfg, st, info, state):
     "missing": [...]}. `done` means the lane slot is free again; `error` carries the
     explicit reason back to the caller (Refs #1704)."""
     n, run = st["issue"], st["run"]
+    if info.get("error_class") == "executor_start_failed":
+        pause_executor_start_lane(lane)
+        # Even a commit made during the startup grace period is not a completed
+        # task. Leave the run's work intact and return the card for another attempt.
+        return requeue_executor_start_failure(lane, n, run)
     if st.get("class") == "verify":
         missing = review_evidence_errors(info.get("evidence"))
         if missing:
@@ -2838,6 +2866,9 @@ def tick(lanes, state, last_warn):
             # the run ended: the lane is idle from its own end time on (Refs #1688)
             idle_open(state, L, r["run"].get("ended_at"), now, last_alive)
             result = finish(L, lanes[L], st, r["run"], state)
+            # the harvest may have cooled down a lane (a startup failure pauses its
+            # lane): the pause must be visible to the rest of this tick
+            scopes = paused_scopes()
             if result.get("done"):
                 recovery_runs(state).pop(L, None)
                 state.pop(L); save_state(state); freed = True
