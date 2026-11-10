@@ -3290,7 +3290,7 @@ def file_issue(text, extra=()):
     return "#" + o.strip().rsplit("/", 1)[-1]
 
 CARD_MARK = "ad-card:"
-CREATE_SETTLE_S = env_number("AD_CREATE_SETTLE_S", 300.0)  # create timeout + server propagation: a request may still be in flight until then
+CREATE_SETTLE_S = max(120.0, env_number("AD_CREATE_SETTLE_S", 300.0))  # never below twice the gh timeout  # create timeout + server propagation: a request may still be in flight until then
 CREATE_EMPTY_PROOFS = 2   # consecutive empty listings, all taken after the settle time, before a card is created again
 LOOKBACK_SKEW_S = 300  # clock skew allowed between this host and the server when a listing is used as proof
 
