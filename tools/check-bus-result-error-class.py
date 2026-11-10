@@ -29,6 +29,7 @@ ERROR_CLASSES = {
     "compare_runner_failed",
     "exec_error",
     "executor_failed",
+    "executor_start_failed",
     "executor_io_lost",
     "model_unavailable",
     "network",
@@ -81,10 +82,14 @@ def main():
     drift = """```swrm-result
 {"status":"failed","run_id":"run-drift","error_class":"task_changed","summary":"the task card changed after the claim","files_changed":[],"tests":"not run: the task card changed after the claim","followups":[],"branch":null,"commit":null}
 ```"""
+    startup = """```swrm-result
+{"status":"failed","run_id":"run-startup","error_class":"executor_start_failed","summary":"executor failed during startup","files_changed":[],"tests":"not run: executor startup failed","followups":[],"branch":null,"commit":null}
+```"""
     assert parse_result(success)["error_class"] == "none"
     assert parse_result(failure)["error_class"] == "verify_failed"
     # 卡片漂移失败分类必须被契约接受：与 bus_parse_result 的 error_class 枚举保持一致
     assert parse_result(drift)["error_class"] == "task_changed"
+    assert parse_result(startup)["error_class"] == "executor_start_failed"
 
     # 缺字段拒绝：针对 REQUIRED 中的每个字段，缺失均必须抛出异常
     for sample in (success, failure):

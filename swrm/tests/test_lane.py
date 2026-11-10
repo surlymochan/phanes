@@ -962,6 +962,94 @@ class LaneTests(unittest.TestCase):
         self.assertEqual(calls[0][calls[0].index("--model") + 1], "gemini-3.8-flash-medium")
         self.assertEqual(calls[0][calls[0].index("--output-format") + 1], "stream-json")
 
+    def test_agy_startup_crash_restarts_once_and_succeeds(self):
+        self.set_config("agy")
+        self.env["FAKE_AGY_MODE"] = "startup-crash-once"
+        self.env["FAKE_AGY_STARTUP_CRASH_MARKER"] = str(self.root / "agy-startup-count")
+        self.start_lane()
+        run_id = self.assign("add the fixture change")
+
+        state = self.wait_run(run_id)
+        result = json.loads((self.data / "runs" / run_id / "result.json").read_text())
+        self.assertEqual(state["status"], "done")
+        self.assertEqual(state["executor_restarts"], 1)
+        self.assertEqual((self.root / "agy-startup-count").read_text(), "2")
+        self.assertEqual(result["backend"], "agy")
+
+    def test_agy_repeated_startup_crash_has_distinct_error_class(self):
+        self.set_config("agy")
+        self.env["FAKE_AGY_MODE"] = "startup-crash-always"
+        self.env["FAKE_AGY_STARTUP_CRASH_MARKER"] = str(self.root / "agy-startup-count")
+        self.start_lane()
+        run_id = self.assign("add the fixture change")
+
+        state = self.wait_run(run_id)
+        result = json.loads((self.data / "runs" / run_id / "result.json").read_text())
+        self.assertEqual(state["error_class"], "executor_start_failed")
+        self.assertIn("startup failed before executor event", result["attempts"][-1]["error_tail"])
+        self.assertEqual((self.root / "agy-startup-count").read_text(), "2")
+
+    def test_agy_early_event_crash_restarts_and_preserves_conversation(self):
+        self.set_config("agy")
+        self.env["FAKE_AGY_MODE"] = "early-event-crash-once"
+        self.env["FAKE_AGY_STARTUP_CRASH_MARKER"] = str(self.root / "agy-startup-count")
+        self.start_lane()
+        run_id = self.assign("add the fixture change")
+
+        state = self.wait_run(run_id)
+        calls = [json.loads(line) for line in pathlib.Path(self.env["FAKE_AGY_LOG"]).read_text().splitlines()]
+        self.assertEqual(state["status"], "done")
+        self.assertEqual(state["executor_restarts"], 1)
+        self.assertIn("--conversation", calls[1])
+        self.assertEqual(calls[1][calls[1].index("--conversation") + 1], "conv-early")
+
+    def test_agy_early_event_repeated_crash_is_executor_start_failed(self):
+        self.set_config("agy")
+        self.env["FAKE_AGY_MODE"] = "early-event-crash-always"
+        self.env["FAKE_AGY_STARTUP_CRASH_MARKER"] = str(self.root / "agy-startup-count")
+        self.start_lane()
+        run_id = self.assign("add the fixture change")
+
+        state = self.wait_run(run_id)
+        result = json.loads((self.data / "runs" / run_id / "result.json").read_text())
+        self.assertEqual(state["error_class"], "executor_start_failed")
+        error_tail = result["attempts"][-1]["error_tail"]
+        self.assertEqual(error_tail.count("exit code 2"), 2)
+        self.assertIn("early event then startup crash", error_tail)
+        self.assertEqual((self.root / "agy-startup-count").read_text(), "2")
+
+    def test_agy_silent_exit_after_start_grace_is_start_failed(self):
+        self.set_config("agy")
+        self.env["FAKE_AGY_MODE"] = "late-silent-crash"
+        self.start_lane()
+        run_id = self.assign("add the fixture change")
+
+        state = self.wait_run(run_id, timeout=20)
+        self.assertEqual(state["error_class"], "executor_start_failed")
+        self.assertEqual(state["executor_restarts"], 1)
+
+    def test_agy_exit_after_event_and_start_grace_is_exec_error(self):
+        self.set_config("agy")
+        self.env["FAKE_AGY_MODE"] = "late-event-crash"
+        self.start_lane()
+        run_id = self.assign("add the fixture change")
+
+        state = self.wait_run(run_id, timeout=20)
+        self.assertEqual(state["error_class"], "exec_error")
+        self.assertNotIn("executor_restarts", state)
+
+    def test_agy_auth_failure_is_not_retried_as_startup_crash(self):
+        self.set_config("agy")
+        self.env["FAKE_AGY_MODE"] = "auth"
+        self.start_lane()
+        run_id = self.assign("add the fixture change")
+
+        state = self.wait_run(run_id)
+        calls = [json.loads(line) for line in pathlib.Path(self.env["FAKE_AGY_LOG"]).read_text().splitlines()]
+        self.assertEqual(state["error_class"], "auth")
+        self.assertNotIn("executor_restarts", state)
+        self.assertEqual(sum(call[:1] == ["-p"] for call in calls), 1)
+
     def test_agy_steer_aborts_the_process_and_resumes_the_conversation(self):
         self.set_config("agy")
         self.start_lane()
@@ -1231,6 +1319,306 @@ def process_alive(pid):
         return True
     except (OSError, TypeError, ValueError):
         return False
+
+
+
+class AgyStartupRegressionTests(unittest.TestCase):
+    """Drive the production turn and admission paths without a control socket."""
+
+    def setUp(self):
+        from unittest import mock
+        import importlib.machinery
+        import importlib.util
+        loader = importlib.machinery.SourceFileLoader("agy_start_regression", str(CLI))
+        spec = importlib.util.spec_from_loader(loader.name, loader)
+        self.xs = importlib.util.module_from_spec(spec)
+        loader.exec_module(self.xs)
+        self.mock = mock
+        self.tmp = tempfile.TemporaryDirectory(dir=os.environ.get("TMPDIR"))
+        self.addCleanup(self.tmp.cleanup)
+        self.lane = {"name": "L1", "backend": "agy", "model": "test"}
+
+    def run_turn(self, second_error, late=False, drained=False, early=False):
+        xs, mock = self.xs, self.mock
+        clock = [100.0]
+        child = mock.Mock(pid=123)
+        child.proc.poll.return_value = 2
+        child.stderr_text.side_effect = lambda: second_error if child.start.call_count > 1 else "first startup crash"
+        events = iter([None, {"type": "init", "conversation_id": "conv-1"}, None] if late else [None, None])
+
+        def next_event(timeout):
+            event = next(events)
+            if late and child.start.call_count > 1 and event is None:
+                clock[0] += 6
+            return event
+
+        if drained:
+            events = iter([None, False, {"type": "init", "conversation_id": "conv-1"}, None])
+            child.alive.return_value = False
+        if early:
+            events = iter([{"type": "init"}, None, {"type": "init"}, None])
+            # Reaping must not turn an early EOF into a late running-turn failure.
+            def reap():
+                clock[0] += 6
+            child.reap_after_stdout_eof.side_effect = reap
+        child.next_event.side_effect = next_event
+        spec = {"started": 100, "budget_minutes": 1}
+        with mock.patch.object(xs, "NOW", side_effect=lambda: clock[0]), \
+             mock.patch.object(xs, "set_status"), \
+             mock.patch.object(xs, "load_policy", return_value={}), \
+             mock.patch.object(xs, "lane_control_messages"), \
+             mock.patch.object(xs, "enforced_risk", return_value=None):
+            result = xs.lane_run_turn(self.lane, child, spec, "same prompt", {"path": self.tmp.name},
+                                      self.tmp.name, None, {}, [])
+        self.assertEqual(child.start.call_count, 2)
+        return result
+
+    def test_start_crash_then_auth_preserves_auth(self):
+        result = self.run_turn("FatalAuthenticationError: authentication required")
+        self.assertEqual(result[2], "auth")
+        self.assertIn("authentication required", result[5])
+
+    def test_start_crash_then_late_disconnect_is_exec_error(self):
+        result = self.run_turn("later disconnect", late=True)
+        self.assertEqual(result[2], "exec_error")
+        self.assertIn("later disconnect", result[5])
+
+    def test_drained_event_marks_restarted_executor_as_running(self):
+        result = self.run_turn("later disconnect", late=True, drained=True)
+        self.assertEqual(result[2], "exec_error")
+
+    def test_two_start_crashes_include_both_diagnostics(self):
+        result = self.run_turn("second startup crash")
+        self.assertEqual(result[2], "executor_start_failed")
+        self.assertEqual(result[5].count("exit code 2"), 2)
+        self.assertIn("first startup crash", result[5])
+        self.assertIn("second startup crash", result[5])
+
+    def test_early_event_crash_uses_eof_time_before_reaping(self):
+        result = self.run_turn("second startup crash", early=True)
+        self.assertEqual(result[2], "executor_start_failed")
+
+    def test_steered_start_retry_preserves_correction_and_conversation(self):
+        xs, mock = self.xs, self.mock
+        for late_original in (False, True):
+            for eof in (None, False):
+                with self.subTest(late_original=late_original, eof=eof):
+                    clock = [100.0]
+                    child = mock.Mock(pid=123)
+                    child.alive.return_value = False
+                    child.proc.poll.return_value = 2
+                    child.stderr_text.return_value = "startup crash"
+                    turn = {"conversation_id": "conv-1"}
+                    events = iter(([{"type": "init"}] if late_original else []) +
+                                  [None, eof] + ([False] if eof is False else []) +
+                                  [{"type": "result", "status": "SUCCESS",
+                                    "response": '{"status":"done"}'}])
+
+                    def next_event(timeout):
+                        if late_original and child.start.call_count == 1:
+                            clock[0] = 106.0
+                        return next(events)
+
+                    def control(*args):
+                        if child.start.call_count == 1:
+                            turn["steer_queue"] = ["important correction"]
+
+                    child.next_event.side_effect = next_event
+                    with mock.patch.object(xs, "NOW", side_effect=lambda: clock[0]), \
+                         mock.patch.object(xs, "set_status"), \
+                         mock.patch.object(xs, "load_policy", return_value={}), \
+                         mock.patch.object(xs, "lane_control_messages", side_effect=control), \
+                         mock.patch.object(xs, "enforced_risk", return_value=None):
+                        result = xs.lane_run_turn(
+                            self.lane, child, {"started": 100, "budget_minutes": 1},
+                            "original task", {"path": self.tmp.name}, self.tmp.name, None, turn, [])
+                    self.assertEqual(child.start.call_count, 3)
+                    steered, retried = child.start.call_args_list[1:]
+                    self.assertIn("important correction", steered.args[0])
+                    self.assertEqual(retried, steered, "retry must resend the exact steered prompt and context")
+                    self.assertEqual(retried.kwargs["conversation"], "conv-1")
+                    self.assertEqual(result[2:4], (None, 0))
+
+    def test_continuation_start_retry_preserves_prompt_and_conversation(self):
+        xs, mock = self.xs, self.mock
+        child = mock.Mock(pid=123)
+        child.proc.poll.return_value = 2
+        child.stderr_text.return_value = "startup crash"
+        child.next_event.side_effect = [None, {"type": "result", "status": "SUCCESS",
+                                              "response": '{"status":"done"}'}]
+        with mock.patch.object(xs, "NOW", return_value=100), \
+             mock.patch.object(xs, "set_status"), \
+             mock.patch.object(xs, "load_policy", return_value={}), \
+             mock.patch.object(xs, "lane_control_messages"), \
+             mock.patch.object(xs, "enforced_risk", return_value=None):
+            result = xs.lane_run_turn(
+                self.lane, child, {"started": 100, "budget_minutes": 1}, xs.RATE_LIMIT_CONTINUE_PROMPT,
+                {"path": self.tmp.name}, self.tmp.name, None,
+                {"prompt": "original task", "conversation_id": "conv-1"}, [], continuation=True)
+        self.assertEqual(child.start.call_args_list, [mock.call(
+            xs.RATE_LIMIT_CONTINUE_PROMPT, model="test", effort=None, conversation="conv-1")] * 2)
+        self.assertEqual(result[2:4], (None, 0))
+
+    def assert_interrupted_startup_exit(self, eof, interruption, after_restart=False):
+        xs, mock = self.xs, self.mock
+        clock = [100.0]
+        spec = {"started": 100, "budget_minutes": 1}
+        if interruption == "already_stopped":
+            spec["abort_requested"] = True
+        child = mock.Mock(pid=123)
+        child.alive.return_value = False
+        child.proc.poll.return_value = 2
+        child.stderr_text.return_value = "startup crash"
+        child.next_event.return_value = eof
+
+        def control(*args):
+            if child.start.call_count < (2 if after_restart else 1):
+                return
+            if interruption == "budget":
+                clock[0] = 160.0
+            else:
+                spec["abort_requested"] = True
+
+        with mock.patch.object(xs, "NOW", side_effect=lambda: clock[0]), \
+             mock.patch.object(xs, "set_status") as status, \
+             mock.patch.object(xs, "load_policy", return_value={}), \
+             mock.patch.object(xs, "lane_control_messages", side_effect=control), \
+             mock.patch.object(xs, "lane_abort_child") as abort:
+            result = xs.lane_run_turn(self.lane, child, spec, "same prompt", {"path": self.tmp.name},
+                                      self.tmp.name, None, {}, [])
+        self.assertEqual(child.start.call_count, 2 if after_restart else 1)
+        abort.assert_called_once()
+        self.assertEqual(result[2:4], ("budget_exceeded", 124) if interruption == "budget" else ("stopped", 130))
+        if not after_restart:
+            self.assertFalse(any("executor_restarts" in call.kwargs for call in status.call_args_list))
+
+    def test_abort_requested_does_not_retry_startup_exit(self):
+        for eof in (None, False):
+            with self.subTest(eof=eof):
+                self.assert_interrupted_startup_exit(eof, "already_stopped")
+
+    def test_stop_during_turn_preserves_stopped_classification(self):
+        for eof in (None, False):
+            for after_restart in (False, True):
+                with self.subTest(eof=eof, after_restart=after_restart):
+                    self.assert_interrupted_startup_exit(eof, "stop", after_restart)
+
+    def test_budget_exhaustion_preserves_budget_classification(self):
+        for eof in (None, False):
+            for after_restart in (False, True):
+                with self.subTest(eof=eof, after_restart=after_restart):
+                    self.assert_interrupted_startup_exit(eof, "budget", after_restart)
+
+    def test_stdout_eof_reaps_each_child_before_restart_and_diagnosis(self):
+        xs, mock = self.xs, self.mock
+        child = mock.Mock(pid=123)
+        child.proc.poll.return_value = None
+        child.stderr_text.return_value = ""
+        child.next_event.side_effect = [None, None]
+
+        def start(*args, **kwargs):
+            if child.start.call_count == 2:
+                self.assertEqual(child.proc.poll(), 2, "previous child is still running")
+            child.proc.poll.return_value = None
+            child.stderr_text.return_value = ""
+
+        def reap():
+            child.proc.poll.return_value = 2
+            child.stderr_text.return_value = f"startup crash {child.start.call_count}"
+
+        child.start.side_effect = start
+        child.reap_after_stdout_eof.side_effect = reap
+        with mock.patch.object(xs, "NOW", return_value=100), \
+             mock.patch.object(xs, "set_status"), \
+             mock.patch.object(xs, "load_policy", return_value={}), \
+             mock.patch.object(xs, "lane_control_messages"):
+            result = xs.lane_run_turn(self.lane, child, {"started": 100, "budget_minutes": 1},
+                                      "same prompt", {"path": self.tmp.name}, self.tmp.name, None, {}, [])
+        self.assertEqual(child.reap_after_stdout_eof.call_count, 2)
+        self.assertEqual(result[2], "executor_start_failed")
+        self.assertEqual(result[5].count("exit code 2"), 2)
+        self.assertIn("startup crash 1", result[5])
+        self.assertIn("startup crash 2", result[5])
+
+    def test_reap_after_stdout_eof_waits_for_exit_and_stderr(self):
+        xs = self.xs
+        # Exercise the real readers: stdout EOF can precede both stderr and exit.
+        child = xs.AgyChild.__new__(xs.AgyChild)
+        child.events, child.stderr_lines = xs.queue.Queue(), []
+        child.proc = subprocess.Popen(
+            [sys.executable, "-c", "import os, sys; os.close(1); sys.stdin.readline(); "
+             "sys.stderr.write('late startup diagnostic\\n'); sys.exit(2)"],
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            text=True, start_new_session=True)
+        self.addCleanup(child.close)
+        self.addCleanup(child.proc.stdin.close)
+        xs.threading.Thread(target=child._read_stdout, args=(child.proc, child.events), daemon=True).start()
+        child.stderr_thread = xs.threading.Thread(
+            target=child._read_stderr, args=(child.proc, child.stderr_lines), daemon=True)
+        child.stderr_thread.start()
+        self.assertIsNone(child.next_event(5))
+        self.assertIsNone(child.proc.poll())
+        child.proc.stdin.write("\n")
+        child.proc.stdin.flush()
+        child.reap_after_stdout_eof()
+        self.assertEqual(child.proc.poll(), 2)
+        self.assertEqual(child.stderr_text(), "late startup diagnostic\n")
+        self.assertFalse(child.stderr_thread.is_alive())
+
+    def test_reap_after_stdout_eof_terminates_child_that_does_not_exit(self):
+        xs, mock = self.xs, self.mock
+        child = xs.AgyChild.__new__(xs.AgyChild)
+        child.proc = mock.Mock(pid=123)
+        child.proc.wait.side_effect = [subprocess.TimeoutExpired("agy", 3), -9]
+        child.proc.poll.return_value = None
+        child.stderr_thread = mock.Mock()
+        with mock.patch.object(xs, "kill_tree") as kill:
+            child.reap_after_stdout_eof()
+        kill.assert_called_once_with(123, grace=1)
+        child.proc.kill.assert_called_once_with()
+        self.assertEqual(child.proc.wait.call_args_list, [mock.call(timeout=3), mock.call(timeout=3)])
+        child.stderr_thread.join.assert_called_once_with(timeout=3)
+        child.proc.stderr.close.assert_called_once_with()
+
+    def test_start_crash_releases_empty_fleet_reservation(self):
+        self.assert_start_crash_releases_empty_fleet_reservation(self.lane)
+
+    def test_cursor_headless_start_crash_releases_empty_fleet_reservation(self):
+        self.assert_start_crash_releases_empty_fleet_reservation(
+            {"name": "L1", "backend": "cursor", "mode": "headless", "model": "test"})
+
+    def assert_start_crash_releases_empty_fleet_reservation(self, lane):
+        xs, mock = self.xs, self.mock
+        spec = {"run_id": "startup", "task": "task", "started": 100, "budget_minutes": 1}
+        rdir = os.path.join(self.tmp.name, "startup")
+        os.mkdir(rdir)
+        child = mock.Mock()
+        # The executor is alive while the turn is admitted and dead once the
+        # turn reports its startup failure.
+        turn_ran = []
+        child.alive.side_effect = lambda: not turn_ran
+        ws = {"repo": self.tmp.name, "root": self.tmp.name, "path": self.tmp.name}
+        with mock.patch.object(xs, "RUNS", self.tmp.name), \
+             mock.patch.object(xs, "lane_write_state"), \
+             mock.patch.object(xs, "lane_prepare_workspace", return_value=ws), \
+             mock.patch.object(xs, "run_workspace_prepare", return_value=None), \
+             mock.patch.object(xs, "add_lessons_to_prompt", side_effect=lambda p, *a: (p, [])), \
+             mock.patch.object(xs, "add_patterns_to_prompt", side_effect=lambda p, *a: (p, [])), \
+             mock.patch.object(xs, "load_policy", return_value={}), \
+             mock.patch.object(xs, "NOW", return_value=100), \
+             mock.patch.object(xs, "set_status"), \
+             mock.patch.object(xs, "reserve_provider_slot", return_value=True), \
+             mock.patch.object(xs, "lane_run_turn", side_effect=lambda *a, **k: turn_ran.append(1) or (
+                 None, {}, "executor_start_failed", 1, "events", "two crashes")) as run_turn, \
+             mock.patch.object(xs, "executor_boundary_empty", return_value=True), \
+             mock.patch.object(xs, "release_fleet_slot") as release, \
+             mock.patch.object(xs, "lane_finalize_run") as finalize:
+            xs.lane_do_run(lane, spec, child, None, None)
+        run_turn.assert_called_once()
+        finalize.assert_called_once()
+        self.assertEqual(finalize.call_args.args[5], "executor_start_failed")
+        # Released after the failed turn, not by the pre-admission shortcut.
+        release.assert_called_once_with(rdir)
 
 
 if __name__ == "__main__":

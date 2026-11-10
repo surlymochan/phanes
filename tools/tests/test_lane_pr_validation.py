@@ -216,6 +216,40 @@ class LanePrSubmitTests(unittest.TestCase):
         self.assertIn("Closes #1704", fake.prs[0]["--body"])
         self.assertIn("验收：python3 -m unittest tools/tests (passed)", fake.prs[0]["--body"])
 
+    def test_start_failure_with_commit_requeues_without_harvesting_or_counting(self):
+        info = FakeLaneHost().info()
+        info.update(status="failed", error_class="executor_start_failed")
+        with mock.patch.object(MODULE, "pause_store_dir", return_value=self.tmp.name), \
+             mock.patch.object(MODULE, "harvest_fetch", wraps=MODULE.harvest_fetch) as fetch:
+            fake, result = self.finish(info=info, message=MESSAGE_WITH_ALL)
+            records = MODULE.pause_records()
+        fetch.assert_not_called()
+        self.assertEqual(result["status"], "lane-ready")
+        self.assertTrue(result["done"])
+        self.assertEqual(fake.prs, [])
+        self.assertEqual(fake.label_edits[-1][-1], "lane-ready")
+        self.assertNotIn(ISSUE, self.state.get("_done", []))
+        self.assertEqual(records[0]["scope"], "lane:codex")
+        self.assertEqual(records[0]["expires_at"] - records[0]["created_at"], 600)
+
+    def test_start_failure_with_commit_keeps_lane_pending_if_requeue_fails(self):
+        info = FakeLaneHost().info()
+        info.update(status="failed", error_class="executor_start_failed")
+        with mock.patch.object(MODULE, "pause_store_dir", return_value=self.tmp.name), \
+             mock.patch.object(MODULE, "gh", return_value=(1, "", "labels unavailable")) as gh, \
+             mock.patch.object(MODULE, "sh") as sh, \
+             mock.patch.object(MODULE, "harvest_fetch") as fetch, \
+             mock.patch.object(MODULE, "log"):
+            result = MODULE.finish("codex", CFG, {"issue": ISSUE, "run": RUN}, info, self.state)
+        self.assertFalse(result["done"])
+        self.assertEqual(result["status"], "requeue-failed")
+        self.assertEqual(result["error"], "labels unavailable")
+        self.assertNotIn(ISSUE, self.state.get("_done", []))
+        gh.assert_called_once_with(["issue", "edit", str(ISSUE), "--remove-label", "in-progress",
+                                    "--remove-label", "lane-failed", "--add-label", "lane-ready"])
+        fetch.assert_not_called()
+        sh.assert_not_called()
+
     def test_host_verify_rc_is_the_acceptance_evidence(self):
         fake, _ = self.finish(subject="fix #1704 parser", message="Rewrote the parser.\n\nCloses #1704",
                               verify_rc=0)
@@ -324,6 +358,123 @@ class LaneRunInfoReadPathTests(unittest.TestCase):
         self.assertEqual(fake.prs, [])
         self.assertEqual(result["status"], "pr-validation-failed")
         self.assertEqual(result["missing"], ["PR 正文缺少验收段或 Verify 段"])
+
+
+class ExecutorStartHarvestTests(unittest.TestCase):
+    def setUp(self):
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        patcher = mock.patch.object(MODULE, "D", directory.name)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def test_start_failure_with_empty_commit_requeues_without_harvest(self):
+        for rc in (0, 1):
+            with self.subTest(relabel_rc=rc), tempfile.TemporaryDirectory() as directory, \
+                 mock.patch.object(MODULE, "pause_store_dir", return_value=directory), \
+                 mock.patch.object(MODULE, "gh", return_value=(rc, "", "labels unavailable")) as gh, \
+                 mock.patch.object(MODULE, "log"), \
+                 mock.patch.object(MODULE, "harvest_fetch", return_value=(True, "", 0)) as fetch, \
+                 mock.patch.object(MODULE, "filter_harvest", return_value=("c0ffee", [".lane-review/PR-1.md"], True)), \
+                 mock.patch.object(MODULE, "label_lane_failed") as failed:
+                state = {"A1": {"issue": 1595, "run": RUN}, "_done": [12]}
+                before = {key: value.copy() for key, value in state.items()}
+                info = {"status": "failed", "error_class": "executor_start_failed",
+                        "branch": "work", "commit": "c0ffee", "repo": CFG["repo"]}
+                result = MODULE.finish("A1", CFG, state["A1"], info, state)
+                self.assertEqual(result["status"], "lane-ready" if rc == 0 else "requeue-failed")
+                self.assertEqual(result["done"], rc == 0)
+                self.assertEqual(state, before, "startup failures must not count as completed attempts")
+                gh.assert_called_once_with(["issue", "edit", "1595", "--remove-label", "in-progress",
+                                            "--remove-label", "lane-failed", "--add-label", "lane-ready"])
+                records = MODULE.pause_records()
+                self.assertEqual(len(records), 1)
+                self.assertEqual(records[0]["scope"], "lane:A1")
+                self.assertEqual(records[0]["expires_at"] - records[0]["created_at"], 600)
+                fetch.assert_not_called()
+                failed.assert_not_called()
+
+    def test_start_failure_requeues_without_count_and_pauses_lane(self):
+        with tempfile.TemporaryDirectory() as directory, \
+             mock.patch.object(MODULE, "pause_store_dir", return_value=directory), \
+             mock.patch.object(MODULE, "gh", return_value=(0, "", "")) as gh, \
+             mock.patch.object(MODULE, "log"), \
+             mock.patch.object(MODULE.time, "time", return_value=1000):
+            state = {"_done": [12]}
+            result = MODULE.finish("A1", CFG, {"issue": 1595, "run": RUN},
+                                   {"status": "failed", "error_class": "executor_start_failed"}, state)
+            self.assertEqual(result["status"], "lane-ready")
+            self.assertTrue(result["done"])
+            self.assertEqual(state["_done"], [12])
+            edits = [c.args[0] for c in gh.call_args_list if c.args[0][:2] == ["issue", "edit"]]
+            self.assertIn("--add-label", edits[0])
+            self.assertEqual(edits[0][-1], "lane-ready")
+            records = MODULE.pause_records(now=1000)
+            self.assertEqual([(r["scope"], r["expires_at"]) for r in records], [("lane:A1", 1600)])
+            self.assertTrue(MODULE.lane_paused("A1", scopes=MODULE.paused_scopes(now=1599)))
+            self.assertFalse(MODULE.lane_paused("A1", scopes=MODULE.paused_scopes(now=1600)))
+
+    def test_failed_requeue_keeps_harvest_pending(self):
+        with tempfile.TemporaryDirectory() as directory, \
+             mock.patch.object(MODULE, "pause_store_dir", return_value=directory), \
+             mock.patch.object(MODULE, "gh", return_value=(1, "", "labels unavailable")), \
+             mock.patch.object(MODULE, "log"):
+            state = {}
+            result = MODULE.finish("A1", CFG, {"issue": 1595, "run": RUN},
+                                   {"error_class": "executor_start_failed"}, state)
+            self.assertFalse(result["done"])
+            self.assertNotIn("_done", state)
+
+
+    def test_tick_harvest_requeues_and_honors_new_pause_immediately(self):
+        for outcome in ("no-commit", "with-commit", "requeue-failed"):
+            with self.subTest(outcome=outcome):
+                self.assert_tick_start_failure(outcome)
+
+    def assert_tick_start_failure(self, outcome):
+        with tempfile.TemporaryDirectory() as directory, contextlib.ExitStack() as stack:
+            for name in ("audit_switches", "host_good", "host_fail", "log", "save_state",
+                         "update_busy_stale", "prefetch_labels", "replenish"):
+                stack.enter_context(mock.patch.object(MODULE, name))
+            stack.enter_context(mock.patch.object(MODULE, "D", directory))
+            stack.enter_context(mock.patch.object(MODULE, "pause_store_dir", return_value=directory))
+            stack.enter_context(mock.patch.object(MODULE, "host_ok", return_value=True))
+            fake = FakeLaneHost(subject="fix #1595 startup crash", message="Closes #1595\n\nVerify: passed")
+            def gh(args, timeout=60):
+                if outcome == "requeue-failed" and args[:2] == ["issue", "edit"]:
+                    return 1, "", "labels unavailable"
+                return fake.gh(args, timeout=timeout)
+            stack.enter_context(mock.patch.object(MODULE, "gh", side_effect=gh))
+            info = {"error_class": "executor_start_failed"}
+            if outcome != "no-commit":
+                info.update(branch="work", commit="c0ffee", repo=CFG["repo"])
+            stack.enter_context(mock.patch.object(MODULE, "remote", return_value={
+                "lane": "idle", "run": info}))
+            fetch = stack.enter_context(mock.patch.object(
+                MODULE, "harvest_fetch", return_value=(True, "", 0)))
+            stack.enter_context(mock.patch.object(
+                MODULE, "filter_harvest", return_value=("c0ffee", [], False)))
+            stack.enter_context(mock.patch.object(MODULE, "queue", return_value=[{"n": 1595}]))
+            stack.enter_context(mock.patch.object(MODULE, "deps_met", return_value=True))
+            stack.enter_context(mock.patch.object(MODULE, "freshen_queue", side_effect=lambda q, s: q))
+            stack.enter_context(mock.patch.object(MODULE, "can_take", return_value=True))
+            stack.enter_context(mock.patch.object(MODULE, "label_state", return_value=("fresh", "")))
+            stack.enter_context(mock.patch.object(MODULE, "sh", side_effect=fake.sh))
+            dispatch = stack.enter_context(mock.patch.object(MODULE, "dispatch", return_value=("new-run", None)))
+            stack.enter_context(mock.patch.object(MODULE, "status_snapshot", return_value={}))
+            state = {"A1": {"issue": 1595, "run": RUN}}
+            MODULE.tick({"A1": CFG}, state, 0)
+            if outcome == "requeue-failed":
+                self.assertEqual(state["A1"]["run"], RUN)
+                self.assertEqual(fake.label_edits, [])
+            else:
+                self.assertNotIn("A1", state)
+                self.assertEqual(fake.label_edits[-1][-1], "lane-ready")
+            self.assertEqual(state["_done"], [])
+            self.assertEqual(fake.prs, [])
+            self.assertTrue(MODULE.lane_paused("A1"))
+            dispatch.assert_not_called()
+            fetch.assert_not_called()
 
 
 if __name__ == "__main__":

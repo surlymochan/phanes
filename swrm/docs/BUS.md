@@ -86,6 +86,8 @@ The worker checks out the requested base, runs swrm's regular local run machiner
 
 `status`, `summary`, `files_changed`, `tests`, and `followups` follow swrm's regular result schema. The bus result adds `branch`, `commit`, and optional `pr_url`. The planner takes the terminal status from a valid `swrm-result` comment authored by the winning claimer, regardless of done or failed labels. It fetches the reported result branch, verifies it locally when requested, writes the usual run result and ledger entry, and never merges or pushes to the target repository. The worker always pushes `swrm/<run_id>`; `branch_hint` is informational and ignored.
 
+Failed results may include an `error_class`. `executor_start_failed` means the executor exited before producing a stable turn; it is distinct from `exec_error`, which indicates a failure after startup.
+
 ## Trust and cancellation
 
 Issue content and comments are untrusted input. The worker accepts a card only when its issue author and first digest comment are both from `bus.allowed_planners` and the digest matches the task JSON in the current body. Workers require a target repository in their worker-local `--repos` or `bus.worker_repos` allowlist. The planner accepts claims and results only from `bus.allowed_executors`; only the earliest allowed claimer's result is used. The planner treats comments as data, never runs comment text, validates the result fields and branch name, and checks the fetched commit against the reported SHA. Workers must stop when an issue is labelled `swrm:cancelled`.
