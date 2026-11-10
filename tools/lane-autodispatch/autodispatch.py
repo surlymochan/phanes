@@ -3363,8 +3363,12 @@ def finish(lane, cfg, st, info, state):
         if missing:
             log(f"{lane} #{n} run {run} PR validation ({mode}): 缺 {'；'.join(missing)}", brain=False)
         rc, out, err = gh(["pr", "create", "--base", "main", "--head", b, "--title", title, "--body", body])
-        url = (out.strip().splitlines() or [""])[-1] if not rc else f"(pr create failed: {err.strip()[-160:]})"
-        delivered = ensure_delivery_state(n) if not rc else False
+        if rc:
+            # No PR exists: the issue is not delivered, so nothing is relabelled, recorded or marked done.
+            log(f"{lane} #{n} run {run} gh pr create failed: {err.strip()[-160:]}")
+            return {"done": False, "status": "pr-create-failed", "error": f"gh pr create failed: {err.strip()[-160:]}", "missing": []}
+        url = (out.strip().splitlines() or [""])[-1]
+        delivered = ensure_delivery_state(n)
         clear_budget_history(state, n)
         record_verify_time(state, n, "evidence_ready")
         log(f"{lane} finished #{n} (run {run}, {info.get('status')}) → {url}"); mark_done(state, n)
