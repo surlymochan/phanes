@@ -28,13 +28,42 @@ class MkCardTests(unittest.TestCase):
         audit.write_text(text, encoding="utf-8")
         return audit
 
-    def build(self, audit, out=None, start=START, end=END):
+    def build(self, audit, out=None, start=START, end=END, checks="check command"):
         out = out or self.root / "card.md"
         result = subprocess.run(
             [sys.executable, str(SCRIPT), str(out), "Card title", str(audit), start, end,
-             "scope text", "check command"],
+             "scope text", checks],
             capture_output=True, text=True, check=False)
         return result, out
+
+    def test_generated_cards_include_acceptance_and_failure_patterns(self):
+        audit = self.write_audit(START + "\nfinding one\n" + END + "\n")
+        for number in range(3):
+            result, out = self.build(audit, out=self.root / f"card-{number}.md")
+            self.assertEqual(result.returncode, 0)
+            card = out.read_text(encoding="utf-8")
+            self.assertIn("labels: p1", card)
+            self.assertIn("验收：check command", card)
+            self.assertIn("## 失败模式清单", card)
+            self.assertIn("docs/defect-patterns.md", card)
+
+    def test_three_generated_cards_pass_real_preflight(self):
+        audit = self.write_audit(START + "\n" + "\n".join(
+            f"Repair scripts/check.ts case {i} and verify its output against the fixture."
+            for i in range(35)) + "\n" + END + "\n")
+        for number, checks in enumerate(("bun scripts/check.ts", "bunx biome check tools/mkcard.py",
+                                         "ls docs/backlog/next/*.md | wc -l | grep -qx 20")):
+            with self.subTest(checks=checks):
+                result, out = self.build(audit, out=self.root / f"real-{number}.md", checks=checks)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                lint = subprocess.run([sys.executable, str(SCRIPT.parents[1] / "swrm/bin/swrm"),
+                                       "card-lint", str(out)], capture_output=True, text=True)
+                self.assertEqual(lint.returncode, 0, lint.stdout + lint.stderr)
+                card = out.read_text()
+                for field in ("docs/defect-patterns.md", "复刻的引擎数据形状清单", "真实形状 fixture",
+                              "单后端 / drain / 暂停 / 已派发后变化 / 合并后清理 / dry-run 无副作用",
+                              "tick/集成级测试"):
+                    self.assertIn(field, card)
 
     def test_missing_start_marker_is_rejected(self):
         audit = self.write_audit("intro\n\n" + END + "\nfinding one\n")

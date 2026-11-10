@@ -433,13 +433,14 @@ class CardDispatchContractTests(BatchCase):
             created.append(list(args))
             return 0, "https://github.com/surlymochan/phanes/issues/1234", ""
 
-        original = AD.gh
+        original, original_lint = AD.gh, AD.preflight_card
         AD.gh = fake_gh
+        AD.preflight_card = lambda text: None  # the filing is under test, not the card lint
         try:
             for name in CARD_NAMES:
                 AD.file_issue(self.cards[name])
         finally:
-            AD.gh = original
+            AD.gh, AD.preflight_card = original, original_lint
 
         self.assertEqual(len(created), COUNT,
                          "the dispatcher filed %d issues for %d cards" % (len(created), COUNT))
