@@ -2804,6 +2804,39 @@ def file_issue(text, extra=()):
     if rc: raise RuntimeError(e.strip()[-200:])
     return "#" + o.strip().rsplit("/", 1)[-1]
 
+def find_issue_by_title(title):
+    """The number of the issue with exactly this title, "" when none exists, None when it cannot be told."""
+    rc, o, _ = gh(["issue", "list", "--state", "all", "--search", f'"{title}" in:title', "--limit", "30", "--json", "number,title"])
+    if rc: return None
+    try: rows = json.loads(o)
+    except ValueError: return None
+    if not isinstance(rows, list): return None
+    for row in rows:
+        if isinstance(row, dict) and row.get("title") == title and row.get("number") is not None: return "#" + str(row["number"])
+    return ""
+
+def file_issue_once(text, key, state):
+    """File the card once, even when the answer of `gh issue create` is lost (Refs #1662).
+
+    The server may have created the issue while the client saw a timeout. The key of the card is
+    persisted as pending before the call; a card that is still pending in a later tick is first looked
+    up by its exact title, and only filed again when no such issue exists. Returns the issue, or None
+    when the card must wait for the next tick (the call failed, or the lookup could not tell)."""
+    pending = state.setdefault("_import_pending", {})
+    title = card_lines(text)[0].lstrip("# ").strip()
+    if key in pending:
+        found = find_issue_by_title(pending[key])
+        if found is None:
+            log(f"card {key}: a pending creation cannot be checked (issue list failed); retried next tick", brain=False); return None
+        if found:
+            pending.pop(key, None); save_state(state)
+            log(f"card {key}: the earlier creation reached the server as {found}; not filed again", brain=False)
+            return found + "(already filed)"
+    pending[key] = title; save_state(state)
+    issue = file_issue(text)
+    pending.pop(key, None); save_state(state)
+    return issue
+
 PLANNER = """# 规划：为 lane 队列写 {k} 条新任务（{tag}）
 labels: p1,backend:codex,planner
 自动补队列任务。读 main 上的代码与 `docs/reviews/`、`docs/scenario/`、`examples/org-health-local/`，写 {k} 个新文件 `docs/backlog/next/{tag}-01.md` … `{tag}-{k:02d}.md`，每个文件是一条可独立派给 lane 的小任务，格式严格为：
@@ -2849,9 +2882,11 @@ def replenish(k, state):
             target = move_without_overwrite(f"{bd}/{f}", f"{bd}/rejected/{f}")
             rejected += 1
             log(f"backlog {f}: {defect} → {target}", brain=False); continue
-        try: out.append(file_issue(text))
+        try: issue = file_issue_once(text, "backlog/" + f, state)
         except Exception as e:
             log(f"backlog {f}: {e}", brain=False); continue  # one failing card must not block the batch
+        if issue is None: continue
+        out.append(issue)
         move_without_overwrite(f"{bd}/{f}", f"{bd}/filed/{f}")
     MINT_EVIDENCE["rejected"] = rejected
     G = ["git", "-C", "/workspace/phanes-repo"]
@@ -2867,9 +2902,10 @@ def replenish(k, state):
         if defect:
             imp.append(path); save_state(state)
             log(f"repo backlog {path}: {defect} → skipped", brain=False); continue
-        try: issue = file_issue(text)
+        try: issue = file_issue_once(text, path, state)
         except Exception as e:
             log(f"repo backlog {path}: {e}", brain=False); continue  # keep the card unimported: it is retried next tick
+        if issue is None: continue
         imp.append(path); save_state(state); out.append(issue)
     if len(out) < k:
         rc, o, _ = gh(["issue", "list", "--state", "open", "--label", "planner", "--json", "number"])

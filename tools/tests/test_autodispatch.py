@@ -246,6 +246,59 @@ class ReplenishTriggerTests(unittest.TestCase):
         self.assertEqual(autodispatch.replenish(1, state), [])
         self.assertEqual(len(created), 1)
 
+    def test_a_lost_create_answer_does_not_file_the_repo_card_twice_across_ticks(self):
+        """The server creates the issue but the client sees a timeout: the next tick must find it, not file again."""
+        text = "# Lost answer\n\nlabels: p1\nBody\n验收：test\n"
+        path = "docs/backlog/next/lost.md"
+        self.patch("file_issue", self.real_file_issue)
+        self.patch("sh", lambda args, **kwargs: (0, text if "show" in args else path, ""))
+        server = []
+        answers = iter([(1, "", "context deadline exceeded"), (0, "https://example.com/issues/777", "")])
+
+        def gh(args):
+            if args[:2] == ["issue", "create"]:
+                server.append(args)  # the server created the issue either way
+                return next(answers)
+            if args[:2] == ["issue", "list"] and "--search" in args:
+                return 0, json.dumps([{"number": 777, "title": "Lost answer"}] if server else []), ""
+            return self.fake_gh(args)
+
+        self.patch("gh", gh)
+        state = {}
+
+        self.assertEqual(autodispatch.replenish(1, state), [])     # tick 1: the answer is lost
+        self.assertNotIn(path, state.get("_imported", []))
+        self.assertIn(path, state["_import_pending"])               # the unknown state is persisted
+        self.assertEqual(autodispatch.replenish(1, state), ["#777(already filed)"])  # tick 2: found by title
+        self.assertEqual(len(server), 1)                            # never created twice
+        self.assertEqual(state["_imported"], [path])
+        self.assertEqual(state["_import_pending"], {})
+        self.assertEqual(autodispatch.replenish(1, state), [])
+        self.assertEqual(len(server), 1)
+
+    def test_a_pending_card_is_filed_again_only_when_no_such_issue_exists(self):
+        text = "# Never created\n\nlabels: p1\nBody\n验收：test\n"
+        path = "docs/backlog/next/never.md"
+        self.patch("file_issue", self.real_file_issue)
+        self.patch("sh", lambda args, **kwargs: (0, text if "show" in args else path, ""))
+        created = []
+        answers = iter([(1, "", "connection refused"), (0, "https://example.com/issues/778", "")])
+
+        def gh(args):
+            if args[:2] == ["issue", "create"]:
+                created.append(args)
+                return next(answers)
+            if args[:2] == ["issue", "list"] and "--search" in args:
+                return 0, "[]", ""
+            return self.fake_gh(args)
+
+        self.patch("gh", gh)
+        state = {}
+        self.assertEqual(autodispatch.replenish(1, state), [])
+        self.assertEqual(autodispatch.replenish(1, state), ["#778"])
+        self.assertEqual(len(created), 2)
+        self.assertEqual(state["_imported"], [path])
+
 
 class ReplenishUnreadableQueueTests(unittest.TestCase):
     """Refs #1662: an unreadable queue must not mint a new batch on every tick."""
