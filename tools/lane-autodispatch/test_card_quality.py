@@ -94,6 +94,8 @@ class CardQualityTickTests(unittest.TestCase):
             "missing repository-root file reference": "读取missing.py 并运行：\n```\npytest -q\n```",
             "ambiguous acceptance without executable command": "验收：通过或至少完成检查。",
             "non-command code block": "验收：检查结果正确。\n```json\n{\"ok\": true}\n```",
+            "vague acceptance directly followed by a command": "验收：功能正常\n```sh\npytest -q\n```",
+            "command with a manual alternative": "验收：pytest -q 或人工确认",
             "help-only command": "验收：\n```sh\npytest --help\n```",
             "collect-only command": "验收：\n```sh\npytest --collect-only\n```",
             "vague acceptance masked by a command elsewhere": "验收：功能正常\n\n其它说明。\n```sh\npytest -q\n```",
