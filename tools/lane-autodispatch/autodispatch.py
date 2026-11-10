@@ -12,7 +12,7 @@ PAUSE-HOST-<HOST>, PAUSE-BACKEND-<BACKEND> and PAUSE-MINT (no new issue minted).
 A hold that a program keeps under a scope of its own (`host:<host>@health`) holds the host as well (Refs #1367).
 A legacy marker with an `until=<epoch|ISO>` deadline stops holding after that deadline, while the file stays as evidence (Refs #1592).
 """
-import base64, hashlib, json, math, os, re, shlex, stat, subprocess, sys, time, tempfile, traceback, concurrent.futures as cf
+import base64, hashlib, importlib.util, json, math, os, re, shlex, stat, subprocess, sys, time, tempfile, traceback, concurrent.futures as cf
 from datetime import datetime, timezone
 HOME = os.path.expanduser("~"); D = f"{HOME}/phanes-ctl/autodispatch"
 REPO = "surlymochan/phanes"; LOCAL = "/workspace/phanes-repo"; BRAIN_LOG = "/workspace/phanes/brain/log.md"
@@ -1910,6 +1910,71 @@ def minimax_burn_status(now=None, max_age_s=MM_BURN_MAX_AGE_S):
         if rows: fields["_minimax_hourly_buckets"] = rows
     return fields
 
+# Shared by the backlog mint and dispatch decisions (Refs #1721).
+_HOT_DIR = os.path.dirname(os.path.abspath(__file__))
+_spec = importlib.util.spec_from_file_location("ad_hotfiles", os.path.join(_HOT_DIR, "hotfiles.py"))
+HOTFILES = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(HOTFILES)
+with open(os.path.join(_HOT_DIR, "hot_policy.json"), encoding="utf-8") as _stream:
+    _hot_policy = json.load(_stream)
+HOT_LOCK = HOTFILES.HotLock(
+    dict(_hot_policy["hot_shared"], **{f: _hot_policy["hot_default"] for f in _hot_policy["hot_bare"]}),
+    _hot_policy["hot_default"])
+HOT_UNION = set(HOTFILES.parse_hot_files("热文件：" + " ".join(_hot_policy["hot_union"])))
+
+
+def hot_files(body):
+    return [f for f in HOTFILES.parse_hot_files(body) if f not in HOT_UNION and not HOTFILES.is_doc_file(f)]
+
+
+def hot_inflight(state):
+    counts = {}
+    for lane, entry in (state or {}).items():
+        if lane.startswith("_") or not isinstance(entry, dict) or not entry.get("issue"): continue
+        # Runs dispatched before this feature have no declared files in state.
+        if not isinstance(entry.get("hot"), list) or not all(isinstance(f, str) for f in entry["hot"]):
+            counts["__unknown__"] = 1
+            continue
+        for path in set(hot_files("热文件：" + " ".join(entry["hot"]))):
+            counts[path] = counts.get(path, 0) + 1
+    return counts
+
+
+def hot_verdict(body, counts):
+    files = sorted(hot_files(body))
+    verdict = HOT_LOCK.preflight(files, counts)
+    if files and counts.get("__unknown__"):
+        verdict["blocked"] = True
+        verdict["unknown_inflight"] = True
+        verdict["advice"] = "在途热文件未知，等待或核实后重试"
+    return verdict
+
+
+def blocked_details(q, hot_blocked, memory_blocks, state):
+    now = time.time()
+    since = state.setdefault("_blocked_since", {})
+    if not isinstance(since, dict): since = {}; state["_blocked_since"] = since
+    details = []
+    for item in q:
+        n = item["n"]
+        if not item.get("deps_ok", True): reason = "deps"; files = []
+        elif n in hot_blocked:
+            reason = "hot_file"; files = [c["file"] for c in hot_blocked[n]["conflicts"]]
+            if hot_blocked[n].get("unknown_inflight"): files = hot_blocked[n]["files"]
+        elif n in memory_blocks: reason = "memory"; files = []
+        else: continue
+        key = str(n)
+        try: first = float(since[key])
+        except (KeyError, TypeError, ValueError): first = now; since[key] = first
+        details.append({"issue": n, "reason": reason, "files": files,
+                        "unknown_inflight": bool(hot_blocked.get(n, {}).get("unknown_inflight")),
+                        "wait_seconds": max(0, int(now - first))})
+    active = {str(d["issue"]) for d in details}
+    for key in list(since):
+        if key not in active: since.pop(key, None)
+    return details
+
+
 def status_snapshot(lanes, state, res, ready, blocked, records=None):
     """Build the observable lane status row, including this process's stale skips."""
     lanes = lanes or {}
@@ -2985,6 +3050,8 @@ def tick(lanes, state, last_warn):
         if not isinstance(previous, dict): previous = {}
         res = {L: {"lane": "paused"} for L in lanes}
         st = status_snapshot(lanes, state, res, previous.get("_ready", 0), previous.get("_blocked", 0), records)
+        for key in ("_blocked_details", "_blocked_reasons"):
+            if key in previous: st[key] = previous[key]
         with open(path, "w") as stream: json.dump(st, stream, ensure_ascii=False, indent=1)
         return last_warn
     label_cache_reset()  # authoritative label reads are cached for one tick only
@@ -3125,7 +3192,9 @@ def tick(lanes, state, last_warn):
         for c in candidates:
             if c not in eligible: continue
             status, detail = label_state(c["n"])
-            if status == "fresh": pick = c; break
+            if status == "fresh":
+                if hot_verdict(c.get("body", ""), hot_inflight(state))["blocked"]: continue
+                pick = c; break
             if status == "stale":
                 q.remove(c); skip_stale(c["n"], detail)  # try the next one this tick
                 continue
@@ -3139,8 +3208,8 @@ def tick(lanes, state, last_warn):
         except Exception as e:
             dispatch_failed(L, cfg, pick, e, busy=bool(LANE_BUSY_RE.search(str(e))))
             return "no-capacity"
-        q.remove(pick); state[L] = {"issue": pick["n"], "run": run, "host": cfg["host"], "base": commit, "at": time.strftime("%F %T"), "verify": ver, "class": "verify" if pick.get("verify") else "work"}
-        state["_pool_entered_at"].pop(str(pick["n"]), None)
+        q.remove(pick); state[L] = {"issue": pick["n"], "run": run, "host": cfg["host"], "base": commit, "at": time.strftime("%F %T"), "verify": ver, "class": "verify" if pick.get("verify") else "work", "hot": hot_files(pick.get("body", ""))}
+        state.get("_pool_entered_at", {}).pop(str(pick["n"]), None)
         metrics = verify_metrics(state)
         # The snapshot and saved state must reflect the slot just occupied.
         if AD_VERIFY_SHARE_ENABLED: metrics["deficit"] = queue_class_limits(lanes, state, idle)[0]
@@ -3223,10 +3292,14 @@ def tick(lanes, state, last_warn):
         rejections = memory_rejections.get(item["n"], {})
         if candidates and all(L in rejections for L in candidates):
             memory_blocks[item["n"]] = list(rejections.values())
-    blocked += len(memory_blocks)
+    hot_blocked = {i["n"]: verdict for i in q if i.get("deps_ok", True)
+                   for verdict in [hot_verdict(i.get("body", ""), hot_inflight(state))]
+                   if verdict["blocked"]}
+    details = blocked_details(q, hot_blocked, memory_blocks, state)
+    blocked = len(details)
     ready = len(q) - blocked
     # refill when the queue is short, or when some backend's lanes could not all be fed (counting cross-pin fallback)
-    short = {b: sum(c["backend"] == b for c in lanes.values()) - sum(1 for i in q if i.get("deps_ok", True) and can_take(b, i, verify_gate=False))
+    short = {b: sum(c["backend"] == b for c in lanes.values()) - sum(1 for i in q if i.get("deps_ok", True) and i["n"] not in hot_blocked and i["n"] not in memory_blocks and can_take(b, i, verify_gate=False))
              for b in {c["backend"] for c in lanes.values()}}
     starve = max(short.values(), default=0)
     if ready < LOW or starve > 0:
@@ -3235,7 +3308,10 @@ def tick(lanes, state, last_warn):
             if time.time() - last_warn > 600:
                 log(f"{why}: mint paused, no new issue minted", brain=False); last_warn = time.time()
         else:
-            filed = replenish(max(LOW - ready, starve), state)
+            global MINT_STARVED
+            MINT_STARVED = starve > 0
+            try: filed = replenish(max(LOW - ready, starve), state)
+            finally: MINT_STARVED = False
             if filed: log(f"{why}: filed {len(filed)} issue(s) from backlog: {' '.join(filed)}")
             elif time.time() - last_warn > 600:
                 log(f"WARNING queue low: {ready} dispatchable lane-ready issue(s) left (+{blocked} waiting on 依赖), backlog/ empty (threshold {LOW})"); last_warn = time.time()
@@ -3245,6 +3321,8 @@ def tick(lanes, state, last_warn):
     refresh_minimax_burn()  # the burn watchdog refreshes the reading the status shows (Refs #1671)
     st = status_snapshot(lanes, state, res, ready, blocked, records)
     st["_memory_blocks"] = memory_blocks
+    st["_blocked_details"] = details
+    st["_blocked_reasons"] = {reason: sum(d["reason"] == reason for d in details) for reason in ("deps", "hot_file", "memory")}
     with open(f"{D}/lanes-status.json", "w") as stream:
         json.dump(st, stream, ensure_ascii=False, indent=1)
     return last_warn
@@ -3259,6 +3337,52 @@ def file_issue(text, extra=()):
     if rc: raise RuntimeError(e.strip()[-200:])
     return "#" + o.strip().rsplit("/", 1)[-1]
 
+def record_mint(record):
+    ledger = load(f"{D}/mint-log.json", [])
+    if not isinstance(ledger, list): ledger = []
+    ledger.append(record)
+    tmp = f"{D}/mint-log.json.tmp"
+    with open(tmp, "w", encoding="utf-8") as stream:
+        json.dump(ledger[-100:], stream, ensure_ascii=False, indent=1)
+    os.replace(tmp, f"{D}/mint-log.json")
+
+
+MINT_STARVED = False  # set by the tick while a lane has no card it may take
+
+
+def mint_card(text, state, counts, source, starved=None):
+    if starved is None: starved = MINT_STARVED
+    lines = text.splitlines()
+    if len(lines) < 2 or not lines[0].startswith("#") or not lines[1].startswith("labels:"):
+        record_mint({"at": time.strftime("%F %T"), "source": source,
+                     "minted": False, "reason": "bad_format"})
+        raise ValueError("bad card format")
+    verdict = hot_verdict("\n".join(lines[2:]), counts)
+    record = {"at": time.strftime("%F %T"), "title": lines[0].lstrip("# ").strip(),
+              "source": source, "preflight": verdict, "minted": False, "issue": None}
+    if verdict["blocked"] and starved:
+        # A lane has nothing it may take: a card that waits for its hot file is still
+        # supply the status explains, a refused one leaves the lane idle (Refs #1721).
+        record["starved_override"] = True
+    elif verdict["blocked"]:
+        record["reason"] = "hot_file_conflict"
+        record_mint(record)
+        log(f"mint refused {record['title']}: {verdict['advice']} {verdict['conflicts']}", brain=False)
+        return None
+    # Persist the decision before the external write, including if issue creation fails.
+    record_mint({**record, "reason": "mint_pending"})
+    try:
+        ref = file_issue(text)
+    except Exception:
+        record_mint({**record, "reason": "mint_failed"})
+        raise
+    record.update(minted=True, issue=ref.lstrip("#"))
+    for path in verdict["files"]: counts[path] = counts.get(path, 0) + 1
+    try: record_mint(record)
+    except OSError as e: log(f"mint ledger final write failed: {e}", brain=False)
+    return ref
+
+
 PLANNER = """# 规划：为 lane 队列写 {k} 条新任务（{tag}）
 labels: p1,backend:codex,planner
 自动补队列任务。读 main 上的代码与 `docs/reviews/`、`docs/scenario/`、`examples/org-health-local/`，写 {k} 个新文件 `docs/backlog/next/{tag}-01.md` … `{tag}-{k:02d}.md`，每个文件是一条可独立派给 lane 的小任务，格式严格为：
@@ -3267,6 +3391,8 @@ labels: p1,backend:codex,planner
 # <中文标题>
 labels: <p1 或 p2>,backend:<pi|codex|agy>
 <任务正文：要改的文件路径、具体改动、边界；不得依赖其它未完成任务>
+
+热文件：`<要改的仓库相对路径>`（多个用逗号分隔）
 
 验收：`<一条在仓库根或 cd 子目录后可直接运行、只用 python3 标准库/现有脚本的命令>`
 ```
@@ -3285,10 +3411,13 @@ def replenish(k, state):
     (2) docs/backlog/next/*.md on origin/main not yet imported (written by planner runs); (3) if still short and no planner
     issue is open, file one planner issue asking a lane to write the next batch into docs/backlog/next/."""
     bd = f"{D}/backlog"; os.makedirs(f"{bd}/filed", exist_ok=True); out = []
+    counts = hot_inflight(state)
     for f in sorted(x for x in os.listdir(bd) if x.endswith(".md")):
         if len(out) >= k: return out
-        try: out.append(file_issue(open(f"{bd}/{f}").read()))
+        try: ref = mint_card(open(f"{bd}/{f}").read(), state, counts, f"backlog/{f}")
         except Exception as e: log(f"backlog {f}: {e}", brain=False); return out
+        if ref is None: continue
+        out.append(ref)
         os.replace(f"{bd}/{f}", f"{bd}/filed/{f}")
     G = ["git", "-C", "/workspace/phanes-repo"]
     sh(G + ["fetch", "-q", "origin", "main"], timeout=120)
@@ -3298,11 +3427,13 @@ def replenish(k, state):
         if len(out) >= k: break
         if path in imp: continue
         rc, text, _ = sh(G + ["show", f"origin/main:{path}"])
-        imp.append(path); save_state(state)
         try:
-            if rc or not text.startswith("#") or not text.splitlines()[1].startswith("labels:"): raise RuntimeError("bad format")
-            out.append(file_issue(text))
-        except Exception as e: log(f"repo backlog {path}: {e}", brain=False)
+            if rc: raise RuntimeError("card read failed")
+            ref = mint_card(text, state, counts, path)
+        except Exception as e: log(f"repo backlog {path}: {e}", brain=False); continue
+        if ref is None: continue
+        imp.append(path); save_state(state)
+        out.append(ref)
     if len(out) < k:
         rc, o, _ = gh(["issue", "list", "--state", "open", "--label", "planner", "--json", "number"])
         if not rc and json.loads(o) == []:

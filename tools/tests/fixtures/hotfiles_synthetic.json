@@ -1,0 +1,9 @@
+{
+  "source": "合成样本：测试生成在途 lane 状态；不是当晚 AD 运行记录。",
+  "cases": [
+    {"hot": "src/shared.py", "inflight": [], "blocked": false},
+    {"hot": "src/shared.py", "inflight": ["src/shared.py"], "blocked": true},
+    {"hot": "src/other.py", "inflight": ["src/shared.py"], "blocked": false},
+    {"hot": "docs/guide.md", "inflight": ["docs/guide.md"], "blocked": false}
+  ]
+}

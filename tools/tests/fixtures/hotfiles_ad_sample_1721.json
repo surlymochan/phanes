@@ -1,0 +1,51 @@
+{
+  "_doc": "热文件样本（可核实来源）：样本的卡片是 planner 写进仓库、AD 从 docs/backlog/next/ 导入的真实卡片。`card` 是仓库相对路径，`sha256` 是该卡片文件在仓库里的 sha256（卡片被改动时回放测试会失败，样本不会与仓库脱节），`hot_files` 是该卡正文里写明要改的仓库相对路径（回放测试按同一条规则从卡片正文重新推导并比对，所以这份清单不是人手写下的）。`cases` 是当晚那批卡在 AD 里的回放顺序：`inflight` 是该卡被铸卡时在途卡占用的热文件计数（由排在它前面、并且真的派出去的那些卡的 hot_files 按规则累加得到，回放测试会重新推导并比对），`blocked` 是该卡必须被预检拦下、并且在 AD 侧也必须判定为阻塞的卡。热文件上限取自共享清单（HOT_SHARED），未单列的文件用清单的默认上限；该样本里上限为 1：同一热文件同时只允许一张卡在途。",
+  "_source": "planner 批次 20261101-0335（docs/backlog/next/20261101-0335-*.md，仓库内可查）：该批的 17 与 18 两张卡都改 swrm/bin/swrm（同一热文件，上限 1），是真实的在途热文件冲突；14 号卡只改 docs/ 下的文档，文档永不阻塞，所以它永远放行。",
+  "batch": "docs/backlog/next/20261101-0335",
+  "cards": {
+    "docs/backlog/next/20261101-0335-17.md": {
+      "sha256": "68b913df53aad2f30a917433bce3cfe61c4ff33b7d3e22a78e3895da22ec7aeb",
+      "hot_files": [
+        "swrm/tests/test_lessons.py",
+        "swrm/bin/swrm"
+      ]
+    },
+    "docs/backlog/next/20261101-0335-18.md": {
+      "sha256": "44711d239f712b3b6a12f8ca02b88262ed63f9e3c9b0752afcb9eeeecc72c9ea",
+      "hot_files": [
+        "swrm/tests/test_patterns.py",
+        "swrm/bin/swrm"
+      ]
+    },
+    "docs/backlog/next/20261101-0335-14.md": {
+      "sha256": "333ef64e5ff6408a84e658ca805cb5f5c6f59b5e6cd0cdeac5eb942bdc9e5ba5",
+      "hot_files": [
+        "docs/scenario/org-diagnosis/pipeline.md",
+        "docs/scenario/org-diagnosis/review-checklist.md"
+      ]
+    }
+  },
+  "cases": [
+    {
+      "card": "docs/backlog/next/20261101-0335-17.md",
+      "inflight": {},
+      "blocked": false
+    },
+    {
+      "card": "docs/backlog/next/20261101-0335-18.md",
+      "inflight": {
+        "swrm/bin/swrm": 1,
+        "swrm/tests/test_lessons.py": 1
+      },
+      "blocked": true
+    },
+    {
+      "card": "docs/backlog/next/20261101-0335-14.md",
+      "inflight": {
+        "swrm/bin/swrm": 1,
+        "swrm/tests/test_lessons.py": 1
+      },
+      "blocked": false
+    }
+  ]
+}
