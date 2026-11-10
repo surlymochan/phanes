@@ -172,6 +172,36 @@ class DispatchPauseTests(DispatchPauseHarness):
         self.assertIsNone(DISPATCH.pause_reason("CX2", self.LANES["CX2"]))
 
 
+class QueueFailureTests(DispatchPauseHarness):
+    def run_tick(self, state, queue):
+        with patch.object(DISPATCH, "audit_switches"), \
+             patch.object(DISPATCH, "queue", queue), \
+             patch.object(DISPATCH, "BRAIN_LOG", str(self.tmp / "brain.log")):
+            return DISPATCH.tick({}, state, 0)
+
+    def test_old_queue_signature_raises_and_records_traceback(self):
+        state = {"_pool_entered_at": {"42": 123}}
+        with self.assertRaises(TypeError):
+            self.run_tick(state, lambda: [])
+        saved = json.loads((self.state / "state.json").read_text())
+        self.assertEqual(saved["_queue_failures"], 1)
+        self.assertEqual(saved["_pool_entered_at"], {"42": 123})
+        self.assertIn("Traceback (most recent call last)", (self.tmp / "brain.log").read_text())
+        self.assertIn("TypeError", (self.tmp / "brain.log").read_text())
+
+    def test_infrastructure_failure_recovers(self):
+        state = {}
+        def unavailable(_state):
+            raise OSError("offline")
+        for count in (1, 2):
+            self.run_tick(state, unavailable)
+            self.assertEqual(state["_queue_failures"], count)
+            self.assertEqual(json.loads((self.state / "state.json").read_text())["_queue_failures"], count)
+        self.run_tick(state, lambda _state: [])
+        self.assertEqual(state["_queue_failures"], 0)
+        self.assertEqual(json.loads((self.state / "state.json").read_text())["_queue_failures"], 0)
+
+
 class GlobalPauseStatusTests(DispatchPauseHarness):
     """A globally paused tick refreshes status without doing dispatch work."""
 

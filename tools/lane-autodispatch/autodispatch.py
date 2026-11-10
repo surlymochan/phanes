@@ -12,7 +12,7 @@ PAUSE-HOST-<HOST>, PAUSE-BACKEND-<BACKEND> and PAUSE-MINT (no new issue minted).
 A hold that a program keeps under a scope of its own (`host:<host>@health`) holds the host as well (Refs #1367).
 A legacy marker with an `until=<epoch|ISO>` deadline stops holding after that deadline, while the file stays as evidence (Refs #1592).
 """
-import base64, hashlib, json, math, os, re, shlex, stat, subprocess, sys, time, tempfile, concurrent.futures as cf
+import base64, hashlib, json, math, os, re, shlex, stat, subprocess, sys, time, tempfile, traceback, concurrent.futures as cf
 from datetime import datetime, timezone
 HOME = os.path.expanduser("~"); D = f"{HOME}/phanes-ctl/autodispatch"
 REPO = "surlymochan/phanes"; LOCAL = "/workspace/phanes-repo"; BRAIN_LOG = "/workspace/phanes/brain/log.md"
@@ -2955,8 +2955,13 @@ def tick(lanes, state, last_warn):
         try: q = queue(state)
         except Exception as e:
             queue_failed = True; queue_error = str(e)
-            log(f"queue error: {e}", brain=False)
-            return False
+            state["_queue_failures"] = state.get("_queue_failures", 0) + 1
+            log(f"queue error:\n{traceback.format_exc()[-4000:]}", brain=True)
+            save_state(state)
+            if isinstance(e, (RuntimeError, OSError, subprocess.SubprocessError, json.JSONDecodeError)):
+                return False
+            raise
+        state["_queue_failures"] = 0
         save_state(state)  # admission clocks survive --once and failures later in the tick
         for i in q:
             if "deps_ok" not in i: i["deps_ok"] = deps_met(i)

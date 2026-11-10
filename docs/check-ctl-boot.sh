@@ -16,8 +16,8 @@ check_doc() {
     return 1
   fi
   local missing=0
-  for term in "lane-autodispatch" "bus-worker" "ib-refresh" \
-              "autodispatch/heartbeat" "bus-worker/heartbeat" "ctl-loop.heartbeat" \
+  for term in "lane-autodispatch" "bus-worker" \
+              "autodispatch/heartbeat" "bus-worker/heartbeat" \
               "start-control-plane"; do
     if ! grep -qF "$term" "$doc_file"; then
       echo "DOC MISSING: $term" >&2
@@ -36,7 +36,7 @@ check_paths() {
   local bin_dir="$base/bin"
 
   echo "Checking control-plane binaries in $bin_dir..."
-  local bins=(start-control-plane ctl-loop lane-autodispatch lane-merge bus-worker-loop health-loop ib-refresh)
+  local bins=(start-control-plane lane-autodispatch lane-merge bus-worker-loop health-loop)
   for b in "${bins[@]}"; do
     if [[ -x "$bin_dir/$b" || -f "$bin_dir/$b" ]]; then
       echo "OK bin $b"
@@ -63,14 +63,6 @@ check_paths() {
     miss=1
   fi
 
-  # ib-refresh heartbeat / status
-  if [[ -f "$base/ctl-loop.heartbeat" || -f "$base/ib-refresh.status" ]]; then
-    echo "OK heartbeat ctl-loop.heartbeat or ib-refresh.status"
-  else
-    echo "MISSING ib-refresh heartbeat $base/ctl-loop.heartbeat or $base/ib-refresh.status"
-    miss=1
-  fi
-
   return "$miss"
 }
 
@@ -83,19 +75,15 @@ run_self_test() {
   # Clean up before returning
   mkdir -p "$sim_dir/bin" "$sim_dir/autodispatch" "$sim_dir/bus-worker"
   touch "$sim_dir/bin/start-control-plane" \
-        "$sim_dir/bin/ctl-loop" \
         "$sim_dir/bin/lane-autodispatch" \
         "$sim_dir/bin/lane-merge" \
         "$sim_dir/bin/bus-worker-loop" \
         "$sim_dir/bin/health-loop" \
-        "$sim_dir/bin/health-check.py" \
-        "$sim_dir/bin/ib-refresh"
+        "$sim_dir/bin/health-check.py"
   chmod +x "$sim_dir/bin"/*
 
   touch "$sim_dir/autodispatch/heartbeat"
   touch "$sim_dir/bus-worker/heartbeat"
-  touch "$sim_dir/ctl-loop.heartbeat"
-  touch "$sim_dir/ib-refresh.status"
 
   local test_res=0
   check_paths "$sim_dir" || test_res=$?
