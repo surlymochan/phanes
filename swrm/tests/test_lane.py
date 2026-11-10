@@ -17,6 +17,8 @@ from unittest import mock
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 CLI = ROOT / "bin" / "swrm"
 FIXTURES = ROOT / "tests" / "fixtures"
+GIT_IDENTITY = {"GIT_AUTHOR_NAME": "Lane Test", "GIT_AUTHOR_EMAIL": "lane-test@example.invalid",
+                "GIT_COMMITTER_NAME": "Lane Test", "GIT_COMMITTER_EMAIL": "lane-test@example.invalid"}
 
 
 class CodexSandboxTests(unittest.TestCase):
@@ -52,7 +54,7 @@ class CodexSandboxTests(unittest.TestCase):
 
     def git(self, cwd, *args):
         return subprocess.run(["git", "-C", str(cwd), *args], check=True,
-                              capture_output=True, text=True).stdout.strip()
+                              capture_output=True, text=True, env={**os.environ, **GIT_IDENTITY}).stdout.strip()
 
     def test_policy_modes_and_network_restrictions(self):
         class RecordingChild:
@@ -208,7 +210,9 @@ class LaneTests(unittest.TestCase):
             self.env["FAKE_AGY_LOG"] = str(self.root / "fake-agy.jsonl")
 
     def git(self, *args):
-        return subprocess.run(["git", *args], cwd=self.repo, check=True, capture_output=True, text=True).stdout.strip()
+        # The lane workspace is an independent clone without the repo's local identity.
+        return subprocess.run(["git", *args], cwd=self.repo, check=True, capture_output=True, text=True,
+                              env={**os.environ, **GIT_IDENTITY}).stdout.strip()
 
     def cli(self, *args, check=True, timeout=15):
         if self.backend == "pi":

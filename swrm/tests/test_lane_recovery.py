@@ -11,6 +11,9 @@ from unittest import mock
 
 import _load
 
+GIT_IDENTITY = {"GIT_AUTHOR_NAME": "Lane Test", "GIT_AUTHOR_EMAIL": "lane-test@example.invalid",
+                "GIT_COMMITTER_NAME": "Lane Test", "GIT_COMMITTER_EMAIL": "lane-test@example.invalid"}
+
 
 xs = _load.load()
 
@@ -37,8 +40,8 @@ class LaneRecoveryTests(unittest.TestCase):
         self.tmp.cleanup()
 
     def git(self, *args, cwd=None):
-        return subprocess.run(["git", *args], cwd=cwd or self.repo, check=True,
-                              capture_output=True, text=True).stdout.strip()
+        return subprocess.run(["git", *args], cwd=cwd or self.repo, check=True, capture_output=True,
+                              text=True, env={**os.environ, **GIT_IDENTITY}).stdout.strip()
 
     def setup_run(self):
         rdir = self.runs / self.run_id
