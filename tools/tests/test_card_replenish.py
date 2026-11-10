@@ -33,6 +33,7 @@ class ReplenishPreflightTests(unittest.TestCase):
         self.logs = []
         self.repo_cards = {}
         self.create_rc = 0
+        self.planner_open = False
         for name, value in (("D", str(self.home)), ("LOCAL", str(ROOT)),
                             ("sh", self.git), ("gh", self.github),
                             ("save_state", lambda state: None),
@@ -57,12 +58,15 @@ class ReplenishPreflightTests(unittest.TestCase):
             self.created.append(args)
             return 0, f"https://example.invalid/issues/{len(self.created)}", ""
         if args[:2] == ["issue", "list"]:
+            if self.planner_open and "planner" in args:  # an open planner issue: the refill files no planner card of its own
+                return 0, '[{"number": 99, "title": "open planner"}]', ""
             return 0, "[]", ""
         self.fail(f"unexpected issue transport: {args}")
 
     def test_local_rejection_preserves_card_and_reports_item(self):
         backlog = self.home / "backlog"
         backlog.mkdir()
+        self.planner_open = True  # the refill files no planner card of its own here
         source = backlog / "bad.md"
         source.write_text(card("pytest 功能正常"))
         state = {}
@@ -92,6 +96,12 @@ class ReplenishPreflightTests(unittest.TestCase):
         AD.replenish(1, state)
         self.assertEqual(state["_imported"], [good])
         self.create_rc = 0
+        self.planner_open = True
+        # the failed creation is an unknown outcome: it is created again only after the settle
+        # time and two empty listings (Refs #1662)
+        for marker in state["_import_pending"]:
+            state["_import_pending"][marker] -= AD.CREATE_SETTLE_S + 1
+        self.assertEqual(AD.replenish(1, state), [])
         self.assertEqual(AD.replenish(1, state), ["#2"])
         self.assertEqual(state["_imported"], [good, bad])
 
