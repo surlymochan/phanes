@@ -171,6 +171,8 @@ class PiBrokerUsageTests(unittest.TestCase):
         SCRATCH.mkdir(exist_ok=True)
         self.tmp = tempfile.TemporaryDirectory(dir=SCRATCH)
         self.addCleanup(self.tmp.cleanup)
+        self.sockets = tempfile.TemporaryDirectory(prefix='pb')
+        self.addCleanup(self.sockets.cleanup)
         self.root = pathlib.Path(self.tmp.name)
         self.module = self.root / 'auth.mjs'
         self.module.write_text(
@@ -191,18 +193,47 @@ class PiBrokerUsageTests(unittest.TestCase):
     def _start_broker(self, answer, log=None, chunk_size=0):
         """Start the broker with a stubbed provider and return (socket, log)."""
         log = log or (self.root / 'requests.jsonl')
-        path = log.with_suffix('.sock')
+        path = pathlib.Path(self.sockets.name) / (log.stem + '.sock')  # short dir: sun_path is limited
         env = self._env(PI_BROKER_LOG=str(log),
                         FAKE_UPSTREAM_CHUNK_SIZE=str(chunk_size),
                         FAKE_UPSTREAM_BODY=base64.b64encode(answer).decode('ascii'))
-        proc = subprocess.Popen(['node', str(BROKER), str(path), str(self.module), 'allowed-model'],
-                                env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        # unix-domain socket paths are limited (104 bytes on macOS, 108 on Linux)
+        self.assertLess(len(str(path).encode()), 100, 'socket path too long: %s' % path)
+        errors = log.with_suffix('.stderr')
+        with open(errors, 'wb') as stderr:
+            proc = subprocess.Popen(['node', str(BROKER), str(path), str(self.module), 'allowed-model'],
+                                    env=env, stdout=subprocess.DEVNULL, stderr=stderr)
         self.addCleanup(self._stop, proc)
-        deadline = time.monotonic() + 10
-        while not path.exists() and proc.poll() is None and time.monotonic() < deadline:
-            time.sleep(0.02)
-        self.assertTrue(path.exists(), 'the broker did not create its socket')
+        self._wait_listening(path, proc, errors)
         return path, log
+
+    @staticmethod
+    def _wait_listening(path, proc, errors, timeout=45):
+        """Wait until the broker accepts connections, not merely until its socket file exists.
+
+        The file appears at bind time and node startup can be slow on a loaded runner, so a
+        fixed short wait or an exists() check races with the listener."""
+        deadline = time.monotonic() + timeout
+        last = None
+        while time.monotonic() < deadline:
+            if proc.poll() is not None:
+                break
+            probe = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            probe.settimeout(1)
+            try:
+                probe.connect(str(path))
+                return
+            except OSError as exc:
+                last = exc
+                time.sleep(0.05)
+            finally:
+                probe.close()
+        try:
+            detail = pathlib.Path(errors).read_text(errors='replace')[-800:]
+        except OSError:
+            detail = ''
+        raise AssertionError('the broker did not accept connections on %s (exit=%s, last=%r): %s'
+                             % (path, proc.poll(), last, detail))
 
     @staticmethod
     def _stop(proc):
