@@ -18,7 +18,7 @@ Subcommands:
   lessons          preview, propose, and escalate executor lessons
   patterns         propose reusable patterns and check active patterns for retirement
   lane             manage long-lived Codex app-server / Cursor ACP / Pi RPC executor lanes
-  fleet            inspect hosts, probe their health, and forward swrm commands over local / SSH / instabox transports
+  fleet            inspect hosts, probe their health, and forward swrm commands over local / SSH transports
   batch            queue task cards across fleet hosts and collect their branches
   verify-remote    verify a fleet run on another host in a temporary worktree
   bus              initialize or inspect a GitHub issue bus repository
@@ -9688,9 +9688,9 @@ def fleet_config():
         if not isinstance(host, dict) or not isinstance(host.get("name"), str) or not LANE_NAME_RE.fullmatch(host["name"]):
             raise ValueError("invalid fleet host name")
         name, kind = host["name"], host.get("kind")
-        if name in hosts or kind not in ("local", "ssh", "instabox"):
+        if name in hosts or kind not in ("local", "ssh"):
             raise ValueError(f"invalid or duplicate fleet host: {name}")
-        field = {"ssh": "ssh", "instabox": "box"}.get(kind)
+        field = {"ssh": "ssh"}.get(kind)
         if field and (not isinstance(host.get(field), str) or not host[field] or host[field].startswith("-")):
             raise ValueError(f"fleet host {name} requires {field}")
         repos = host.get("repos", {})
@@ -9720,10 +9720,8 @@ def host_run(host, command, timeout=60, input=None):
     """Binary-safe transport, including stdin for cards and git bundles. Never logs commands or env."""
     if host["kind"] == "local":
         argv = ["sh", "-c", command]
-    elif host["kind"] == "ssh":
-        argv = ["ssh", host["ssh"], "--", command]
     else:
-        argv = ["instabox", "ssh", host["box"], "--", command]
+        argv = ["ssh", host["ssh"], "--", command]
     try:
         proc = subprocess.run(argv, input=input, capture_output=True, timeout=timeout)
         return proc.returncode, proc.stdout, proc.stderr
@@ -10374,30 +10372,6 @@ def transfer_ref(source, source_repo, rev, target, target_repo, destination=""):
                                            timeout=300, input=bundle), "bundle import").decode().strip()
 
 
-def instabox_states(hosts):
-    boxes = [host["box"] for host in hosts if host["kind"] == "instabox"]
-    if not boxes:
-        return {}
-    rc, out, _ = sh(["instabox", "ls"], timeout=20)
-    if rc:
-        return {}
-    try:
-        rows = json.loads(out)
-        if isinstance(rows, dict):
-            rows = rows.get("boxes", rows.get("instances", []))
-        return {str(row.get("name") or row.get("id")): str(row.get("status") or row.get("state") or "")
-                for row in rows if isinstance(row, dict)}
-    except (ValueError, TypeError):
-        states = {}
-        for box in boxes:
-            for line in out.splitlines():
-                if re.search(r"(?<![\w.-])" + re.escape(box) + r"(?![\w.-])", line):
-                    match = re.search(r"\b(Paused|Running|Ready|Active|Stopped|Starting)\b", line, re.I)
-                    if match:
-                        states[box] = match.group(1)
-        return states
-
-
 def fleet_snapshot():
     capacity_only = os.environ.get("OPENSWARM_FLEET_CAPACITY_ONLY") == "1"
     config_error = None
@@ -10934,18 +10908,13 @@ def cmd_fleet(args):
         cmd_fleet_ledger_pull(args)
         return
     hosts = list(fleet_config().values())
-    states = instabox_states(hosts)
     rows = []
     for host in hosts:
         row = {"name": host["name"], "reachable": False, "paused": False, "lanes": [], "active_runs": []}
-        state = states.get(host.get("box"), "").lower()
-        if host["kind"] == "instabox" and state not in ("running", "ready", "active"):
-            row.update(paused=state == "paused", state=state or "unknown")
-        else:
-            try:
-                row.update(host_json(host, ["fleet", "_snapshot"], timeout=20), reachable=True)
-            except RuntimeError as e:
-                row["error"] = str(e)
+        try:
+            row.update(host_json(host, ["fleet", "_snapshot"], timeout=20), reachable=True)
+        except RuntimeError as e:
+            row["error"] = str(e)
         if row["paused"]:
             row["status"] = "paused"
         elif not row["reachable"]:
@@ -11052,10 +11021,6 @@ def batch_provider_slot_available(spec, row):
         return True
     hosts = fleet_config()
     target_host = hosts[row["host"]]
-    states = instabox_states(list(hosts.values()))
-    if target_host["kind"] == "instabox" and states.get(target_host.get("box"), "").lower() not in (
-            "running", "ready", "active"):
-        return False
     try:
         target_snapshot = host_json(target_host, ["fleet", "_snapshot"], timeout=20, capacity_only=True)
     except RuntimeError:
@@ -11068,9 +11033,6 @@ def batch_provider_slot_available(spec, row):
     snapshots = {row["host"]: target_snapshot}
     for name, host in hosts.items():
         if name == row["host"]:
-            continue
-        if host["kind"] == "instabox" and states.get(host.get("box"), "").lower() not in (
-                "running", "ready", "active"):
             continue
         try:
             snapshots[name] = host_json(host, ["fleet", "_snapshot"], timeout=20, capacity_only=True)
@@ -11096,12 +11058,8 @@ def execute_batch(spec, summary):
     blocked_hosts = set()
     batch_save(summary)
     try:
-        # Preflight every host before dispatching any card. A chosen instabox is woken only here.
+        # Preflight every host before dispatching any card.
         for name, host in spec["hosts"].items():
-            if host["kind"] == "instabox":
-                rc, _, _ = sh(["instabox", "wake", host["box"]], timeout=120)
-                if rc:
-                    raise RuntimeError(f"{name}: wake failed (rc={rc})")
             host_json(host, ["fleet", "_snapshot"], timeout=30)
             repo = spec["repos"][name]
             repo = host_require(host, host_git(host, repo, ["rev-parse", "--show-toplevel"]), "repository check").decode().strip()
