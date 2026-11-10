@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
 import tempfile
@@ -16,6 +17,13 @@ FINISH = ROOT / "harness" / "swrm_finish.py"
 sys.path.insert(0, str(ROOT))
 
 from harness.swrm_finish import extract_result_object  # noqa: E402
+
+GIT_IDENTITY = {
+    "GIT_AUTHOR_NAME": "Bench E2E",
+    "GIT_AUTHOR_EMAIL": "bench-e2e@example.invalid",
+    "GIT_COMMITTER_NAME": "Bench E2E",
+    "GIT_COMMITTER_EMAIL": "bench-e2e@example.invalid",
+}
 
 
 def test_receipt_ignores_unrelated_trailing_json_object():
@@ -150,6 +158,101 @@ def test_unroutable_receipt_without_run_context_wins_over_previous_receipt():
     assert extract_result_object(json.dumps(receipt)) == receipt
     assert extract_result_object("\n".join(map(json.dumps, [previous, receipt, telemetry]))) == receipt
     assert extract_result_object(json.dumps({"id": "metrics", "status": "unroutable"})) is None
+
+
+class SwrmFinishReceiptTests(unittest.TestCase):
+    """#2108: a telemetry object must never replace a real run receipt."""
+
+    def git(self, repo: Path, *args: str, check: bool = True) -> subprocess.CompletedProcess:
+        return subprocess.run(
+            ["git", "-C", str(repo), *args],
+            check=check,
+            text=True,
+            capture_output=True,
+            env={**os.environ, **GIT_IDENTITY},
+        )
+
+    def test_telemetry_with_terminal_status_does_not_replace_the_receipt(self):
+        receipt = {
+            "id": "run-123",
+            "status": "done",
+            "workspace": {"mode": "worktree", "path": "/tmp/run-123"},
+            "run_dir": "/tmp/swrm/runs/run-123",
+        }
+        telemetry = {
+            "id": "metrics-456",
+            "event": "usage",
+            "status": "done",
+            "run_dir": "/tmp/swrm/runs/run-123",
+        }
+        stdout = json.dumps(receipt) + "\n" + json.dumps(telemetry)
+
+        self.assertEqual(extract_result_object(stdout), receipt)
+        self.assertIsNone(extract_result_object(json.dumps(telemetry)))
+
+    def test_latest_valid_receipt_wins_over_older_richer_receipt(self):
+        old = {"id": "old", "status": "done", "run_dir": "runs/old",
+               "workspace": {"mode": "worktree"},
+               "attempts": [{"backend": "cursor", "model": "model", "meta": {}}]}
+        new = {"id": "new", "status": "done", "run_dir": "runs/new"}
+
+        self.assertEqual(extract_result_object(json.dumps(old) + "\n" + json.dumps(new)), new)
+
+    def test_statusless_null_attempt_is_not_a_receipt(self):
+        self.assertIsNone(extract_result_object(json.dumps({"id": "metrics", "attempts": [None]})))
+
+    def test_finish_merges_the_receipt_branch_not_the_telemetry_branch(self):
+        with tempfile.TemporaryDirectory() as temp:
+            tempdir = Path(temp)
+            repo = tempdir / "repo"
+            repo.mkdir()
+            self.git(repo, "init", "-q")
+            (repo / "base.txt").write_text("base\n", encoding="utf-8")
+            self.git(repo, "add", "-A")
+            self.git(repo, "commit", "-qm", "base")
+            self.git(repo, "checkout", "-qb", "swrm/run-123")
+            (repo / "merged.txt").write_text("merged\n", encoding="utf-8")
+            self.git(repo, "add", "-A")
+            self.git(repo, "commit", "-qm", "run-123 work")
+            self.git(repo, "checkout", "-q", "-")
+
+            receipt = {
+                "id": "run-123",
+                "status": "done",
+                "workspace": {"mode": "worktree", "path": str(repo)},
+                "run_dir": str(tempdir / "runs" / "run-123"),
+            }
+            telemetry = {
+                "id": "metrics-456",
+                "event": "usage",
+                "status": "done",
+                "run_dir": receipt["run_dir"],
+            }
+            stdout = tempdir / "stdout.txt"
+            stdout.write_text(
+                json.dumps(receipt) + "\n" + json.dumps(telemetry) + "\n",
+                encoding="utf-8",
+            )
+            events = tempdir / "events"
+            events.mkdir()
+
+            proc = subprocess.run(
+                [sys.executable, str(FINISH), str(stdout), str(events), str(repo)],
+                cwd=ROOT,
+                text=True,
+                capture_output=True,
+                check=False,
+                env={**os.environ, **GIT_IDENTITY},
+            )
+
+            self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+            self.assertTrue((repo / "merged.txt").is_file())
+            subject = self.git(repo, "log", "-1", "--pretty=%s").stdout.strip()
+            self.assertEqual(subject, "merge swrm/run-123")
+            telemetry_branch = self.git(
+                repo, "rev-parse", "--verify", "--quiet", "swrm/metrics-456", check=False
+            )
+            self.assertNotEqual(telemetry_branch.returncode, 0)
 
 
 class SwrmFinishEdgeTests(unittest.TestCase):
