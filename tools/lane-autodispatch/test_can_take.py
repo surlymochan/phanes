@@ -204,6 +204,7 @@ class TickHarness:
             return 0, "", ""
 
         def fake_dispatch(lane, cfg, item, base):
+            if lane in getattr(self, "failing_lanes", ()): raise RuntimeError("ssh: connection refused")
             dispatched.append((lane, item["n"]))
             return "run-1", None
 
@@ -519,6 +520,27 @@ class ReviewBacklogTickTest(TickHarness, unittest.TestCase):
         self.assertIn("PR #1785 →", plan)
         self.assertIn("lane CX5", plan)
         self.assertIn("CX2=1", plan)
+
+    def test_a_failed_dispatch_does_not_book_the_balanced_lane_as_dispatched(self):
+        """The lane chosen by the balancing is only booked after its dispatch succeeded.
+
+        The asked lane CX2 hands the review over to CX5 whose dispatch fails; CX5 must then still
+        be tried when its own turn comes in the same tick (a booked lane would be skipped)."""
+        self.failing_lanes = {"CX5"}
+        self.attempts = []
+        real_pick = AUTODISPATCH.pick_reviewer
+        AUTODISPATCH.pick_reviewer = lambda ids, loads, **kw: ("CX5", {lane: 0 for lane in ids})
+        real_dispatch_failed = AUTODISPATCH.dispatch_failed
+        AUTODISPATCH.dispatch_failed = lambda lane, *a, **k: self.attempts.append(lane)
+        try:
+            dispatched, logs = self.run_tick([issue(1, VERIFY_BODY, ("lane-ready", "verify-intent"))], self.LANES, {})
+        finally:
+            AUTODISPATCH.pick_reviewer = real_pick
+            AUTODISPATCH.dispatch_failed = real_dispatch_failed
+            self.failing_lanes = ()
+        self.assertEqual(dispatched, [])
+        self.assertEqual(self.attempts.count("CX5"), 3)  # asked as CX2, CX4 and as itself
+        self.assertFalse([row for row in logs if "review assignment" in row])
 
     def test_the_review_waits_when_the_free_review_lanes_are_at_their_cap(self):
         # CX5 is free and takes the first review card; the second card waits for a free

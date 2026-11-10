@@ -3363,7 +3363,8 @@ def tick(lanes, state, last_warn):
             if chosen != L:
                 # The review belongs to another review lane: it takes the card, the lane
                 # that was asked keeps its slot free (the next tick tries again).
-                outcomes[chosen] = "dispatched"
+                # recorded as dispatched only after the dispatch succeeded (below): a failed
+                # dispatch must leave the lane free for the rest of this tick
                 L, cfg = chosen, lanes[chosen]
             pick["tester_risk"] = tester_risk_decision(pick["body"])
         commit = base_commit()
@@ -3372,6 +3373,7 @@ def tick(lanes, state, last_warn):
         except Exception as e:
             dispatch_failed(L, cfg, pick, e, busy=bool(LANE_BUSY_RE.search(str(e))))
             return "no-capacity"
+        if L != asked: outcomes[L] = "dispatched"
         q.remove(pick); state[L] = {"issue": pick["n"], "run": run, "host": cfg["host"], "base": commit, "at": time.strftime("%F %T"), "verify": ver, "class": "verify" if pick.get("verify") else "work"}
         if pick.get("verify"):
             state[L]["tester_risk"] = pick["tester_risk"]
