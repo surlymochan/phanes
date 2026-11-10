@@ -2804,37 +2804,55 @@ def file_issue(text, extra=()):
     if rc: raise RuntimeError(e.strip()[-200:])
     return "#" + o.strip().rsplit("/", 1)[-1]
 
-def find_issue_by_title(title):
-    """The number of the issue with exactly this title, "" when none exists, None when it cannot be told."""
-    rc, o, _ = gh(["issue", "list", "--state", "all", "--search", f'"{title}" in:title', "--limit", "30", "--json", "number,title"])
+CARD_MARK = "ad-card:"
+PENDING_WAIT = 600  # seconds a card stays pending while the search cannot find it yet (index lag)
+
+def card_marker(key, text):
+    """The identity of one card: its source and its text (written into the body of the issue)."""
+    return hashlib.sha256((key + "\n" + text).encode("utf-8")).hexdigest()[:16]
+
+def find_issue_by_marker(marker):
+    """The issue whose body carries this card marker: "#N", "" when none exists, None when it cannot be told.
+
+    The search is capped: a full page without a match cannot prove that the issue does not exist."""
+    limit = 100
+    rc, o, _ = gh(["issue", "list", "--state", "all", "--search", f'"{CARD_MARK}{marker}" in:body',
+                   "--limit", str(limit), "--json", "number,body"])
     if rc: return None
     try: rows = json.loads(o)
     except ValueError: return None
     if not isinstance(rows, list): return None
     for row in rows:
-        if isinstance(row, dict) and row.get("title") == title and row.get("number") is not None: return "#" + str(row["number"])
-    return ""
+        if isinstance(row, dict) and row.get("number") is not None and f"{CARD_MARK}{marker}" in str(row.get("body") or ""):
+            return "#" + str(row["number"])
+    return None if len(rows) >= limit else ""
 
 def file_issue_once(text, key, state):
-    """File the card once, even when the answer of `gh issue create` is lost (Refs #1662).
+    """File the card once, even when the answer of `gh issue create` is lost or the process stops (Refs #1662).
 
-    The server may have created the issue while the client saw a timeout. The key of the card is
-    persisted as pending before the call; a card that is still pending in a later tick is first looked
-    up by its exact title, and only filed again when no such issue exists. Returns the issue, or None
-    when the card must wait for the next tick (the call failed, or the lookup could not tell)."""
+    The body of the issue carries a marker of the card. Before the call the card is persisted as pending;
+    after it, in ONE save, the pending record is replaced by a done record, so a stop between the two
+    leaves either a pending card (looked up by its marker) or a done one, never nothing. A pending card
+    that the search does not find yet is retried until PENDING_WAIT has passed, because the search index
+    may lag behind the server. Returns the issue, or None when the card must wait for the next tick."""
     pending = state.setdefault("_import_pending", {})
-    title = card_lines(text)[0].lstrip("# ").strip()
-    if key in pending:
-        found = find_issue_by_title(pending[key])
+    done = state.setdefault("_import_done", {})
+    marker = card_marker(key, text)
+    if marker in done:
+        return done[marker] + "(already filed)"
+    if marker in pending:
+        found = find_issue_by_marker(marker)
         if found is None:
-            log(f"card {key}: a pending creation cannot be checked (issue list failed); retried next tick", brain=False); return None
+            log(f"card {key}: a pending creation cannot be checked (issue list failed or truncated); retried next tick", brain=False); return None
         if found:
-            pending.pop(key, None); save_state(state)
+            done[marker] = found; pending.pop(marker, None); save_state(state)
             log(f"card {key}: the earlier creation reached the server as {found}; not filed again", brain=False)
             return found + "(already filed)"
-    pending[key] = title; save_state(state)
-    issue = file_issue(text)
-    pending.pop(key, None); save_state(state)
+        if time.time() - float(pending[marker]) < PENDING_WAIT:
+            log(f"card {key}: a pending creation is not visible yet; retried next tick", brain=False); return None
+    pending[marker] = time.time(); save_state(state)
+    issue = file_issue(text.rstrip("\n") + f"\n\n<!-- {CARD_MARK}{marker} -->\n")
+    done[marker] = issue; pending.pop(marker, None); save_state(state)
     return issue
 
 PLANNER = """# 规划：为 lane 队列写 {k} 条新任务（{tag}）
