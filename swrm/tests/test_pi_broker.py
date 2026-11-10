@@ -39,6 +39,12 @@ class UnixHTTP(http.client.HTTPConnection):
 @unittest.skipIf(os.name == "nt",
                  "pi broker binds a '/'-rooted unix-domain socket by design; no Windows transport")
 class PiBrokerTests(unittest.TestCase):
+    def _stderr_file(self, path):
+        # unittest's enterContext needs Python 3.11; CI also runs 3.9.
+        handle = open(path + '.stderr', 'wb')
+        self.addCleanup(handle.close)
+        return handle
+
     # -- helpers for the request log of the broker (Refs #1671) -----------
     @staticmethod
     def _stop(proc):
@@ -74,7 +80,7 @@ https.request = (_options, callback) => {
         env = dict(os.environ, NODE_OPTIONS='--require=' + str(preload),
                    FAKE_ANSWER=base64.b64encode(answer).decode('ascii'))
         proc = subprocess.Popen(['node', str(BROKER), path, str(module), 'allowed-model'],
-                                env=env, stdout=subprocess.DEVNULL, stderr=self.enterContext(open(path + '.stderr', 'wb')))
+                                env=env, stdout=subprocess.DEVNULL, stderr=self._stderr_file(path))
         self.addCleanup(self._stop, proc)
         wait_for_unix_socket(path, proc=proc, errors=path + '.stderr')
         return path
@@ -335,7 +341,7 @@ https.request = (options, callback) => {
             path = os.path.join(root, 'broker.sock')
             env = dict(os.environ, NODE_OPTIONS='--require=' + str(preload), REQUEST_CAPTURE=str(capture))
             proc = subprocess.Popen(['node', str(BROKER), path, str(module), 'allowed-model'],
-                                    env=env, stdout=subprocess.DEVNULL, stderr=self.enterContext(open(path + '.stderr', 'wb')))
+                                    env=env, stdout=subprocess.DEVNULL, stderr=self._stderr_file(path))
             try:
                 wait_for_unix_socket(path, proc=proc, errors=path + '.stderr')
                 client = UnixHTTP(path)
@@ -406,7 +412,7 @@ https.request = (_options, callback) => {
             module.write_text('export class AuthStorage { static create() { return { getApiKey: async () => "fake-key" }; } }')
             path = os.path.join(root, 'broker.sock')
             proc = subprocess.Popen(['node', str(BROKER), path, str(module), 'allowed-model'],
-                                    stdout=subprocess.DEVNULL, stderr=self.enterContext(open(path + '.stderr', 'wb')))
+                                    stdout=subprocess.DEVNULL, stderr=self._stderr_file(path))
             try:
                 wait_for_unix_socket(path, proc=proc, errors=path + '.stderr')
                 for url, body in [('/other', {'model': 'allowed-model', 'messages': []}),
@@ -453,7 +459,7 @@ https.request = (_options, callback) => {
             path = os.path.join(root, 'broker.sock')
             env = dict(os.environ, NODE_OPTIONS='--require=' + str(preload))
             proc = subprocess.Popen(['node', str(BROKER), path, str(module), 'allowed-model'],
-                                    env=env, stdout=subprocess.DEVNULL, stderr=self.enterContext(open(path + '.stderr', 'wb')))
+                                    env=env, stdout=subprocess.DEVNULL, stderr=self._stderr_file(path))
             try:
                 wait_for_unix_socket(path, proc=proc, errors=path + '.stderr')
                 client = UnixHTTP(path)
@@ -499,7 +505,7 @@ https.request = (_options, callback) => {
             module.write_text('export class AuthStorage { static create() { return { getApiKey: async () => "fake-key" }; } }')
             path = os.path.join(root, 'broker.sock')
             proc = subprocess.Popen(['node', str(BROKER), path, str(module), 'allowed-model'],
-                                    stdout=subprocess.DEVNULL, stderr=self.enterContext(open(path + '.stderr', 'wb')))
+                                    stdout=subprocess.DEVNULL, stderr=self._stderr_file(path))
             try:
                 wait_for_unix_socket(path, proc=proc, errors=path + '.stderr')
                 heartbeat = pathlib.Path(path + '.requests.jsonl.heartbeat')
@@ -523,7 +529,7 @@ https.request = (_options, callback) => {
                             "r.statusCode=200; r.headers={'content-type':'application/json'}; callback(r); }, 21000)); return w; };\n")
             path = os.path.join(root, 'broker.sock')
             proc = subprocess.Popen(['node', '--import', str(stub), str(BROKER), path, str(module), 'allowed-model'],
-                                    stdout=subprocess.DEVNULL, stderr=self.enterContext(open(path + '.stderr', 'wb')))
+                                    stdout=subprocess.DEVNULL, stderr=self._stderr_file(path))
             try:
                 wait_for_unix_socket(path, proc=proc, errors=path + '.stderr')
                 client = UnixHTTP(path)
