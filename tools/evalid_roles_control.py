@@ -29,14 +29,18 @@ from typing import Any
 STAGES = ("spec", "spec-check", "red", "green", "holdout", "review", "delivery")
 ATTEMPT_HISTORY_LIMIT = 8
 PUBLIC_TERMINALS = {"PASS", "FAIL", "NEEDS-BOSS", "IN_PROGRESS", "REJECTED"}
+# Refusal codes that are published verbatim as the public rejection reason: the
+# reviewer reads which verdict refused the stage, not only which stage it was.
+PUBLIC_REJECTION_CODES = frozenset({"spec_not_revised"})
 PUBLIC_REJECTION_REASONS = {"SPEC_REJECTED", "SPEC_CHECK_REJECTED", "RED_REJECTED",
                             "GREEN_REJECTED", "HOLDOUT_REJECTED", "REVIEW_REJECTED",
-                            "CONTROLLER_REJECTED"}
+                            "CONTROLLER_REJECTED"} | PUBLIC_REJECTION_CODES
 MAX_SPEC_REVISIONS = 2
 # Every rejection code is classified. A RECORDED code is a verdict on the evidence of the stage the
-# attempt is waiting for: it is appended to the log, so the public attempt history shows the refused
-# stage. An UNRECORDED code is a precondition, a malformed call or a later-phase refusal and leaves
-# the log untouched. A test requires every code raised here to be classified.
+# attempt is waiting for: it reaches the public attempt history, either through the generic handler
+# in accept() or through the receipt that already carries the verdict. An UNRECORDED code is a
+# precondition or a malformed call and leaves the log untouched. A test requires every code raised
+# here to be classified and every UNRECORDED code to carry a written reason.
 RECORDED_REJECTIONS = frozenset({
     "spec_not_accepted", "spec_check_failed", "spec_check_verdict_unknown",
     "red_not_assertion", "red_not_replayed", "red_base_mismatch",
@@ -44,13 +48,14 @@ RECORDED_REJECTIONS = frozenset({
     "green_not_replayed", "green_does_not_contain_red", "green_out_of_scope",
     "green_evidence_missing", "evidence_replay_failed", "snapshot_mismatch",
     "test_manifest_invalid", "test_manifest_mismatch", "test_manifest_missing",
-    "dirty_worktree", "commit_chain_mismatch"
+    "dirty_worktree", "commit_chain_mismatch", "spec_not_revised",
+    "holdout_failed", "holdout_isolation", "review_failed", "review_run_rejected"
 })
 UNRECORDED_REJECTIONS = frozenset({
     "attempt_history_chain", "attempt_history_limit", "controller_order",
     "evidence_must_be_outside_evalid", "evidence_must_be_outside_project",
-    "evidence_replay_unavailable", "head_drift", "holdout_binding", "holdout_failed",
-    "holdout_isolation", "holdout_isolation_unknown", "holdout_not_frozen",
+    "evidence_replay_unavailable", "head_drift", "holdout_binding",
+    "holdout_isolation_unknown", "holdout_not_frozen",
     "holdout_placeholder_required", "holdout_result_missing", "holdout_runner_failed",
     "holdout_runner_missing", "holdout_status_unknown", "holdout_suite_required",
     "input_digest_mismatch", "intake_frozen", "invalid_base_commit", "invalid_change",
@@ -59,12 +64,77 @@ UNRECORDED_REJECTIONS = frozenset({
     "native_attempt_mismatch", "native_capture_failed", "native_commit_mismatch",
     "native_identity_mismatch", "native_sealed_evidence_mismatch", "native_verify_failed",
     "parent_receipt_invalid", "parent_receipt_mismatch", "review_evidence_mismatch",
-    "review_failed", "review_field_unknown", "review_run_rejected", "review_spec_mismatch",
+    "review_field_unknown", "review_spec_mismatch",
     "review_tdd_mismatch", "run_not_complete", "spec_check_parent_mismatch",
-    "spec_check_parent_missing", "spec_not_revised", "spec_revision_limit",
+    "spec_check_parent_missing", "spec_revision_limit",
     "spec_version_invalid", "spec_version_mismatch", "spec_version_missing",
     "stale_spec_check_receipt"
 })
+# The written reason of every UNRECORDED code: it names the precondition or the
+# malformed call behind the refusal and shows that it is not a verdict on the
+# evidence of the stage the attempt awaits. A test requires one reason per code,
+# so a new code cannot join this list without one.
+UNRECORDED_JUSTIFICATIONS = {
+    "attempt_history_chain": "precondition: the public attempt summary is not a connected chain",
+    "attempt_history_limit": "precondition: the bounded attempt history is already full",
+    "controller_order": "precondition: the stage is not the one the attempt awaits",
+    "evidence_must_be_outside_evalid": "precondition: the evidence root sits inside the evalid tree",
+    "evidence_must_be_outside_project": "precondition: the evidence root sits inside the project tree",
+    "evidence_replay_unavailable": "precondition: no replay seam or command is wired in",
+    "head_drift": "precondition: the checkout is not at the commit the receipt names, so the receipt is not judged",
+    "holdout_binding": "malformed call: the review names a holdout receipt the controller never recorded",
+    "holdout_isolation_unknown": "precondition: the runner reported no usable isolation verdict",
+    "holdout_not_frozen": "precondition: the required holdout was never frozen",
+    "holdout_placeholder_required": "malformed call: the private suite argv has no holdout placeholder",
+    "holdout_result_missing": "precondition: the runner returned no holdout result",
+    "holdout_runner_failed": "precondition: the holdout runner raised before producing a result",
+    "holdout_runner_missing": "precondition: no holdout runner is wired into the controller",
+    "holdout_status_unknown": "precondition: the runner returned a status outside the known enum",
+    "holdout_suite_required": "precondition: the intake requires a holdout suite and none was frozen",
+    "input_digest_mismatch": "malformed call: the supplied input digest does not match the evidence",
+    "intake_frozen": "precondition: the intake of this attempt is already frozen",
+    "invalid_base_commit": "malformed call: the base commit is no commit object of the project",
+    "invalid_change": "malformed call: the change id or the attempt number is not usable",
+    "invalid_holdout_path": "malformed call: the private suite writes outside its own directory",
+    "invalid_intake": "malformed call: the intake fields are missing or ill-typed",
+    "invalid_native_output": "precondition: the native tool printed something that is not a receipt",
+    "invalid_review": "malformed call: the review carries no usable verdict or reviewed head",
+    "invalid_stage": "malformed call: the stage is not part of the workflow",
+    "missing_evidence": "malformed call: the receipt carries no evidence",
+    "missing_parent_receipt": "malformed call: the revision names no receipt of the rejection it answers",
+    "missing_run_id": "precondition: the runner returned no run id",
+    "native_attempt_mismatch": "malformed call: the native tool was invoked for another attempt",
+    "native_capture_failed": "precondition: the native capture tool failed",
+    "native_commit_mismatch": "precondition: the native record names another commit",
+    "native_identity_mismatch": "precondition: the native record was sealed for another command or commit",
+    "native_sealed_evidence_mismatch": "precondition: the sealed proof tree differs from the recorded one",
+    "native_verify_failed": "precondition: the native verify tool failed",
+    "parent_receipt_invalid": "malformed call: the parent receipt is not a digest",
+    "parent_receipt_mismatch": "malformed call: the revision answers another rejection",
+    "review_evidence_mismatch": "malformed call: the delivery presents another review than the accepted one",
+    "review_field_unknown": "malformed call: the review carries fields the controller does not publish",
+    "review_spec_mismatch": "malformed call: the review names another Spec than the accepted one",
+    "review_tdd_mismatch": "malformed call: the review names another green receipt than the accepted one",
+    "run_not_complete": "precondition: the run did not finish, so there is no receipt to judge",
+    "spec_check_parent_mismatch": "malformed call: the check does not bind the current Spec revision",
+    "spec_check_parent_missing": "malformed call: the check names no Spec revision",
+    "spec_revision_limit": "precondition: the bounded Spec revision budget is spent",
+    "spec_version_invalid": "malformed call: the declared Spec version is not a positive integer",
+    "spec_version_mismatch": "malformed call: the declared Spec version is not the next one;"
+                             " the digest change is judged as spec_not_revised",
+    "spec_version_missing": "malformed call: the revision declares no Spec version",
+    "stale_spec_check_receipt": "malformed call: the receipt replays an earlier round",
+}
+# A public rejection that a later receipt of the same stage clears: the attempt is
+# progressing again while the reason stays for the audit trail.
+RETRYABLE_REJECTIONS = {
+    "spec": ("SPEC_REJECTED", "SPEC_CHECK_REJECTED", "spec_not_revised"),
+    "spec-check": ("SPEC_CHECK_REJECTED",),
+    "red": ("RED_REJECTED",),
+    "green": ("GREEN_REJECTED",),
+    "holdout": ("HOLDOUT_REJECTED",),
+    "review": ("REVIEW_REJECTED",),
+}
 CHANGE_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]*$")
 OID = re.compile(r"^[0-9a-f]{40,64}$")
 DIGEST = re.compile(r"^sha256:[0-9a-f]{64}$")
@@ -414,7 +484,8 @@ class RoleController:
         except Rejected as error:
             state = self.state(change_id, attempt)
             if state and state["next"] == stage and str(error) in RECORDED_REJECTIONS:
-                self._record_rejection(change_id, attempt, stage, run_id=run_context.get("run_id"))
+                self._record_rejection(change_id, attempt, stage, run_id=run_context.get("run_id"),
+                                       code=str(error))
             raise
 
     def _accept(self, change_id: str, stage: str, evidence: dict[str, Any], *, attempt: int = 0,
@@ -763,8 +834,16 @@ class RoleController:
         result = self._record(change_id, attempt, "delivery", data)
         return self._public(result, change_id=change_id, attempt=attempt)
 
-    def _record_rejection(self, change_id: str, attempt: int, stage: str, *, run_id: Any = None) -> None:
-        reason = stage.upper().replace("-", "_") + "_REJECTED"
+    def _record_rejection(self, change_id: str, attempt: int, stage: str, *, run_id: Any = None,
+                          code: str | None = None) -> None:
+        """Write one public refusal of the awaited stage into the attempt history.
+
+        The reason names the refused stage, or the refusal code itself when the
+        code is published verbatim, so a reviewer can audit which verdict
+        refused the stage and which run it belongs to.
+        """
+        reason = (code if code in PUBLIC_REJECTION_CODES
+                  else stage.upper().replace("-", "_") + "_REJECTED")
         data = {"stage": stage, "reason": reason}
         if run_id is not None:
             data["run_id"] = run_id
@@ -818,8 +897,7 @@ class RoleController:
                 item["terminal"] = "PASS"
             if stage != "delivery" and isinstance(data, dict):
                 # Preserve a prior public rejection enum after a successful retry.
-                if item["rejection_reason"] == stage.upper().replace("-", "_") + "_REJECTED" or (
-                        stage == "spec" and item["rejection_reason"] == "SPEC_CHECK_REJECTED"):
+                if item["rejection_reason"] in RETRYABLE_REJECTIONS.get(stage, ()):
                     item["terminal"] = "IN_PROGRESS"
                 run_id = data.get("run_id")
                 if isinstance(run_id, str):
