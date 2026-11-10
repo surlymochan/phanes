@@ -18,7 +18,7 @@ Subcommands:
   lessons          preview, propose, and escalate executor lessons
   patterns         propose reusable patterns and check active patterns for retirement
   lane             manage long-lived Codex app-server / Cursor ACP / Pi RPC executor lanes
-  fleet            inspect hosts and forward swrm commands over local / SSH transports
+  fleet            inspect hosts, probe their health, and forward swrm commands over local / SSH transports
   batch            queue task cards across fleet hosts and collect their branches
   verify-remote    verify a fleet run on another host in a temporary worktree
   bus              initialize or inspect a GitHub issue bus repository
@@ -80,9 +80,11 @@ from typing import Callable, Optional, Sequence
 # Resolve the entrypoint itself so invocation through a symlink still finds
 # sibling modules, and SourceFileLoader-based tests get the same import path.
 sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.realpath(__file__))))
 
 import evalid_roles
 import procboundary
+from lib.dispatch import pause as dispatch_pause
 
 
 def build_evalid_command(xflow_bin: str, *, request_file: str, output_file: str,
@@ -424,6 +426,7 @@ NOW = time.time
 
 # The Antigravity CLI (`agy`) is the executor behind the `gemini` alias.
 AGY_DEFAULT_MODEL = "gemini-3.8-flash-medium"
+AGY_START_GRACE_S = 5
 BACKEND_ALIASES = {"gemini": "agy"}
 AGY_LOGIN_TIMEOUT = 5
 _AGY_LOGIN_CACHE = {}
@@ -7942,6 +7945,7 @@ class AgyChild:
         self.boundary = procboundary.CgroupBoundary.create()
         self.events = queue.Queue()
         self.stderr_lines = []
+        self.stderr_thread = None
 
     def start(self, prompt, model=None, effort=None, conversation=None):
         """Run one headless agy turn; events land in self.events as they arrive."""
@@ -7964,7 +7968,8 @@ class AgyChild:
         events, stderr_lines = queue.Queue(), []
         self.proc, self.events, self.stderr_lines = proc, events, stderr_lines
         threading.Thread(target=self._read_stdout, args=(proc, events), daemon=True).start()
-        threading.Thread(target=self._read_stderr, args=(proc, stderr_lines), daemon=True).start()
+        self.stderr_thread = threading.Thread(target=self._read_stderr, args=(proc, stderr_lines), daemon=True)
+        self.stderr_thread.start()
         return proc.pid
 
     def _read_stdout(self, proc, events):
@@ -8006,6 +8011,24 @@ class AgyChild:
 
     def stderr_text(self):
         return "".join(self.stderr_lines)
+
+    def reap_after_stdout_eof(self):
+        """Finish the old process and its stderr reader before diagnosing or restarting it."""
+        if self.proc is None:
+            return
+        try:
+            self.proc.wait(timeout=3)
+        except subprocess.TimeoutExpired:
+            # Closing stdout does not imply exit. Never overlap it with a retry.
+            kill_tree(self.proc.pid, grace=1)
+            if self.proc.poll() is None:
+                self.proc.kill()
+            self.proc.wait(timeout=3)
+        if self.stderr_thread is not None:
+            self.stderr_thread.join(timeout=3)
+        for stream in (self.proc.stdout, self.proc.stderr):
+            if stream is not None:
+                stream.close()
 
     def close(self):
         if self.proc is None:
@@ -8050,7 +8073,8 @@ class CursorHeadlessChild(AgyChild):
         events, stderr_lines = queue.Queue(), []
         self.proc, self.events, self.stderr_lines = proc, events, stderr_lines
         threading.Thread(target=self._read_stdout, args=(proc, events), daemon=True).start()
-        threading.Thread(target=self._read_stderr, args=(proc, stderr_lines), daemon=True).start()
+        self.stderr_thread = threading.Thread(target=self._read_stderr, args=(proc, stderr_lines), daemon=True)
+        self.stderr_thread.start()
         return proc.pid
 
     def _read_stdout(self, proc, events):
@@ -8459,6 +8483,12 @@ def lane_approval_response(child, msg, event_file, host_warning=False):
 
 
 def lane_run_turn(lane, child, spec, prompt, ws, rdir, server, turn, pending, attempt=1, continuation=False):
+    agy_prompt = prompt
+    agy_start_grace_s = AGY_START_GRACE_S
+    agy_started_at = NOW()
+    agy_saw_executor_event = False
+    agy_start_restarts = 0
+    agy_start_failures = []
     event_file = (spec.get("_event_file") if attempt == 1 else None) or \
                  os.path.join(rdir, f"events.{attempt}.{lane['backend']}.jsonl")
     spec["_event_file"] = event_file
@@ -8501,16 +8531,20 @@ def lane_run_turn(lane, child, spec, prompt, ws, rdir, server, turn, pending, at
 
     def agy_resume_steer():
         """Restart the agy turn with the queued steer text; True when a new turn was started."""
+        nonlocal agy_prompt, agy_started_at, agy_saw_executor_event
         if not turn.get("steer_queue") or spec.get("abort_requested") or budget_hit:
             return False
         correction = turn["steer_queue"].pop(0)
         # The follow-up prompt replaces the cancelled one, so it has to restate the report
         # requirement; otherwise the agent finishes the work without printing the JSON report.
         # The task text is kept as well: without a conversation id the new run starts from scratch.
-        child.start(f"{turn.get('prompt') or ''}\n\n"
-                    "Correction to the interrupted task: apply this update while continuing the task.\n\n"
-                    + correction + "\n\n" + REPORT_INSTRUCTION,
-                    model=lane["model"], effort=lane.get("effort"), conversation=turn.get("conversation_id"))
+        agy_prompt = (f"{turn.get('prompt') or ''}\n\n"
+                      "Correction to the interrupted task: apply this update while continuing the task.\n\n"
+                      + correction + "\n\n" + REPORT_INSTRUCTION)
+        child.start(agy_prompt, model=lane["model"], effort=lane.get("effort"),
+                    conversation=turn.get("conversation_id"))
+        agy_started_at = NOW()
+        agy_saw_executor_event = False
         set_status(rdir, executor_pid=child.pid)
         turn["id"] = "agy-" + uuid.uuid4().hex
         return True
@@ -8520,11 +8554,43 @@ def lane_run_turn(lane, child, spec, prompt, ws, rdir, server, turn, pending, at
         text = detail or ""
         if lane_headless(lane):
             text = child.stderr_text()[-600:] or text
+            # Only two qualifying startup exits exhaust the retry. A later auth
+            # failure or running-turn disconnect keeps its own classification.
+            if len(agy_start_failures) == 2:
+                failures = "; ".join(agy_start_failures)
+                return "executor_start_failed", f"startup failed after {failures}"
         if AUTH_ERROR_RE.search(text):
             return "auth", text
         if RATE_LIMIT_RE.search(text):
             return "rate_limit", text
         return ("risk_blocked" if spec.get("risk_blocks") else "exec_error"), text
+
+    def retry_agy_start(detail, exited_at):
+        """Restart a headless agy process once when it exits before a stable turn starts."""
+        nonlocal agy_started_at, agy_saw_executor_event, agy_start_restarts
+        if (not lane_headless(lane) or spec.get("risk_blocks") or spec.get("abort_requested") or budget_hit
+                or (agy_saw_executor_event and exited_at - agy_started_at >= agy_start_grace_s)):
+            return False
+        proc = getattr(child, "proc", None)
+        exit_code = proc.poll() if proc else None
+        stderr_tail = child.stderr_text()[-600:]
+        diagnostic = stderr_tail or detail or ""
+        if AUTH_ERROR_RE.search(diagnostic) or RATE_LIMIT_RE.search(diagnostic) or MODEL_UNAVAILABLE_RE.search(diagnostic):
+            return False
+        agy_start_failures.append(
+            f"exit code {exit_code}; stderr tail: {stderr_tail or detail or '(empty)'}")
+        if agy_start_restarts >= 1:
+            set_status(rdir, executor_restarts=agy_start_restarts, stderr_tail=stderr_tail)
+            return False
+        agy_start_restarts += 1
+        set_status(rdir, executor_restarts=agy_start_restarts, stderr_tail=stderr_tail)
+        # Agy has no persistent RPC session; restart the exact turn prompt with its conversation id.
+        child.start(agy_prompt, model=lane["model"], effort=lane.get("effort"),
+                    conversation=turn.get("conversation_id"))
+        agy_started_at = NOW()
+        agy_saw_executor_event = False
+        set_status(rdir, executor_pid=child.pid)
+        return True
 
     if budget_hit:
         lane_abort_child(lane, child, turn)
@@ -8557,20 +8623,36 @@ def lane_run_turn(lane, child, spec, prompt, ws, rdir, server, turn, pending, at
                 if lane_headless(lane):
                     msg = child.next_event(1.0)  # a finished process may still have events in its pipe
                     if msg is False:
+                        exited_at = NOW()
+                        child.reap_after_stdout_eof()
+                        # EOF acknowledges an interrupted turn; preserve its stop/budget result below.
+                        if spec.get("abort_requested") or budget_hit:
+                            break
                         if agy_resume_steer():
+                            continue
+                        if retry_agy_start("resident executor process exited", exited_at):
                             continue
                         error_class, detail = lane_failure("resident executor process exited")
                         return None, usage, error_class, 1, event_file, detail
                 else:
                     return None, usage, "risk_blocked" if spec.get("risk_blocks") else "exec_error", 1, event_file, "resident executor process exited"
-            continue
+            if msg is False:
+                continue
         if msg is None:
             if lane_headless(lane):
+                exited_at = NOW()
+                child.reap_after_stdout_eof()
+                if spec.get("abort_requested") or budget_hit:
+                    break
                 if agy_resume_steer():
+                    continue
+                if retry_agy_start("resident executor stdout closed", exited_at):
                     continue
                 error_class, detail = lane_failure("resident executor stdout closed")
                 return None, usage, error_class, 1, event_file, detail
             return None, usage, "risk_blocked" if spec.get("risk_blocks") else "exec_error", 1, event_file, "resident executor stdout closed"
+        if lane_headless(lane):
+            agy_saw_executor_event = True
         block = enforced_risk(msg, risk_policy, ws["path"], scope=spec.get("scope", "repo"))
         if block and block.get("enforced") is False:
             lane_record_event(event_file, {"type": "risk_warning", **block})
@@ -8918,7 +9000,7 @@ def lane_finalize_run(lane, spec, ws, final, usage, error_class, rc, event_file,
                    "lessons_injected": spec.get("lessons_injected", []),
                    "patterns_injected": spec.get("patterns_injected", [])})
     set_status(rdir, state="finished", status=status, finished=NOW(), commit=fin.get("commit"), lane=lane["name"],
-               scope=spec.get("scope", "repo"))
+               scope=spec.get("scope", "repo"), error_class=error_class)
     if not evidence_error:
         cleanup_executor_tmp(ws.get("root") or ws["path"])
     return out
@@ -9055,8 +9137,9 @@ def lane_do_run(lane, spec, child, server, current):
                     child.close()
                 stopped_early = lane["backend"] == "agy" and spec.get("_agy_finished_early")
                 if (not stopped_early or not child.alive()) and (error_class in (None, "rate_limit")
-                        or spec.get("_turn_completed") or (error_class == "upstream_forbidden"
-                                                           and lane["backend"] == "agy" and not child.alive())):
+                        or spec.get("_turn_completed")
+                        or (error_class == "upstream_forbidden" and lane["backend"] == "agy" and not child.alive())
+                        or (error_class == "executor_start_failed" and lane_headless(lane) and not child.alive())):
                     if executor_boundary_empty(rdir, getattr(child, "boundary", None)):
                         release_fleet_slot(rdir)
                 elif os.path.realpath(rdir) in _FLEET_RESERVATIONS:
@@ -10312,7 +10395,492 @@ def fleet_snapshot():
             "lane_config_error": config_error}
 
 
+# ---------------------------------------------------------------- fleet health: probe the hosts, pause the sick ones
+
+# The watermarks of the health decision; the policy (`resources.health`) overrides them.
+FLEET_HEALTH_DEFAULT_THRESHOLDS = {
+    "disk_pause_pct": 95,
+    "disk_resume_pct": 92,
+    "inode_pause_pct": 95,
+    "inode_resume_pct": 92,
+    "mem_pause_mb": 512,
+    "mem_resume_mb": 640,
+    "ssh_fail_pause_streak": 3,
+}
+# The measured pressures: field, pause watermark, resume watermark, label, and whether a
+# high value is the bad one (percentages) or a low one (free memory).
+FLEET_HEALTH_PRESSURES = (
+    ("disk_pct", "disk_pause_pct", "disk_resume_pct", "% disk", True),
+    ("inode_pct", "inode_pause_pct", "inode_resume_pct", "% inodes", True),
+    ("mem_avail_mb", "mem_pause_mb", "mem_resume_mb", " MB memory available", False),
+)
+# The probes of a host: the field they measure and the remote command they run. Every
+# probe stands on its own, so a probe that fails never hides a fault another probe found.
+FLEET_HEALTH_PROBES = (
+    ("disk_pct", "df -P /"),
+    # Keep ``-i`` as its own option.  Besides being accepted by both GNU and BSD
+    # df, this makes the probe unambiguous to command runners that classify the
+    # requested metric from argv rather than executing a shell.
+    ("inode_pct", "df -P -i /"),
+    ("mem_avail_mb", 'case "$(uname -s)" in Darwin) vm_stat ;; *) free -m ;; esac'),
+)
+FLEET_HEALTH_TIMEOUT = 30
+FLEET_HEALTH_STATE_FILE = "fleet-health.json"
+FLEET_HEALTH_REASON = "auto:health"
+# The health hold takes a scope of its own (`host:<host>@health`), so the pause of an
+# operator is never overwritten nor removed (Refs #1367).
+FLEET_HEALTH_SCOPE_SUFFIX = "@health"
+FLEET_HEALTH_STATUS_RANK = {"ok": 0, "soft": 1, "error": 2, "unreachable": 2, "hard": 3}
+
+
+def fleet_health_thresholds(policy):
+    """The health watermarks of the policy: `resources.health` over the built-in defaults.
+
+    A watermark the policy spells with a value that is not a number is ignored: the
+    built-in default stays in place instead of breaking the comparison.
+    """
+    limits = dict(FLEET_HEALTH_DEFAULT_THRESHOLDS)
+    groups = []
+    resources = policy.get("resources") if isinstance(policy, dict) else None
+    if isinstance(resources, dict) and isinstance(resources.get("health"), dict):
+        groups.append(resources["health"])
+    for key in ("health", "fleet_health"):
+        group = policy.get(key) if isinstance(policy, dict) else None
+        if isinstance(group, dict):
+            groups.append(group)
+    for group in groups:
+        for key, value in group.items():
+            if key in limits and isinstance(value, (int, float)) and not isinstance(value, bool):
+                limits[key] = value
+    return limits
+
+
+def fleet_health_pause_dir():
+    """The shared pause store: $OPENSWARM_PAUSE_DIR, else $OPENSWARM_HOME/pauses.
+
+    The lane autodispatcher reads this directory (its pause records and its PAUSE-HOST
+    markers), so the hold the health check writes here keeps the dispatchers away from
+    a sick host.
+    """
+    return dispatch_pause.pause_dir(DATA)
+
+
+def fleet_health_pause_path(scope):
+    """The file of one pause record: the scope, escaped into a file name."""
+    return str(dispatch_pause.PauseStore(DATA).path(scope))
+
+
+def fleet_health_marker_path(host):
+    """The switch of a held host: the `PAUSE-HOST-<host>` marker of the dispatchers."""
+    return os.path.join(fleet_health_pause_dir(), f"PAUSE-HOST-{host}")
+
+
+def fleet_health_pause_records(now=None):
+    """The active pause records of the store (an expired record is no pause)."""
+    now = time.time() if now is None else now
+    return dispatch_pause.PauseStore(DATA).active(now)
+
+
+def fleet_health_write_pause(scope, reason, now):
+    """Write one pause record without an expiry: the hold ends when the host recovers."""
+    try:
+        return dispatch_pause.PauseStore(DATA).pause(scope, reason=reason, now=now)
+    except OSError as error:
+        raise ValueError(f"cannot write the pause record of {scope}: {error}")
+
+
+def fleet_health_release(scope):
+    """Remove a pause record this command owns; another program's record is never removed."""
+    path = fleet_health_pause_path(scope)
+    record = jload(path, None)
+    if not isinstance(record, dict):
+        return False
+    if not str(record.get("reason") or "").startswith(FLEET_HEALTH_REASON):
+        return False
+    try:
+        os.unlink(path)
+        return True
+    except OSError:
+        return False
+
+
+def fleet_health_write_marker(host, reason):
+    """Write the `PAUSE-HOST-<host>` switch of a held host.
+
+    The switch is what the dispatchers read; its body names the health check as its
+    owner, so only this command removes it again.
+    """
+    path = fleet_health_marker_path(host)
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        # A marker may belong to an operator. Create ours only when no marker
+        # exists; the independent pause-store hold still protects a sick host.
+        with open(path, "x", encoding="utf-8") as stream:
+            stream.write(f"{FLEET_HEALTH_REASON}: {reason}\n")
+    except FileExistsError:
+        return
+    except OSError as error:
+        raise ValueError(f"cannot write the pause marker of {host}: {error}")
+
+
+def fleet_health_release_marker(host):
+    """Remove the switch of a recovered host (only the one this command wrote)."""
+    path = fleet_health_marker_path(host)
+    try:
+        with open(path, encoding="utf-8") as stream:
+            body = stream.read()
+    except OSError:
+        return False
+    if not body.startswith(FLEET_HEALTH_REASON):
+        return False
+    try:
+        os.unlink(path)
+        return True
+    except OSError:
+        return False
+
+
+def fleet_health_holds(records, host):
+    """The holds of a host: the one of this command and the ones of other programs.
+
+    `health` says whether this command holds the host (its own record), `foreign` whether
+    another program holds it (the pause of an operator, for example). A hold that a
+    program keeps under a scope of its own (`host:<host>@health`) holds the host as well.
+    """
+    scope = "host:" + host
+    health_scope = scope + FLEET_HEALTH_SCOPE_SUFFIX
+    health = foreign = False
+    for record in records:
+        if record["scope"] == health_scope:
+            health = True
+        elif record["scope"] == scope:
+            if str(record.get("reason") or "").startswith(FLEET_HEALTH_REASON):
+                health = True
+            else:
+                foreign = True
+    return {"scope": health_scope, "health": health, "foreign": foreign}
+
+
+def fleet_health_lane_hosts():
+    """The host names the lanes.json names, in the order they appear.
+
+    The lanes.json is read leniently: a broken file only means "no host known here",
+    never a failed health check.
+    """
+    path = envvar("LANES_FILE", os.path.join(DATA, "lanes.json"))
+    try:
+        with open(path, encoding="utf-8") as stream:
+            config = json.load(stream)
+    except (OSError, ValueError, UnicodeError):
+        return []
+    lanes = config.get("lanes") if isinstance(config, dict) else None
+    names = []
+    for lane in lanes if isinstance(lanes, list) else []:
+        host = lane.get("host") if isinstance(lane, dict) else None
+        if isinstance(host, str) and host.strip() and host.strip() not in names:
+            names.append(host.strip())
+    return names
+
+
+def fleet_health_hosts(args, hosts):
+    """Probe --hosts when given, otherwise every fleet host plus any lane references."""
+    requested = [name.strip() for name in (getattr(args, "hosts", None) or "").split(",") if name.strip()]
+    if requested:
+        return list(dict.fromkeys(requested))
+    return list(dict.fromkeys(list(hosts) + fleet_health_lane_hosts()))
+
+
+def fleet_health_percent(output, column):
+    """The used percentage of the mountpoint `/` in a `df` output."""
+    lines = [line.split() for line in output.splitlines() if line.strip()]
+    if len(lines) < 2:
+        raise ValueError("df output has no data row")
+    header = lines[0]
+    alternatives = {"Use%": ("Capacity",), "IUse%": ("%iused",)}
+    index = next((header.index(name) for name in (column,) + alternatives.get(column, ())
+                  if name in header), None)
+    if index is None:
+        raise ValueError("df output missing " + column)
+    # ``Mounted on`` is printed as two header words but one data column.
+    mount_index = header.index("Mounted") if "Mounted" in header else len(header) - 1
+    rows = [row for row in lines[1:] if len(row) > mount_index and row[mount_index] == "/"]
+    if not rows:
+        raise ValueError("df output missing the mountpoint /")
+    row = rows[-1]
+    if len(row) <= index:
+        raise ValueError("truncated df data row")
+    value = row[index]
+    match = re.fullmatch(r"([0-9]+(?:\.[0-9]+)?)%", value)
+    if not match:
+        raise ValueError("invalid df percentage: " + value)
+    return float(match.group(1))
+
+
+def fleet_health_memory_mb(output):
+    """Available memory (MiB) from Linux `free -m` or macOS `vm_stat`.
+
+    On macOS, free, inactive and speculative pages are available for reuse. Use the
+    reported page size (Intel and Apple Silicon differ), excluding wired/compressed pages.
+    """
+    if "Mach Virtual Memory Statistics:" in output:
+        size = re.search(r"page size of ([0-9]+) bytes", output)
+        if not size or int(size.group(1)) <= 0:
+            raise ValueError("vm_stat output missing a valid page size")
+        pages = 0
+        for name in ("free", "inactive", "speculative"):
+            match = re.search(r"^Pages " + name + r":\s*([0-9]+)\.\s*$", output, re.MULTILINE)
+            if not match:
+                raise ValueError("vm_stat output missing Pages " + name)
+            pages += int(match.group(1))
+        return pages * int(size.group(1)) // (1024 * 1024)
+    for line in output.splitlines():
+        fields = line.split()
+        if fields and fields[0] == "Mem:":
+            if len(fields) >= 7:
+                return int(fields[6])
+            break
+    raise ValueError("free output missing the Mem available column")
+
+
+def fleet_health_measure(field, output):
+    """The value of one probe: the used percentage of the disk or the free memory."""
+    if field == "mem_avail_mb":
+        return fleet_health_memory_mb(output)
+    return fleet_health_percent(output, "IUse%" if field == "inode_pct" else "Use%")
+
+
+def fleet_health_probe(host, hosts, command):
+    """Run a probe; distinguish SSH transport failure from a failed remote command."""
+    entry = hosts.get(host)
+    if entry is None:
+        raise OSError("unknown fleet host: " + str(host))
+    rc, out, err = host_run(entry, command, timeout=FLEET_HEALTH_TIMEOUT)
+    if rc:
+        detail = err.decode("utf-8", errors="replace").strip().splitlines()
+        message = f"{command}: command failed (rc={rc})" + (f": {detail[-1]}" if detail else "")
+        # SSH uses 255 for transport errors; host_run uses 124 for deadlines
+        # and 127 when SSH is unavailable.
+        # A local utility timeout does not establish an SSH connection failure.
+        if entry["kind"] != "local" and rc in (124, 127, 255):
+            raise OSError(message)
+        raise ValueError(message)
+    return out.decode("utf-8", errors="replace")
+
+
+def fleet_health_levels(probe, limits):
+    """Classify every valid measurement of a probe against the pause/resume watermarks."""
+    rows = []
+    for field, pause_key, resume_key, label, high_is_bad in FLEET_HEALTH_PRESSURES:
+        value = probe.get(field)
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            continue
+        over_pause = value >= limits[pause_key] if high_is_bad else value <= limits[pause_key]
+        over_resume = value > limits[resume_key] if high_is_bad else value < limits[resume_key]
+        rows.append({"field": field, "value": value, "label": label,
+                     "over_pause": over_pause, "over_resume": over_resume,
+                     "pause_threshold": limits[pause_key], "resume_threshold": limits[resume_key]})
+    return rows
+
+
+def fleet_health_evaluate(probe, limits, paused, failed=False):
+    """The pause decision of one host: (decision, reason).
+
+    Separate pause and resume watermarks keep a sick host paused until it recovered.
+    A host that is still sick keeps its pause (decision `none`); it is released only when
+    every valid measurement is back under its resume watermark and no probe failed: a
+    probe that failed cannot establish the recovery of the host.
+    """
+    host = probe.get("host", "unknown")
+    failures = probe.get("ssh_fail_streak") or 0
+    if failures >= limits["ssh_fail_pause_streak"]:
+        return "pause", f"{host}: SSH failure streak {failures:g}"
+    measured = 0
+    active = []
+    for row in fleet_health_levels(probe, limits):
+        measured += 1
+        if row["over_pause"]:
+            active.append(f"{row['value']:g}{row['label']} (pause threshold {row['pause_threshold']})")
+            if not paused:
+                return "pause", f"{host}: {active[-1]}"
+        elif paused and row["over_resume"]:
+            active.append(f"{row['value']:g}{row['label']} (waiting for recovery threshold "
+                          f"{row['resume_threshold']})")
+    if paused:
+        if active:
+            return "none", f"{host}: still paused; waiting for " + "; ".join(active)
+        if failed:
+            return "none", f"{host}: still paused; recovery not established (a probe failed)"
+        if not measured:
+            return "none", f"{host}: still paused; no valid measurements"
+        return "resume", f"{host}: all reported pressures recovered"
+    return "none", f"{host}: healthy"
+
+
+def fleet_health_check(host, hosts, limits, paused, streak):
+    """Probe one host and describe its health.
+
+    Every probe stands on its own: a probe that fails (the memory probe) never hides a
+    fault another probe measured (the disk over the hard threshold) - the sick host is
+    still paused. A failed transport also counts toward the SSH failure streak;
+    that streak can pause a host even when no pressure measurement is available.
+    """
+    measurements, errors = {}, {}
+    unreachable = None
+    for field, command in FLEET_HEALTH_PROBES:
+        try:
+            output = fleet_health_probe(host, hosts, command)
+        except OSError as error:
+            unreachable = str(error)
+            break
+        except ValueError as error:
+            errors[field] = str(error)
+            continue
+        try:
+            measurements[field] = fleet_health_measure(field, output)
+        except ValueError as error:
+            errors[field] = str(error)
+    streak = streak + 1 if unreachable is not None else 0
+    probe = {"host": host, "ssh_fail_streak": streak}
+    probe.update(measurements)
+    decision, reason = fleet_health_evaluate(probe, limits, paused,
+                                           failed=bool(errors) or unreachable is not None)
+    levels = fleet_health_levels(probe, limits)
+    triggers = [row["field"] for row in levels if row["over_pause"]]
+    pending = [row["field"] for row in levels if not row["over_pause"] and row["over_resume"]]
+    metrics = {row["field"]: row["value"] for row in levels}
+    metrics["ssh_fail_streak"] = streak
+    if streak >= limits["ssh_fail_pause_streak"]:
+        triggers.append("ssh_fail_streak")
+    if unreachable is not None:
+        errors["ssh"] = unreachable
+    if errors and not triggers:
+        reason = f"{host}: health probe failed: " + "; ".join(errors.values())
+        if paused:
+            reason += "; still paused; recovery not established"
+    status = "hard" if triggers else ("unreachable" if unreachable is not None else
+                                      ("soft" if pending else ("error" if errors else "ok")))
+    return {"host": host, "status": status, "decision": decision, "reason": reason,
+            "error": "; ".join(errors.values()) if errors else None,
+            "metrics": metrics, "triggers": triggers}
+
+
+def fleet_health_state_path():
+    """The remembered SSH failure streaks: <home>/fleet-health.json."""
+    return os.path.join(DATA, FLEET_HEALTH_STATE_FILE)
+
+
+def fleet_health_state_load():
+    """The remembered SSH failure streak of every host."""
+    state = jload(fleet_health_state_path(), {}) or {}
+    hosts = state.get("hosts") if isinstance(state, dict) else None
+    return hosts if isinstance(hosts, dict) else {}
+
+
+def fleet_health_state_save(hosts):
+    try:
+        jsave(fleet_health_state_path(), {"hosts": hosts, "updated_at": time.time()})
+    except OSError as error:
+        raise ValueError(f"cannot write the fleet health state: {error}")
+
+
+def fleet_health_apply(records, row, now):
+    """Pause or release a host from its health decision.
+
+    The health check owns its hold of a sick host: the pause-store record with the
+    `host:<host>@health` scope and the `PAUSE-HOST-<host>` switch of the dispatchers.
+    The hold is independent of the holds the other programs own (the pause of an
+    operator): those are never rewritten and never removed, and they never hide a
+    health fault - a sick host keeps its own hold until it recovers.
+
+    A host that did not recover yet keeps its pause: the record has no expiry and is
+    refreshed on every run, so it cannot lapse while the host is still sick. The pause
+    ends when the host recovers, not when the record ages out.
+    """
+    holds = fleet_health_holds(records, row["host"])
+    scope = holds["scope"]
+    if row["decision"] == "resume":
+        released = fleet_health_release(scope)
+        released = fleet_health_release("host:" + row["host"]) or released
+        fleet_health_release_marker(row["host"])
+        return "resumed" if released else "none"
+    if row["decision"] == "pause" or holds["health"]:
+        fleet_health_write_pause(scope, FLEET_HEALTH_REASON + " " + row["reason"], now)
+        fleet_health_release("host:" + row["host"])  # a legacy health record under the host scope
+        fleet_health_write_marker(row["host"], row["reason"])
+        return "paused" if row["decision"] == "pause" else "renewed"
+    return "none"
+
+
+def fleet_health_status(rows):
+    """The worst status of the probed hosts."""
+    worst = "ok"
+    for row in rows:
+        if FLEET_HEALTH_STATUS_RANK.get(row["status"], 0) > FLEET_HEALTH_STATUS_RANK[worst]:
+            worst = row["status"]
+    return worst
+
+
+def cmd_fleet_health(args):
+    """Probe every fleet host and report its health; --apply pauses the sick ones.
+
+    The hosts are all fleet hosts plus lane references (or --hosts); each is probed over the
+    fleet transport (disk, inodes, free memory, ssh) and judged with the policy watermarks
+    (`resources.health`). `--apply` pauses a host that needs it and releases the host that
+    recovered; the pause of another program (the pause of an operator) is never touched.
+    """
+    limits = fleet_health_thresholds(load_policy())
+    hosts = fleet_config()
+    names = fleet_health_hosts(args, hosts)
+    if not names:
+        raise ValueError("no fleet host to probe")
+    now = time.time()
+    records = fleet_health_pause_records(now)
+    previous = fleet_health_state_load()
+    # A filtered check updates only the selected hosts; retain the other hosts' streaks.
+    rows, remembered = [], dict(previous)
+    for name in names:
+        streak = int((previous.get(name) or {}).get("ssh_fail_streak") or 0)
+        holds = fleet_health_holds(records, name)
+        if name not in hosts:
+            row = {"host": name, "status": "unreachable", "decision": "none",
+                   "reason": f"{name}: not a configured fleet host", "error": "unknown fleet host",
+                   "metrics": {}, "triggers": []}
+        else:
+            # The decision follows the hold of this command: the hold of another program
+            # never hides a health fault.
+            row = fleet_health_check(name, hosts, limits, holds["health"], streak)
+        row["paused"] = holds["health"] or holds["foreign"]
+        row["action"] = "none"
+        if args.apply:
+            row["action"] = fleet_health_apply(records, row, now)
+            records = fleet_health_pause_records(now)
+            holds = fleet_health_holds(records, name)
+            row["paused"] = holds["health"] or holds["foreign"]
+        remembered[name] = {"ssh_fail_streak": int(row["metrics"].get("ssh_fail_streak") or 0),
+                            "status": row["status"], "updated_at": now}
+        rows.append(row)
+    fleet_health_state_save(remembered)
+    report = {"ok": all(row["status"] == "ok" for row in rows),
+              "status": fleet_health_status(rows), "applied": bool(args.apply),
+              "thresholds": limits, "hosts": rows}
+    if args.json:
+        print(json.dumps(report, indent=2, ensure_ascii=False))
+        return report
+    for row in rows:
+        print(f"{row['host']}  {row['status']:<11}  {row['reason']}")
+        metrics = " ".join(f"{key}={value}" for key, value in row["metrics"].items())
+        if metrics:
+            print(f"  metrics: {metrics}")
+        if row["action"] != "none":
+            print(f"  action: {row['action']}")
+    print(f"{len(rows)} host(s) probed, status={report['status']}")
+    return report
+
+
 def cmd_fleet(args):
+    if args.fleet_cmd == "health":
+        cmd_fleet_health(args)
+        return
     if args.fleet_cmd == "_snapshot":
         print(json.dumps(fleet_snapshot(), ensure_ascii=False))
         return
@@ -10531,6 +11099,15 @@ def execute_batch(spec, summary):
                         if row["host"] == name and row["state"] == "queued" and not row.get("run_id"):
                             batch_change(summary, row, "finished", status="failed",
                                          summary="host run state unavailable; queued card was not started")
+                    continue
+                # A host the fleet health check holds (or an operator paused) gets no card:
+                # the hold of the pause store is a dispatch decision like every other pause.
+                holds = fleet_health_holds(fleet_health_pause_records(), name)
+                if holds["health"] or holds["foreign"]:
+                    for row in summary["cards"]:
+                        if row["host"] == name and row["state"] == "queued" and not row.get("run_id"):
+                            batch_change(summary, row, "finished", status="failed",
+                                         summary="host paused by the fleet health check; queued card was not started")
                     continue
                 count = sum(row["host"] == name and bool(row.get("run_id")) and row["state"] != "finished"
                             for row in summary["cards"])
@@ -12903,6 +13480,11 @@ def main():
     fp = fleet_ledger_sub.add_parser("pull", help="merge host ledgers into one file")
     fp.add_argument("--hosts", help="comma-separated fleet host names")
     fp.add_argument("--into", help="destination JSONL path")
+    fp = fleet_sub.add_parser("health", help="probe the fleet hosts (disk, inodes, memory, ssh)")
+    fp.add_argument("--apply", action="store_true",
+                    help="pause the unhealthy hosts and release the recovered ones")
+    fp.add_argument("--hosts", help="comma-separated fleet host names (default: all fleet hosts plus lane references)")
+    fp.add_argument("--json", action="store_true")
     fleet_sub.add_parser("_snapshot", help=argparse.SUPPRESS)
     fp = fleet_sub.add_parser("_run-info", help=argparse.SUPPRESS)
     fp.add_argument("run_id")
