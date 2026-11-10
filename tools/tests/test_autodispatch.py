@@ -76,6 +76,7 @@ class ReplenishTriggerTests(unittest.TestCase):
         self.filed = []
         self.real_file_issue = autodispatch.file_issue
         self.patch("file_issue", lambda text, extra=(): self.filed.append(text.splitlines()[0]) or "#501")
+        self.patch("preflight_card", lambda text: None)  # these tests are about the refill, not the card lint
         self.patch("gh", self.fake_gh)
         self.patch("sh", lambda *args, **kwargs: (0, "", ""))
 
