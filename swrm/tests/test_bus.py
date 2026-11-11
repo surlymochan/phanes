@@ -167,6 +167,11 @@ class BusTests(unittest.TestCase):
                 bus["poll_seconds"] = value
             self.assertEqual(xs.bus_config({"bus": bus})["poll_seconds"], expected)
 
+    def test_shipped_default_policy_polls_every_15_seconds(self):
+        base = json.loads((Path(xs.SKILL_DIR) / "policy.json").read_text())
+        merged = xs.deep_merge(base, {"bus": {"repo": "org/bus"}})
+        self.assertEqual(xs.bus_config(merged)["poll_seconds"], 15)
+
     def test_status_claim_timing(self):
         issues = [{"number": 1, "title": "[swrm] claimed", "created_at": "2026-01-01T00:00:00Z"},
                   {"number": 2, "title": "[swrm] waiting", "created_at": "2026-01-01T00:00:00Z"}]
