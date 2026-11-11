@@ -42,6 +42,9 @@ DEFAULT_PROBE_TIMEOUT_S = 0.5
 # The minimal session waits for the provider, so it gets a longer bound than a probe.
 DEFAULT_SESSION_TIMEOUT_S = 30.0
 
+# Fixed budget for restart attempts, socket waits, backoff and one confirmation.
+RECOVERY_TIMEOUT_S = 30.0
+
 # How often a dead socket is restarted before the host is declared interrupted.
 DEFAULT_ATTEMPTS = 5
 
@@ -105,10 +108,22 @@ def minimal_session(path, model=None, timeout=DEFAULT_SESSION_TIMEOUT_S, max_tok
                b"Content-Type: application/json\r\nContent-Length: " + str(len(body)).encode("ascii") +
                b"\r\nConnection: close\r\n\r\n" + body)
     client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-    client.settimeout(timeout)
+    deadline = time.monotonic() + timeout
     try:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return False, "minimal session deadline exceeded"
+        client.settimeout(remaining)
         client.connect(path)
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return False, "minimal session deadline exceeded"
+        client.settimeout(remaining)
         client.sendall(request)
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return False, "minimal session deadline exceeded"
+        client.settimeout(remaining)
         head = client.recv(256)
     except OSError as error:
         return False, "minimal session failed: %s" % (error,)
@@ -210,8 +225,8 @@ def interrupted_hosts(state):
 class BrokerRecovery:
     """Keep the Pi broker channel of one host alive: probe, reconnect, validate.
 
-    ``restart`` is called when the socket is gone; it may raise, and the failure
-    is recorded instead of crashing the dispatch.  ``validate`` runs the minimal
+    ``restart(timeout=remaining)`` is called when the socket is gone; it may raise, and the failure
+    is recorded instead of crashing the dispatch.  ``validate(timeout=remaining)`` runs the minimal
     session; it returns ``(ok, detail)``.  Both are optional: without a restart
     the module can only report that the socket is gone.
     """
@@ -234,7 +249,7 @@ class BrokerRecovery:
         self.brain_log = brain_log
         self.sleep = sleep
         self.now = now
-        self.probe = probe or (lambda: probe_socket(self.socket_path))
+        self.probe = probe
         self.socket_wait_s = max(0.0, float(socket_wait_s or 0))
         self.wait_sleep = wait_sleep
         self.clock = clock
@@ -276,57 +291,71 @@ class BrokerRecovery:
 
     # ---------------------------------------------------------------- recovery
 
-    def _restart(self):
+    def _probe(self, deadline):
+        remaining = deadline - self.clock()
+        if remaining <= 0:
+            return False
+        if self.probe is not None:
+            return self.probe()
+        return probe_socket(self.socket_path, timeout=min(DEFAULT_PROBE_TIMEOUT_S, remaining))
+
+    def _restart(self, deadline):
         """Restart the broker. Returns (result, detail); (None, None) means it worked."""
+        if self.clock() >= deadline:
+            return RESULT_RECONNECT_FAILED, "broker recovery deadline exceeded"
         if self.restart is None:
             return RESULT_RESTART_UNAVAILABLE, "no broker restart is configured for this host"
         try:
-            self.restart()
+            self.restart(timeout=max(0.0, deadline - self.clock()))
         except Exception as error:
             return RESULT_RECONNECT_FAILED, "broker restart failed: %s" % (error,)
         return None, None
 
-    def _validate_session(self):
+    def _validate_session(self, deadline):
         if self.validate is None:
             return True, "no minimal session configured"
         try:
-            ok, detail = self.validate()
+            ok, detail = self.validate(timeout=max(0.0, deadline - self.clock()))
         except Exception as error:
             return False, "minimal session failed: %s" % (error,)
         return bool(ok), str(detail or "")
 
-    def _wait_for_socket(self):
+    def _wait_for_socket(self, deadline):
         """Wait for the socket of a restarted broker to answer."""
         if self.socket_wait_s <= 0:
-            return self.probe()
-        deadline = self.clock() + self.socket_wait_s
+            return self._probe(deadline)
+        deadline = min(deadline, self.clock() + self.socket_wait_s)
         while True:
-            if self.probe():
+            if self._probe(deadline):
                 return True
             if self.clock() >= deadline:
                 return False
-            self.wait_sleep(DEFAULT_SOCKET_WAIT_INTERVAL_S)
+            self.wait_sleep(min(DEFAULT_SOCKET_WAIT_INTERVAL_S, max(0.0, deadline - self.clock())))
 
-    def _attempt(self, need_validation, restart_first):
+    def _attempt(self, need_validation, restart_first, deadline):
         """One attempt: make the socket answer, then validate it when the channel needs it."""
         restarted = False
         if restart_first:
-            result, detail = self._restart()
+            result, detail = self._restart(deadline)
             if result is not None:
                 return result, detail
             restarted = True
-        if not self.probe():
+        if not self._probe(deadline):
             if not restarted:
-                result, detail = self._restart()
+                result, detail = self._restart(deadline)
                 if result is not None:
                     return result, detail
                 restarted = True
-            if not self._wait_for_socket():
+            if not self._wait_for_socket(deadline):
                 return RESULT_RECONNECT_FAILED, "broker socket is still unreachable"
         if restarted or need_validation:
             # A restarted broker has to prove itself: only a minimal session that
             # answers releases the Pi channel of the host again.
-            ok, detail = self._validate_session()
+            if self.clock() >= deadline:
+                return RESULT_VALIDATION_FAILED, "broker recovery deadline exceeded"
+            ok, detail = self._validate_session(deadline)
+            if self.clock() >= deadline:
+                return RESULT_VALIDATION_FAILED, "broker recovery deadline exceeded"
             if ok:
                 return RESULT_RECOVERED, detail or "minimal session answered"
             return RESULT_VALIDATION_FAILED, detail or "minimal session failed"
@@ -373,6 +402,7 @@ class BrokerRecovery:
         interrupted is only released by a session that answers: a socket that
         accepts a connection again is not enough.
         """
+        deadline = self.clock() + RECOVERY_TIMEOUT_S
         previous = self.previous_record()
         need_validation = bool(previous.get("interrupted")) and previous.get("socket") == self.socket_path
         restart_first = False
@@ -380,14 +410,20 @@ class BrokerRecovery:
         self._save(dict(previous, host=self.host, socket=self.socket_path, ok=False,
                         interrupted=True, result="checking", detail="broker validation in progress"))
         for attempt in range(1, self.attempts + 1):
-            result, detail = self._attempt(need_validation, restart_first)
+            result, detail = self._attempt(need_validation, restart_first, deadline)
             if result in (RESULT_HEALTHY, RESULT_RECOVERED):
                 if result == RESULT_RECOVERED:
                     self._brain(attempt, result, detail)
                 return self._record_ok(attempt, result, detail)
             record = self._record_failure(attempt, result, detail)
+            # A failed confirmation is terminal: never spend another session.
+            if result == RESULT_VALIDATION_FAILED or self.clock() >= deadline:
+                return record
             need_validation = True
             restart_first = True
             if attempt < self.attempts:
-                self.sleep(backoff_delay(attempt, self.backoff_base_s, self.backoff_cap_s))
+                self.sleep(min(backoff_delay(attempt, self.backoff_base_s, self.backoff_cap_s),
+                               max(0.0, deadline - self.clock())))
+                if self.clock() >= deadline:
+                    return record
         return record

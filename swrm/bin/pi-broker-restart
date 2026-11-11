@@ -73,27 +73,40 @@ def clear_stale_socket(path):
     refused (nobody listens).  Any other failure leaves the path alone.
     """
     try:
-        info = path.lstat()
+        directory = os.open(str(path.parent), os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
     except FileNotFoundError:
         return
-    if not stat.S_ISSOCK(info.st_mode):
-        sys.exit('invalid broker socket')
-    if info.st_uid != os.getuid():
-        sys.exit('broker socket is not owned by the current user')
-    probe = socket.socket(socket.AF_UNIX)
     try:
-        probe.settimeout(1)
-        probe.connect(str(path))
-    except ConnectionRefusedError:
-        path.unlink()
-    except FileNotFoundError:
-        return
-    except OSError as error:
-        sys.exit('broker socket state unclear, not removing it: %s' % error.__class__.__name__)
-    else:
-        sys.exit('broker already running')
+        parent = os.fstat(directory)
+        if parent.st_uid != os.getuid():
+            sys.exit('broker socket directory is not owned by the current user')
+        try:
+            info = os.stat(path.name, dir_fd=directory, follow_symlinks=False)
+        except FileNotFoundError:
+            return
+        if not stat.S_ISSOCK(info.st_mode) or info.st_uid != os.getuid():
+            sys.exit('invalid broker socket')
+        probe = socket.socket(socket.AF_UNIX)
+        try:
+            probe.settimeout(1)
+            probe.connect(str(path))
+        except ConnectionRefusedError:
+            current_parent = os.stat(str(path.parent), follow_symlinks=False)
+            current = os.stat(path.name, dir_fd=directory, follow_symlinks=False)
+            if ((parent.st_dev, parent.st_ino) != (current_parent.st_dev, current_parent.st_ino)
+                    or (info.st_dev, info.st_ino) != (current.st_dev, current.st_ino)):
+                sys.exit('broker socket or directory changed, not removing it')
+            os.unlink(path.name, dir_fd=directory)
+        except FileNotFoundError:
+            return
+        except OSError as error:
+            sys.exit('broker socket state unclear, not removing it: %s' % error.__class__.__name__)
+        else:
+            sys.exit('broker already running')
+        finally:
+            probe.close()
     finally:
-        probe.close()
+        os.close(directory)
 
 
 def main(argv):

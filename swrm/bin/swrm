@@ -3831,7 +3831,7 @@ def pi_broker_restart(policy=None, socket_path=None):
     grace = max(0.0, float(settings["restart_grace_s"]))
     log_path = os.path.join(DATA, PI_BROKER_RESTART_LOG)
 
-    def restart():
+    def restart(timeout=None):
         env = dict(os.environ)
         if socket_path:
             env["OPENSWARM_PI_BROKER_SOCKET"] = str(socket_path)
@@ -3848,7 +3848,7 @@ def pi_broker_restart(policy=None, socket_path=None):
             if log is not subprocess.DEVNULL:
                 log.close()
         try:
-            code = proc.wait(timeout=grace)
+            code = proc.wait(timeout=min(grace, timeout) if timeout is not None else grace)
         except subprocess.TimeoutExpired:
             # The command is still running: it is the broker, not a launcher.
             _BROKER_RESTART_PROCESSES.append(proc)
@@ -3865,10 +3865,11 @@ def pi_broker_minimal_session(socket_path, model, timeout=None):
     The session always has a timeout: a broker that accepts the connection but
     never answers must not block the dispatch forever.
     """
-    limit = float(timeout) if timeout else broker_recovery_module().DEFAULT_SESSION_TIMEOUT_S
+    limit = min(10.0, max(0.001, float(timeout))) if timeout else 10.0
 
-    def validate():
-        return broker_recovery_module().minimal_session(socket_path, model=model, timeout=limit)
+    def validate(timeout=None):
+        remaining = min(limit, timeout) if timeout is not None else limit
+        return broker_recovery_module().minimal_session(socket_path, model=model, timeout=remaining)
 
     return validate
 
@@ -3898,9 +3899,6 @@ def pi_broker_ensure_ready(lane=None, policy=None, host=None):
         socket_wait_s=settings["socket_wait_s"],
         state_path=settings["state_path"],
         brain_log=pi_broker_brain_log_path(policy),
-        # A listening SSH proxy does not prove the remote broker can serve.
-        probe=lambda: module.minimal_session(socket_path, model=pi_broker_model(lane, policy),
-                                             timeout=settings["session_timeout_s"])[0],
     )
     return recovery.ensure_ready()
 

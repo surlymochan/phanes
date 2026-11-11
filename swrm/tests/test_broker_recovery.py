@@ -5,22 +5,22 @@ session, brain log lines, the interrupted marker) and the executor side: a dead
 broker socket has to travel the reconnect path instead of failing the dispatch
 directly, and the fleet status has to report the interrupted Pi channel.
 
-BLOCKER mapping (lane review of PR #1778, round 2).  The line numbers are the
-ones of the delivered files; the results are the ones of the local run.
+BLOCKER mapping (lane review of PR #1778, round 2).  The file:line references
+below name the current entry points; execution results are reported separately.
 
 * B1 — a dead broker is really restarted and the dispatch continues:
   ``swrm/policy.json:250`` names the restart command of the deployment
   (``pi.broker.restart_cmd`` = ``bin/pi-broker-restart``),
-  ``swrm/bin/pi-broker-restart:90`` starts the broker again on the probed
-  socket, and ``swrm/bin/swrm:3739`` (``pi_broker_settings``),
-  ``swrm/bin/swrm:3775`` (``pi_broker_restart_argv``) and
-  ``swrm/bin/swrm:3815`` (``pi_broker_restart``) run it detached, hand it the
+  ``swrm/bin/pi-broker-restart:112`` starts the broker again on the probed
+  socket, and ``swrm/bin/swrm:3743`` (``pi_broker_settings``),
+  ``swrm/bin/swrm:3779`` (``pi_broker_restart_argv``) and
+  ``swrm/bin/swrm:3819`` (``pi_broker_restart``) run it detached, hand it the
   socket and report the reason of a failed restart.  The recovery itself runs
-  before every dispatch (``swrm/bin/swrm:3872`` ``pi_broker_ensure_ready``,
-  ``swrm/bin/swrm:5606`` ``exec_pi``, ``swrm/bin/swrm:9175`` ``lane_run_turn``)
+  before every dispatch (``swrm/bin/swrm:3877`` ``pi_broker_ensure_ready``,
+  ``swrm/bin/swrm:5608`` ``exec_pi``, ``swrm/bin/swrm:9177`` ``lane_run_turn``)
   and the interrupted host reaches the health output
-  (``swrm/bin/swrm:3917`` ``pi_broker_channel_status``,
-  ``swrm/bin/swrm:11158`` ``fleet_pi_channel_alert``).  Tests:
+  (``swrm/bin/swrm:3919`` ``pi_broker_channel_status``,
+  ``swrm/bin/swrm:11160`` ``fleet_pi_channel_alert``).  Tests:
   ``DefaultBrokerRestartTests.test_the_default_restart_command_brings_the_broker_back``,
   ``DefaultBrokerRestartTests.test_the_default_restart_command_is_the_one_of_the_deployment``,
   ``DefaultBrokerRestartTests.test_the_restart_command_reports_why_it_failed``,
@@ -76,12 +76,8 @@ spec.loader.exec_module(recovery)
 
 
 def short_dir(prefix="swrm-broker-", reserve=48):
-    """A short temporary directory: an AF_UNIX socket path is limited to about 108 bytes.
-
-    The temporary directory of a run can be long (the CI puts it below the
-    checkout), so a short one is used when the default would not fit.
-    """
-    for base in (tempfile.gettempdir(), "/tmp"):
+    """Prefer a short directory within TMPDIR for AF_UNIX socket paths."""
+    for base in (tempfile.gettempdir(),):
         try:
             path = pathlib.Path(tempfile.mkdtemp(prefix=prefix, dir=base))
         except OSError:
@@ -307,7 +303,7 @@ class BrokerRecoveryTests(unittest.TestCase):
 
     def test_a_dead_socket_is_restarted_and_verified(self):
         broker = self.broker()
-        status = self.recovery(restart=lambda: None).ensure_ready()
+        status = self.recovery(restart=lambda timeout=None: None).ensure_ready()
         self.assertTrue(status["ok"])
         self.assertEqual(status["result"], recovery.RESULT_HEALTHY)
         self.assertFalse(status["interrupted"])
@@ -316,11 +312,11 @@ class BrokerRecoveryTests(unittest.TestCase):
     def test_a_dead_broker_is_restarted_and_the_dispatch_continues(self):
         started, validated = [], []
 
-        def restart():
+        def restart(timeout=None):
             started.append(1)
             self.broker()
 
-        def validate():
+        def validate(timeout=None):
             validated.append(1)
             return True, "minimal session answered with 200"
 
@@ -333,7 +329,7 @@ class BrokerRecoveryTests(unittest.TestCase):
         self.assertEqual(self.slept, [], "a broker that answers again needs no backoff")
 
     def test_a_broker_that_stays_dead_keeps_the_host_interrupted_and_alerts(self):
-        status = self.recovery(restart=lambda: None).ensure_ready()
+        status = self.recovery(restart=lambda timeout=None: None).ensure_ready()
         self.assertFalse(status["ok"])
         self.assertTrue(status["interrupted"])
         self.assertEqual(status["result"], recovery.RESULT_RECONNECT_FAILED)
@@ -342,7 +338,7 @@ class BrokerRecoveryTests(unittest.TestCase):
         self.assertEqual(self.slept, [1, 2], "the backoff doubles between the attempts")
 
     def test_a_failing_restart_is_reported_as_a_reconnect_failure(self):
-        def restart():
+        def restart(timeout=None):
             raise RuntimeError("broker service is not running")
 
         status = self.recovery(restart=restart).ensure_ready()
@@ -357,7 +353,7 @@ class BrokerRecoveryTests(unittest.TestCase):
         self.assertTrue(status["interrupted"])
 
     def test_a_failed_validation_keeps_the_interrupted_marker(self):
-        def restart():
+        def restart(timeout=None):
             try:
                 os.unlink(self.socket_path)
             except OSError:
@@ -365,11 +361,12 @@ class BrokerRecoveryTests(unittest.TestCase):
             self.broker()
 
         status = self.recovery(restart=restart,
-                               validate=lambda: (False, "minimal session answered with 500")).ensure_ready()
+                               validate=lambda timeout=None: (False, "minimal session answered with 500")).ensure_ready()
         self.assertFalse(status["ok"])
         self.assertTrue(status["interrupted"])
         self.assertEqual(status["result"], recovery.RESULT_VALIDATION_FAILED)
-        self.assertEqual(status["alert"], recovery.ALERT_INTERRUPTED)
+        self.assertEqual(status["failures"], 1)
+        self.assertIsNone(status["alert"])
 
     def test_an_interrupted_channel_is_only_released_by_a_validated_session(self):
         self.broker()
@@ -379,23 +376,23 @@ class BrokerRecoveryTests(unittest.TestCase):
             "attempts": 3, "reconnects": 3, "failures": 3, "alert": recovery.ALERT_INTERRUPTED}}})
         calls = []
 
-        def validate():
+        def validate(timeout=None):
             calls.append(1)
             return False, "minimal session answered with 500"
 
-        status = self.recovery(restart=lambda: None, validate=validate).ensure_ready()
+        status = self.recovery(restart=lambda timeout=None: None, validate=validate).ensure_ready()
         self.assertTrue(calls, "an interrupted channel has to be validated again")
         self.assertFalse(status["ok"])
         self.assertTrue(status["interrupted"], "a failed validation keeps the interrupted marker")
 
-        status = self.recovery(restart=lambda: None,
-                               validate=lambda: (True, "minimal session answered with 200")).ensure_ready()
+        status = self.recovery(restart=lambda timeout=None: None,
+                               validate=lambda timeout=None: (True, "minimal session answered with 200")).ensure_ready()
         self.assertTrue(status["ok"])
         self.assertFalse(status["interrupted"])
         self.assertEqual(status["result"], recovery.RESULT_RECOVERED)
 
     def test_the_state_file_keeps_the_host_record(self):
-        self.recovery(restart=lambda: None).ensure_ready()
+        self.recovery(restart=lambda timeout=None: None).ensure_ready()
         state = recovery.read_state(str(self.state_path))
         record = recovery.host_state(state, "hostA")
         self.assertTrue(record["interrupted"])
@@ -405,7 +402,7 @@ class BrokerRecoveryTests(unittest.TestCase):
     # ---------------------------------------------------------------- logging
 
     def test_the_brain_log_records_the_host_the_attempt_and_the_result(self):
-        self.recovery(restart=lambda: None).ensure_ready()
+        self.recovery(restart=lambda timeout=None: None).ensure_ready()
         lines = self.brain_lines()
         self.assertEqual(len(lines), 3, lines)
         self.assertIn("host=hostA", lines[0])
@@ -415,7 +412,7 @@ class BrokerRecoveryTests(unittest.TestCase):
 
     def test_a_healthy_broker_writes_no_brain_line(self):
         self.broker()
-        self.recovery(restart=lambda: None).ensure_ready()
+        self.recovery(restart=lambda timeout=None: None).ensure_ready()
         self.assertEqual(self.brain_lines(), [])
 
     def test_the_brain_line_shape(self):
@@ -1018,7 +1015,7 @@ class SandboxRecoveryTests(unittest.TestCase):
             state = os.path.join(directory, "state.json")
             entered, release = threading.Event(), threading.Event()
             results = []
-            def validate():
+            def validate(timeout=None):
                 entered.set()
                 release.wait(5)
                 return False, "remote down"
@@ -1044,7 +1041,7 @@ class SandboxRecoveryTests(unittest.TestCase):
             entered, release = threading.Event(), threading.Event()
             results = []
             recovery.write_state(state, {"hosts": {"host": {"socket": "/a", "interrupted": True}}})
-            def validate():
+            def validate(timeout=None):
                 self.assertTrue(recovery.host_state(recovery.read_state(state), "host", "/a")["interrupted"])
                 entered.set()
                 self.assertTrue(release.wait(5))
@@ -1067,7 +1064,8 @@ class SandboxRecoveryTests(unittest.TestCase):
                     if thread.ident is not None:
                         thread.join(5)
             self.assertTrue(all(not thread.is_alive() for thread in threads))
-            validation.assert_called_once_with()
+            validation.assert_called_once()
+            self.assertGreater(validation.call_args.kwargs["timeout"], 0)
             self.assertEqual(len(results), 4)
             self.assertTrue(all(result["ok"] and not result["interrupted"] for result in results))
             self.assertFalse(recovery.host_state(recovery.read_state(state), "host", "/a")["interrupted"])
@@ -1149,7 +1147,7 @@ class SandboxRecoveryTests(unittest.TestCase):
     def test_marker_exists_before_restart_and_other_socket_failure_survives(self):
         with tempfile.TemporaryDirectory() as directory:
             state = os.path.join(directory, "state.json")
-            def restart():
+            def restart(timeout=None):
                 self.assertTrue(recovery.host_state(recovery.read_state(state), "host", "/a")["interrupted"])
             first = recovery.BrokerRecovery("/a", host="host", state_path=state, attempts=1,
                                             probe=lambda: False, restart=restart, socket_wait_s=0)
@@ -1157,6 +1155,194 @@ class SandboxRecoveryTests(unittest.TestCase):
             second = recovery.BrokerRecovery("/b", host="host", state_path=state, probe=lambda: True)
             self.assertTrue(second.ensure_ready()["ok"])
             self.assertTrue(recovery.host_state(recovery.read_state(state), "host")["interrupted"])
+
+
+class RecoveryBudgetTests(unittest.TestCase):
+    def test_dispatch_uses_no_minimal_session(self):
+        module = xs.broker_recovery_module()
+        with tempfile.TemporaryDirectory() as directory, \
+             mock.patch.object(xs, "DATA", directory), \
+             mock.patch.object(module, "probe_socket", return_value=True) as probe, \
+             mock.patch.object(module, "minimal_session") as session:
+            self.assertTrue(xs.pi_broker_ensure_ready(policy={})["ok"])
+            probe.assert_called_once()
+            session.assert_not_called()
+
+    def test_recovery_confirms_exactly_once(self):
+        module = xs.broker_recovery_module()
+        with tempfile.TemporaryDirectory() as directory, \
+             mock.patch.object(xs, "DATA", directory), \
+             mock.patch.object(xs, "pi_broker_restart", return_value=mock.Mock()), \
+             mock.patch.object(module, "probe_socket", side_effect=[False, True]), \
+             mock.patch.object(module, "minimal_session", return_value=(True, "ready")) as session:
+            self.assertTrue(xs.pi_broker_ensure_ready(policy={})["ok"])
+            session.assert_called_once()
+            self.assertGreater(session.call_args.kwargs["timeout"], 0)
+            self.assertLessEqual(session.call_args.kwargs["timeout"], 10)
+
+    def test_confirmation_shares_deadline_and_is_not_retried(self):
+        for confirmation_ok in (False, True):
+            with self.subTest(confirmation_ok=confirmation_ok):
+                now = [100.0]
+                def restart(timeout):
+                    self.assertEqual(timeout, recovery.RECOVERY_TIMEOUT_S)
+                    now[0] += 7
+                def confirm(timeout):
+                    self.assertEqual(timeout, recovery.RECOVERY_TIMEOUT_S - 7)
+                    now[0] += timeout + 1
+                    return confirmation_ok, "answer"
+                session = mock.Mock(side_effect=confirm)
+                broker = recovery.BrokerRecovery(
+                    "/fake", clock=lambda: now[0], probe=mock.Mock(side_effect=[False, True]),
+                    restart=restart, validate=session)
+                result = broker.ensure_ready()
+                self.assertFalse(result["ok"])
+                self.assertEqual(result["result"], recovery.RESULT_VALIDATION_FAILED)
+                self.assertIn("deadline", result["detail"])
+                session.assert_called_once()
+
+    def test_failed_confirmation_is_terminal_with_budget_remaining(self):
+        session = mock.Mock(return_value=(False, "denied"))
+        broker = recovery.BrokerRecovery(
+            "/fake", clock=lambda: 100, probe=mock.Mock(side_effect=[False, True]),
+            restart=mock.Mock(), validate=session, sleep=mock.Mock())
+        self.assertFalse(broker.ensure_ready()["ok"])
+        session.assert_called_once()
+        broker.sleep.assert_not_called()
+
+    def test_restart_exhausts_budget_without_confirmation(self):
+        now = [100.0]
+        def restart(timeout):
+            now[0] += timeout + 1
+        session = mock.Mock()
+        broker = recovery.BrokerRecovery(
+            "/fake", clock=lambda: now[0], probe=lambda: False,
+            restart=restart, validate=session)
+        self.assertFalse(broker.ensure_ready()["ok"])
+        session.assert_not_called()
+
+    def test_socket_wait_is_capped_by_total_budget(self):
+        now = [100.0]
+        def restart(timeout):
+            now[0] += 29
+        def sleep(seconds):
+            now[0] += seconds
+        session = mock.Mock()
+        broker = recovery.BrokerRecovery(
+            "/fake", clock=lambda: now[0], probe=lambda: False,
+            restart=mock.Mock(side_effect=restart), validate=session, wait_sleep=sleep)
+        self.assertFalse(broker.ensure_ready()["ok"])
+        self.assertEqual(now[0], 100 + recovery.RECOVERY_TIMEOUT_S)
+        broker.restart.assert_called_once()
+        session.assert_not_called()
+
+    def test_backoff_cannot_extend_total_budget(self):
+        now = [100.0]
+        def restart(timeout):
+            now[0] += 7
+            raise RuntimeError("restart failed")
+        def sleep(seconds):
+            now[0] += seconds
+        broker = recovery.BrokerRecovery(
+            "/fake", clock=lambda: now[0], probe=lambda: False,
+            restart=mock.Mock(side_effect=restart), sleep=sleep,
+            backoff_base_s=100, backoff_cap_s=100)
+        self.assertFalse(broker.ensure_ready()["ok"])
+        self.assertEqual(now[0], 100 + recovery.RECOVERY_TIMEOUT_S)
+        broker.restart.assert_called_once()
+
+    def test_minimal_session_socket_operations_share_one_timeout(self):
+        now = [100.0]
+        def connect(path):
+            now[0] += 3
+        def send(request):
+            now[0] += 4
+        client = mock.Mock()
+        client.connect.side_effect = connect
+        client.sendall.side_effect = send
+        client.recv.return_value = b"HTTP/1.1 200 OK\r\n"
+        with mock.patch.object(recovery.time, "monotonic", side_effect=lambda: now[0]), \
+             mock.patch.object(recovery.socket, "socket", return_value=client):
+            self.assertTrue(recovery.minimal_session("/fake", model="model", timeout=10)[0])
+        self.assertEqual(client.settimeout.call_args_list,
+                         [mock.call(10), mock.call(7), mock.call(3)])
+        client.close.assert_called_once()
+
+
+class StaleSocketRaceTests(unittest.TestCase):
+    """Use real directory/inode swaps and a fake socket, without AF_UNIX binding."""
+
+    def check_race(self, script, replacement):
+        import runpy
+        import stat
+        with tempfile.TemporaryDirectory() as temporary:
+            home = pathlib.Path(temporary)
+            config = home / ".ssh" / "swrm-pi" / "config"
+            config.parent.mkdir(parents=True)
+            config.touch()
+            parent = home / "socket-dir"
+            parent.mkdir()
+            path = parent / "broker.sock"
+            path.write_text("original")
+            other = home / "other"
+            other.mkdir()
+            (other / path.name).write_text("replacement")
+            original_stat = os.stat
+
+            def socket_stat(name, *args, **kwargs):
+                info = original_stat(name, *args, **kwargs)
+                if str(name) == path.name and kwargs.get("dir_fd") is not None:
+                    fields = list(info)
+                    fields[0] = stat.S_IFSOCK | 0o600
+                    return os.stat_result(fields)
+                return info
+
+            def replace(_address):
+                if replacement == "inode":
+                    os.replace(other / path.name, path)
+                else:
+                    parent.rename(home / "saved")
+                    if replacement == "symlink":
+                        parent.symlink_to(other, target_is_directory=True)
+                    else:
+                        other.rename(parent)
+                raise ConnectionRefusedError()
+
+            probe = mock.Mock()
+            probe.connect.side_effect = replace
+            with mock.patch.object(pathlib.Path, "home", return_value=home), \
+                 mock.patch.dict(os.environ, OPENSWARM_PI_WORKER_SOCKET=str(path)), \
+                 mock.patch.object(socket, "socket", return_value=probe), \
+                 mock.patch.object(os, "stat", side_effect=socket_stat), \
+                 mock.patch.object(os, "unlink", wraps=os.unlink) as unlink:
+                with self.assertRaisesRegex(SystemExit, "changed, not removing it"):
+                    if script == "pi-worker-proxy":
+                        runpy.run_path(str(ROOT / "bin" / script))
+                    else:
+                        module = runpy.run_path(str(ROOT / "bin" / script))
+                        module["clear_stale_socket"](path)
+                unlink.assert_not_called()
+            self.assertEqual(path.read_text(), "replacement")
+            if replacement != "inode":
+                self.assertEqual((home / "saved" / path.name).read_text(), "original")
+
+    def test_restart_keeps_replaced_inode(self):
+        self.check_race("pi-broker-restart", "inode")
+
+    def test_restart_keeps_socket_when_parent_becomes_symlink(self):
+        self.check_race("pi-broker-restart", "symlink")
+
+    def test_restart_keeps_socket_when_parent_is_replaced(self):
+        self.check_race("pi-broker-restart", "directory")
+
+    def test_proxy_keeps_replaced_inode(self):
+        self.check_race("pi-worker-proxy", "inode")
+
+    def test_proxy_keeps_socket_when_parent_becomes_symlink(self):
+        self.check_race("pi-worker-proxy", "symlink")
+
+    def test_proxy_keeps_socket_when_parent_is_replaced(self):
+        self.check_race("pi-worker-proxy", "directory")
 
 
 if __name__ == "__main__":
