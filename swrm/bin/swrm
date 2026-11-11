@@ -3865,7 +3865,7 @@ def pi_broker_minimal_session(socket_path, model, timeout=None):
     The session always has a timeout: a broker that accepts the connection but
     never answers must not block the dispatch forever.
     """
-    limit = float(timeout) if timeout else broker_recovery_module().DEFAULT_SESSION_TIMEOUT_S
+    limit = min(10.0, max(0.001, float(timeout))) if timeout else 10.0
 
     def validate():
         return broker_recovery_module().minimal_session(socket_path, model=model, timeout=limit)
@@ -3898,9 +3898,6 @@ def pi_broker_ensure_ready(lane=None, policy=None, host=None):
         socket_wait_s=settings["socket_wait_s"],
         state_path=settings["state_path"],
         brain_log=pi_broker_brain_log_path(policy),
-        # A listening SSH proxy does not prove the remote broker can serve.
-        probe=lambda: module.minimal_session(socket_path, model=pi_broker_model(lane, policy),
-                                             timeout=settings["session_timeout_s"])[0],
     )
     return recovery.ensure_ready()
 
