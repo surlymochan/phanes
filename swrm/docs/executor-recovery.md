@@ -251,3 +251,7 @@ includes current counts and counts first seen within 24 hours, including
 resolved findings. Missing run records are counted; expiry and duplicate run
 checks still work without them. The coordinator has no acquire queue timing,
 so `lease_age_seconds` is null with an explanation rather than an estimate.
+Run records are read from `result.json`, then `run.json`, with `status.json`
+as the fallback for active runs' titles and states. A completed result takes
+precedence over an older active status; `partial` is a terminal result and
+any reservation it still holds is reported as a ghost.

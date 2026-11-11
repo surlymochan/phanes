@@ -9,7 +9,7 @@ import sys
 import time
 from urllib.parse import quote
 
-TERMINAL = {'finished', 'failed', 'dead', 'budget_exceeded', 'done', 'cancelled',
+TERMINAL = {'finished', 'failed', 'partial', 'dead', 'budget_exceeded', 'done', 'cancelled',
             'canceled', 'stopped', 'error', 'timeout', 'aborted', 'merged', 'unroutable'}
 KINDS = {'ghost': 'ghost_leases', 'expired_unreclaimed': 'expired_unreclaimed',
          'double_claim': 'double_claims'}
@@ -19,7 +19,8 @@ def run_record(root, run_id):
     # Run IDs are untrusted database contents, not paths.
     if not run_id or Path(run_id).name != run_id or run_id in ('.', '..'):
         return None
-    for name in ('result.json', 'run.json'):
+    # Completed results take precedence over a stale active status record.
+    for name in ('result.json', 'run.json', 'status.json'):
         try:
             with (root / run_id / name).open(encoding='utf-8') as stream:
                 value = json.load(stream)

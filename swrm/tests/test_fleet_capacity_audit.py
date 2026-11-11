@@ -370,6 +370,53 @@ class FleetCapacityAuditTests(unittest.TestCase):
         self.assertEqual([row.get('kind') for row in self.alerts(report)], ['double_claim'])
         self.assertEqual(self.live_metrics(report).get('double_claims'), 1)
 
+    def test_active_status_records_report_a_double_claim(self):
+        # Active swrm runs have state/title in status.json, before a result exists.
+        for token, run_id in (('1' * 32, 'run-active-1'), ('2' * 32, 'run-active-2')):
+            self.add_reservation(token, 'worker', run_id)
+            directory = self.runs / run_id
+            directory.mkdir()
+            (directory / 'status.json').write_text(json.dumps(
+                {'id': run_id, 'state': 'routing', 'title': 'the active card'}),
+                encoding='utf-8')
+        before_runs = self.files(self.runs)
+
+        report, process = self.audit(db=self.db, runs=self.runs, state=self.state_path)
+
+        self.assertEqual(process.returncode, 0, report)
+        self.assertEqual(self.kinds(report), ['double_claim'])
+        self.assertEqual(self.live_metrics(report).get('double_claims'), 1)
+        self.assertEqual(self.live_metrics(report).get('missing_run_records'), 0)
+        self.assertEqual(self.files(self.runs), before_runs)
+
+    def test_distinct_active_status_records_report_no_findings(self):
+        for token, run_id in (('1' * 32, 'run-active-1'), ('2' * 32, 'run-active-2')):
+            self.add_reservation(token, 'worker', run_id)
+            directory = self.runs / run_id
+            directory.mkdir()
+            (directory / 'status.json').write_text(json.dumps(
+                {'id': run_id, 'state': 'queued', 'title': run_id}), encoding='utf-8')
+
+        report, _ = self.audit(db=self.db, runs=self.runs, state=self.state_path)
+
+        self.assertEqual(self.kinds(report), [])
+        self.assertEqual(self.live_metrics(report).get('missing_run_records'), 0)
+
+    def test_a_partial_result_is_a_ghost_despite_an_old_active_status(self):
+        self.add_reservation('3' * 32, 'worker', 'run-partial')
+        self.add_run('run-partial', title='the partial card', status='partial')
+        (self.runs / 'run-partial' / 'status.json').write_text(json.dumps(
+            {'id': 'run-partial', 'state': 'running', 'title': 'the partial card'}),
+            encoding='utf-8')
+
+        report, process = self.audit(db=self.db, runs=self.runs, state=self.state_path)
+
+        self.assertEqual(process.returncode, 0, report)
+        self.assertEqual(self.kinds(report), ['ghost'])
+        self.assertEqual(self.alerts(report)[0].get('detail'), {'status': 'partial'})
+        self.assertEqual(self.live_metrics(report).get('ghost_leases'), 1)
+        self.assertEqual(self.live_metrics(report).get('expired_unreclaimed'), 0)
+
     def test_an_expired_reservation_that_was_not_reclaimed_is_reported(self):
         # The lease ran out long ago and the row is still there.
         moment = time.time()
