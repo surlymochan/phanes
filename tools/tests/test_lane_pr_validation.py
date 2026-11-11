@@ -113,6 +113,8 @@ class FakeLaneHost:
         return 0, "", ""
 
     def gh(self, args, timeout=60):
+        if args[:2] == ["api", "graphql"]:
+            return 0, json.dumps({"data": {"repository": {"pullRequests": {"nodes": [], "pageInfo": {"hasNextPage": False}}}}}), ""
         if args[:2] == ["pr", "create"]:
             self.prs.append(dict(zip(args[2::2], args[3::2])))
             return 0, "https://github.com/surlymochan/phanes/pull/1", ""
@@ -243,13 +245,14 @@ class LanePrSubmitTests(unittest.TestCase):
         info.update(status="failed", error_class="executor_start_failed")
         with mock.patch.object(MODULE, "pause_store_dir", return_value=self.tmp.name), \
              mock.patch.object(MODULE, "gh", return_value=(1, "", "labels unavailable")) as gh, \
+             mock.patch.object(MODULE, "open_pr_for_issue", return_value=None), \
              mock.patch.object(MODULE, "sh") as sh, \
              mock.patch.object(MODULE, "harvest_fetch") as fetch, \
              mock.patch.object(MODULE, "log"):
             result = MODULE.finish("codex", CFG, {"issue": ISSUE, "run": RUN}, info, self.state)
         self.assertFalse(result["done"])
         self.assertEqual(result["status"], "requeue-failed")
-        self.assertEqual(result["error"], "labels unavailable")
+        self.assertEqual(result["error"], "PR guard unverified")
         self.assertNotIn(ISSUE, self.state.get("_done", []))
         gh.assert_called_once_with(["issue", "edit", str(ISSUE), "--remove-label", "in-progress",
                                     "--remove-label", "lane-failed", "--add-label", "lane-ready"])
@@ -383,6 +386,7 @@ class ExecutorStartHarvestTests(unittest.TestCase):
             with self.subTest(relabel_rc=rc), tempfile.TemporaryDirectory() as directory, \
                  mock.patch.object(MODULE, "pause_store_dir", return_value=directory), \
                  mock.patch.object(MODULE, "gh", return_value=(rc, "", "labels unavailable")) as gh, \
+                 mock.patch.object(MODULE, "open_pr_for_issue", return_value=None), \
                  mock.patch.object(MODULE, "log"), \
                  mock.patch.object(MODULE, "harvest_fetch", return_value=(True, "", 0)) as fetch, \
                  mock.patch.object(MODULE, "filter_harvest", return_value=("c0ffee", [".lane-review/PR-1.md"], True)), \
@@ -408,6 +412,7 @@ class ExecutorStartHarvestTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory, \
              mock.patch.object(MODULE, "pause_store_dir", return_value=directory), \
              mock.patch.object(MODULE, "gh", return_value=(0, "", "")) as gh, \
+             mock.patch.object(MODULE, "open_pr_for_issue", return_value=None), \
              mock.patch.object(MODULE, "log"), \
              mock.patch.object(MODULE.time, "time", return_value=1000):
             state = {"_done": [12]}
@@ -489,3 +494,158 @@ class ExecutorStartHarvestTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ReassignmentGuardTests(unittest.TestCase):
+    def fixture(self):
+        spec = importlib.util.spec_from_file_location('guard_fleet', SCRIPT.with_name('test_budget_requeue.py'))
+        fixture = importlib.util.module_from_spec(spec); spec.loader.exec_module(fixture)
+        case = fixture.BudgetRequeueTest('runTest'); case.setUp()
+        self.addCleanup(case.doCleanups)
+        original = case.module.gh
+        def gh(args, timeout=60):
+            if args[:2] == ['issue', 'edit']:
+                labels = case.fleet.issues[int(args[2])]['labels']
+                for index, flag in enumerate(args):
+                    if flag == '--remove-label' and args[index + 1] in labels: labels.remove(args[index + 1])
+                    if flag == '--add-label' and args[index + 1] not in labels: labels.append(args[index + 1])
+                return 0, '', ''
+            return original(args, timeout)
+        case.module.gh = gh
+        return case, fixture
+
+    def test_paginated_open_only_lookup(self):
+        def page(prs, more=False):
+            return 0, json.dumps({'data': {'repository': {'pullRequests': {
+                'nodes': prs, 'pageInfo': {'hasNextPage': more, 'endCursor': 'next'}}}}}), ''
+        pr = {'number': 99, 'state': 'OPEN', 'body': 'Closes #7', 'headRefName': '',
+              'closingIssuesReferences': {'nodes': [], 'pageInfo': {'hasNextPage': False}}}
+        with mock.patch.object(MODULE, 'gh', side_effect=[page([dict(pr, number=i, body='') for i in range(100)], True), page([pr])]) as gh:
+            self.assertEqual(MODULE.open_pr_for_issue(7), 99)
+            self.assertIn('after:', gh.call_args.args[0][-1])
+        with mock.patch.object(MODULE, 'gh', return_value=page([dict(pr, state='MERGED')])):
+            self.assertIsNone(MODULE.open_pr_for_issue(7))
+        with mock.patch.object(MODULE, 'gh', return_value=(1, '', 'offline')):
+            with self.assertRaises(RuntimeError): MODULE.open_pr_for_issue(7)
+
+    def test_requeue_paths_fail_closed_and_repair(self):
+        case, fixture = self.fixture(); ad = case.module; n = fixture.ISSUE
+        actions = [lambda: ad.requeue_lost_run('L', {'issue': n, 'run': 'r'}, {}, {}),
+                   lambda: ad.block_pr_validation('L', {'host': 'test'}, {'issue': n, 'run': 'r'}, {}, {}, '', '', ['missing']),
+                   lambda: ad.requeue_executor_start_failure('L', n, 'r')]
+        for action in actions:
+            for answer in (99, RuntimeError('offline')):
+                case.fleet.issues[n]['labels'] = ['in-progress']
+                with mock.patch.object(ad, 'open_pr_for_issue', side_effect=([answer] if isinstance(answer, Exception) else None), return_value=answer), mock.patch.object(ad, 'record_pr_validation'):
+                    action()
+                labels = case.fleet.issues[n]['labels']
+                self.assertNotIn('lane-ready', labels)
+                if answer == 99: self.assertEqual(set(labels) & ad.DELIVERY_LABELS, {'lane-pr'})
+
+    def test_requeue_write_race_and_failed_readback(self):
+        case, fixture = self.fixture(); ad = case.module; n = fixture.ISSUE
+        for answer in (99, RuntimeError('offline')):
+            case.fleet.issues[n]['labels'] = []
+            with mock.patch.object(ad, 'open_pr_for_issue', side_effect=[None, answer]):
+                result = ad.guarded_requeue(n)
+            self.assertNotIn('lane-ready', case.fleet.issues[n]['labels'])
+            self.assertEqual(result, answer == 99)
+
+    def test_tick_dispatch_races(self):
+        for answers, dispatched in (([99], False), ([None, 99], False),
+                                    ([None, None, 99, 99], True),
+                                    ([None, None, RuntimeError('offline'), None], True)):
+            case, fixture = self.fixture(); ad = case.module; n = fixture.ISSUE
+            case.fleet.issues[n]['labels'] = ['lane-ready']
+            notes = []
+            original_sh = ad.sh
+            def sh(cmd, **kwargs):
+                if ' stop ' in ' '.join(cmd):
+                    case.fleet.set_lane(fixture.LANE, 'idle', None, case.clock.time())
+                    return 0, '{"signalled":["abort"]}', ''
+                return original_sh(cmd, **kwargs)
+            def remote(lane, cfg, run=''):
+                return {'lane': 'idle', 'runner_alive': False, 'executor_alive': False}
+            with mock.patch.object(ad, 'open_pr_for_issue', side_effect=answers), \
+                    mock.patch.object(ad, 'sh', side_effect=sh), mock.patch.object(ad, 'remote', side_effect=remote), \
+                    mock.patch.object(ad, 'log', side_effect=lambda msg, brain=True: notes.append(msg)):
+                case.tick()
+            self.assertEqual(bool(case.fleet.dispatches), dispatched)
+            self.assertNotIn(fixture.LANE, case.state)
+            self.assertNotIn('in-progress', case.fleet.issues[n]['labels'], notes)
+            self.assertTrue(any('open PR #99' in x or 'post-dispatch' in x for x in notes))
+
+    def test_tick_does_not_dispatch_when_pr_lookup_fails(self):
+        case, fixture = self.fixture(); ad = case.module
+        case.fleet.issues[fixture.ISSUE]['labels'] = ['lane-ready']
+        with mock.patch.object(ad, 'open_pr_for_issue', side_effect=RuntimeError('offline')):
+            case.tick()
+        self.assertEqual(case.fleet.dispatches, [])
+        self.assertNotIn(fixture.LANE, case.state)
+
+    def test_cancel_is_verified_and_retained_for_retry(self):
+        case, fixture = self.fixture(); ad = case.module; n = fixture.ISSUE
+        st = {'issue': n, 'run': 'r', 'cancel_pending': True}
+        with mock.patch.object(ad, 'sh', return_value=(0, '{"signalled":["abort"]}', '')), \
+                mock.patch.object(ad, 'remote', return_value={'lane': 'idle', 'runner_alive': False, 'executor_alive': False}), \
+                mock.patch.object(ad, 'open_pr_for_issue', return_value=99):
+            self.assertTrue(ad.cancel_guarded_dispatch(fixture.LANE, case.lanes[fixture.LANE], st))
+        case.state[fixture.LANE] = st
+        with mock.patch.object(ad, 'cancel_guarded_dispatch', return_value=False), mock.patch.object(ad, 'open_pr_for_issue', return_value=99):
+            case.tick()
+        self.assertTrue(case.state[fixture.LANE]['cancel_pending'])
+
+    def lookup(self, response, issue=7):
+        with mock.patch.object(MODULE, 'gh', return_value=(0, json.dumps(response), '')):
+            return MODULE.open_pr_for_issue(issue)
+
+    def connection(self, nodes, more=False):
+        return {'data': {'repository': {'pullRequests': {'nodes': nodes, 'pageInfo': {'hasNextPage': more, 'endCursor': 'c'}}}}}
+
+    def test_truncated_closing_references_fail_closed(self):
+        pr = {'number': 5, 'state': 'OPEN', 'body': '', 'headRefName': 'x',
+              'closingIssuesReferences': {'nodes': [{'number': 1}], 'pageInfo': {'hasNextPage': True}}}
+        with self.assertRaises(RuntimeError): self.lookup(self.connection([pr]))
+        pr['closingIssuesReferences']['pageInfo'] = {'hasNextPage': False}
+        pr['closingIssuesReferences']['nodes'] = [{'number': 7}]
+        self.assertEqual(self.lookup(self.connection([pr])), 5)
+
+    def test_malformed_pages_fail_closed(self):
+        good = {'number': 5, 'state': 'OPEN', 'body': '', 'headRefName': '',
+                'closingIssuesReferences': {'nodes': [], 'pageInfo': {'hasNextPage': False}}}
+        bad = [
+            {'data': {'repository': {'pullRequests': {'nodes': {}, 'pageInfo': {'hasNextPage': False}}}}},
+            {'data': {'repository': {'pullRequests': {'nodes': [], 'pageInfo': {'hasNextPage': None}}}}},
+            {'data': {'repository': {'pullRequests': {'nodes': [], 'pageInfo': {}}}}},
+            {'data': {'repository': {'pullRequests': None}}},
+            {'data': {'repository': None}}, {'data': None}, [], {},
+            self.connection([dict(good, closingIssuesReferences={'nodes': {}, 'pageInfo': {'hasNextPage': False}})]),
+            self.connection([dict(good, closingIssuesReferences={'nodes': []})]),
+            self.connection([dict(good, number='5')]),
+            self.connection([{k: v for k, v in good.items() if k != 'state'}]),
+            self.connection([dict(good, state=None)]),
+            self.connection([dict(good, state=1)]),
+            self.connection([dict(good, state='')]),
+        ]
+        for response in bad:
+            with self.subTest(response=response):
+                with self.assertRaises(RuntimeError): self.lookup(response)
+        self.assertIsNone(self.lookup(self.connection([good])))
+
+    def test_cancel_accepts_the_real_remote_protocol_of_a_finished_or_idle_run(self):
+        case, fixture = self.fixture(); ad = case.module; n = fixture.ISSUE
+        finished = {'lane': 'idle', 'current_run': None, 'run': {'status': 'done', 'branch': 'b'}}
+        idle_gone = {'lane': 'idle', 'current_run': None, 'run': 'running', 'runner_alive': False, 'executor_alive': False}
+        unreadable = {'lane': 'idle', 'current_run': None, 'run': 'running', 'runner_alive': None, 'executor_alive': None}
+        half = {'lane': 'idle', 'current_run': None, 'run': 'running', 'runner_alive': False}
+        absent = {'lane': 'idle', 'current_run': None, 'run': None}
+        still = {'lane': 'busy', 'current_run': 'r', 'run': 'running', 'runner_alive': True}
+        unknown = {'error': 'ssh status timeout'}
+        for probe, expected in ((finished, True), (idle_gone, True), (unreadable, False), (half, False), (absent, False), (still, False), (unknown, False)):
+            with self.subTest(probe=probe):
+                self.assertEqual(ad.run_stopped(probe, 'r'), expected)
+        st = {'issue': n, 'run': 'r', 'cancel_pending': True}
+        with mock.patch.object(ad, 'sh', return_value=(0, '{"signalled":["abort"]}', '')), \
+                mock.patch.object(ad, 'remote', return_value=finished), \
+                mock.patch.object(ad, 'open_pr_for_issue', return_value=99):
+            self.assertTrue(ad.cancel_guarded_dispatch(fixture.LANE, case.lanes[fixture.LANE], st))

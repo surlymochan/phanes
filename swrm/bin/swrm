@@ -8537,9 +8537,73 @@ def lane_codex_health_probe(lane, child, policy, restart=True):
         child.send({"jsonrpc": "2.0", "id": req_id, "method": "model/list",
                     "params": {"limit": 1}})
         child.wait_response(req_id, timeout)
-        # Even a JSON-RPC error proves the server is answering.
-        lane_write_state(lane["name"], server_alive=True, server_last_success=NOW(),
-                         server_probe_failures=0, server_probe_error=None)
+        # Retry the same unreleased session before creating another one.
+        pending = getattr(child, "health_release_pending", None)
+        if not isinstance(pending, str):
+            pending = None
+        if pending:
+            try:
+                release_id = f"health-release-{time.time_ns()}"
+                child.send({"jsonrpc": "2.0", "id": release_id,
+                            "method": "thread/unsubscribe", "params": {"threadId": pending}})
+                released = child.wait_response(release_id, min(timeout, 1))
+                if released.get("error"):
+                    raise RuntimeError(short(released["error"], 300))
+            except Exception as error:
+                failures = int(state.get("server_release_failures", 0)) + 1
+                print(f"lane {lane['name']} health probe thread/unsubscribe failed: "
+                      f"{short(error, 300)}", file=sys.stderr, flush=True)
+                lane_write_state(lane["name"], server_alive=False,
+                                 server_probe_error="session release failing",
+                                 server_release_failures=failures)
+                return child
+            child.health_release_pending = None
+            lane_write_state(lane["name"], server_alive=True, server_last_success=NOW(),
+                             server_probe_failures=0, server_probe_error=None,
+                             server_release_failures=0)
+            return child
+        # A responsive model/list alone misses CX9: the live server could no
+        # longer create sessions. Require a fresh ephemeral thread as well.
+        thread_id = None
+        release_failed = False
+        try:
+            req_id = f"health-session-{time.time_ns()}"
+            child.send({"jsonrpc": "2.0", "id": req_id, "method": "thread/start",
+                        "params": {"cwd": child.cwd, "model": lane["model"],
+                                   "ephemeral": True, "approvalPolicy": "never",
+                                   "sandbox": "read-only"}})
+            thread = child.wait_response(req_id, timeout)
+            thread_id = (thread.get("thread") or {}).get("id")
+            if thread.get("error"):
+                raise RuntimeError(f"probe thread/start failed: {short(thread['error'], 300)}")
+            if not thread_id:
+                raise RuntimeError("probe thread/start did not create a thread")
+        finally:
+            if thread_id:
+                # Unsubscribe unloads this idle thread without requiring a rollout
+                # (ephemeral threads cannot reliably be archived).
+                try:
+                    release_id = f"health-release-{time.time_ns()}"
+                    child.send({"jsonrpc": "2.0", "id": release_id,
+                                "method": "thread/unsubscribe",
+                                "params": {"threadId": thread_id}})
+                    released = child.wait_response(release_id, min(timeout, 1))
+                    if released.get("error"):
+                        raise RuntimeError(short(released["error"], 300))
+                    child.health_release_pending = None
+                    lane_write_state(lane["name"], server_release_failures=0)
+                except Exception as error:
+                    child.health_release_pending = thread_id
+                    release_failed = True
+                    lane_write_state(lane["name"], server_alive=False,
+                                     server_probe_failures=0,
+                                     server_probe_error="session release failing",
+                                     server_release_failures=1)
+                    print(f"lane {lane['name']} health probe thread/unsubscribe failed: "
+                          f"{short(error, 300)}", file=sys.stderr, flush=True)
+        if not release_failed:
+            lane_write_state(lane["name"], server_alive=True, server_last_success=NOW(),
+                             server_probe_failures=0, server_probe_error=None)
         return child
     except Exception as error:
         if not restart and child.health_stop.is_set():

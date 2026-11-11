@@ -1,3 +1,7 @@
+import sys
+from pathlib import Path as _FixturePath
+sys.path.append(str(_FixturePath(__file__).resolve().parents[1] / "lane-autodispatch"))
+from pr_guard_fixtures import no_open_prs
 """Reproduction of #1839: the task book of an impl card must carry two hard requirements.
 
 The issue asks for the task book (the text a lane receives for a card) of a *new*
@@ -129,6 +133,7 @@ class FakeGitHub:
         return rows
 
     # -- the dispatcher entry points ----------------------------------------------
+    @no_open_prs
     def gh(self, args, timeout=60):
         self.calls.append(list(args))
         if args[:2] == ["issue", "create"]:

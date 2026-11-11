@@ -1,3 +1,7 @@
+import sys
+from pathlib import Path as _FixturePath
+sys.path.insert(0, str(_FixturePath(__file__).resolve().parent))
+from pr_guard_fixtures import no_open_prs
 #!/usr/bin/env python3
 """Fake-queue proof for backend starvation fallback (Refs #232), for the verify-card contract
 (Refs #1811) and for the review lane load balancing (Refs #1701)."""
@@ -189,6 +193,8 @@ class TickHarness:
         """One tick with the GitHub/ssh/dispatch side effects faked; returns (dispatched, logs)."""
         dispatched, logs, edits = [], [], []
         state = dict(state or {})
+
+        @no_open_prs
 
         def fake_gh(args, timeout=60):
             if args[:2] == ["issue", "list"]:

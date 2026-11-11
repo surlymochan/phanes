@@ -1,5 +1,8 @@
 """Offline tests for the quota failure requeue utility."""
 import importlib.util
+import json
+from unittest import mock
+from types import SimpleNamespace
 from pathlib import Path
 import unittest
 
@@ -70,3 +73,22 @@ class RequeueQuotaFailedTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class QuotaPrGuardTests(unittest.TestCase):
+    def test_open_pr_query_failure_and_write_race(self):
+        for answers, expected in (([99], {'lane-failed', 'lane-pr'}), ([RuntimeError('offline')], {'lane-failed'}),
+                                  ([None, 99], {'lane-pr'}), ([None, RuntimeError('offline')], set()),
+                                  ([None, None], {'lane-ready'})):
+            labels = {'lane-failed'}
+            def runner(args):
+                if args[:2] == ['issue', 'edit']:
+                    for i, flag in enumerate(args):
+                        if flag == '--remove-label': labels.discard(args[i + 1])
+                        if flag == '--add-label': labels.add(args[i + 1])
+                return SimpleNamespace(returncode=0, stderr='', stdout=json.dumps(
+                    {'state': 'OPEN', 'labels': [{'name': x} for x in labels]}))
+            with mock.patch.object(tool.guard, 'open_pr_for_issue', side_effect=answers):
+                changed = tool.execute('owner/repo', tool.plan(TODAY), apply=True, runner=runner, output=lambda _: None)
+            self.assertEqual(labels, expected)
+            self.assertEqual(bool(changed), expected == {'lane-ready'})

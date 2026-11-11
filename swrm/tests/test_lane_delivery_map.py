@@ -1,5 +1,9 @@
 """Ported #1857 harvest regression tests; Refs #1849."""
 
+import sys as _sys
+from pathlib import Path as _P
+_sys.path.append(str(_P(__file__).resolve().parents[2] / "tools" / "lane-autodispatch"))
+from pr_guard_fixtures import no_open_prs
 import importlib.util
 import json
 import os
@@ -44,6 +48,7 @@ class FakeLaneHost:
         if "push" in argv: self.pushes.append(list(argv))
         return 0, "", ""
 
+    @no_open_prs
     def gh(self, args, timeout=60):
         if args[:2] == ["pr", "create"]: self.prs.append(dict(zip(args[2::2], args[3::2]))); return 0, "https://x/pull/1", ""
         if args[:2] == ["issue", "view"]:
