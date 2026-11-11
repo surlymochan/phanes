@@ -1,6 +1,7 @@
 """swrm bench is deterministic and matches the checked-in rubric. No OmO required."""
 import json
 import os
+import shutil
 import sys
 import tempfile
 import unittest
@@ -29,6 +30,7 @@ class BenchSwrm(unittest.TestCase):
         old = os.environ.copy()
         try:
             home = tempfile.mkdtemp(prefix="swrm-bench-test-")
+            self.addCleanup(shutil.rmtree, home, ignore_errors=True)
             xs = harness.load_swrm(home)
             policy = xs.jload(os.path.join(harness.ROOT, "policy.json"), {})
             catalogue = harness.load_json(os.path.join(BENCH, "catalogue.json"))
@@ -54,6 +56,7 @@ class BenchSwrm(unittest.TestCase):
         old = os.environ.copy()
         try:
             home = tempfile.mkdtemp(prefix="swrm-bench-test-")
+            self.addCleanup(shutil.rmtree, home, ignore_errors=True)
             xs = harness.load_swrm(home)
             policy = xs.jload(os.path.join(harness.ROOT, "policy.json"), {})
             policy["routing"]["default_order"] = ["codex", "ocgo", "deepseek"]
@@ -79,6 +82,7 @@ class BenchSwrm(unittest.TestCase):
         old = os.environ.copy()
         try:
             home = tempfile.mkdtemp(prefix="swrm-bench-test-")
+            self.addCleanup(shutil.rmtree, home, ignore_errors=True)
             xs = harness.load_swrm(home)
             policy = xs.jload(os.path.join(harness.ROOT, "policy.json"), {})
             catalogue = harness.load_json(os.path.join(BENCH, "catalogue.json"))

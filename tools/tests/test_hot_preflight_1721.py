@@ -45,6 +45,11 @@ from pathlib import Path as _FixturePath
 sys.path.append(str(_FixturePath(__file__).resolve().parents[1] / "lane-autodispatch"))
 from pr_guard_fixtures import no_open_prs
 
+try:
+    from tools.tests._test_tmp import short_tmp_root
+except ImportError:
+    from _test_tmp import short_tmp_root
+
 import ast
 import hashlib
 import importlib.util
@@ -60,7 +65,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 AD_PATH = ROOT / "tools" / "lane-autodispatch" / "autodispatch.py"
 SAMPLE_PATH = ROOT / "tools" / "tests" / "fixtures" / "hotfiles_ad_sample_1721.json"
-SCRATCH = ROOT / ".swrm-tmp"
+SCRATCH = Path(short_tmp_root())
 
 LANE = "GH2"
 OTHER_LANE = "GH3"
