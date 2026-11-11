@@ -557,7 +557,7 @@ class ReassignmentGuardTests(unittest.TestCase):
                     return 0, '{"signalled":["abort"]}', ''
                 return original_sh(cmd, **kwargs)
             def remote(lane, cfg, run=''):
-                return {'lane': 'idle', 'runner_alive': False}
+                return {'lane': 'idle', 'runner_alive': False, 'executor_alive': False}
             with mock.patch.object(ad, 'open_pr_for_issue', side_effect=answers), \
                     mock.patch.object(ad, 'sh', side_effect=sh), mock.patch.object(ad, 'remote', side_effect=remote), \
                     mock.patch.object(ad, 'log', side_effect=lambda msg, brain=True: notes.append(msg)):
@@ -579,7 +579,7 @@ class ReassignmentGuardTests(unittest.TestCase):
         case, fixture = self.fixture(); ad = case.module; n = fixture.ISSUE
         st = {'issue': n, 'run': 'r', 'cancel_pending': True}
         with mock.patch.object(ad, 'sh', return_value=(0, '{"signalled":["abort"]}', '')), \
-                mock.patch.object(ad, 'remote', return_value={'lane': 'idle', 'runner_alive': False}), \
+                mock.patch.object(ad, 'remote', return_value={'lane': 'idle', 'runner_alive': False, 'executor_alive': False}), \
                 mock.patch.object(ad, 'open_pr_for_issue', return_value=99):
             self.assertTrue(ad.cancel_guarded_dispatch(fixture.LANE, case.lanes[fixture.LANE], st))
         case.state[fixture.LANE] = st
@@ -614,6 +614,10 @@ class ReassignmentGuardTests(unittest.TestCase):
             self.connection([dict(good, closingIssuesReferences={'nodes': {}, 'pageInfo': {'hasNextPage': False}})]),
             self.connection([dict(good, closingIssuesReferences={'nodes': []})]),
             self.connection([dict(good, number='5')]),
+            self.connection([{k: v for k, v in good.items() if k != 'state'}]),
+            self.connection([dict(good, state=None)]),
+            self.connection([dict(good, state=1)]),
+            self.connection([dict(good, state='')]),
         ]
         for response in bad:
             with self.subTest(response=response):
@@ -623,10 +627,13 @@ class ReassignmentGuardTests(unittest.TestCase):
     def test_cancel_accepts_the_real_remote_protocol_of_a_finished_or_idle_run(self):
         case, fixture = self.fixture(); ad = case.module; n = fixture.ISSUE
         finished = {'lane': 'idle', 'current_run': None, 'run': {'status': 'done', 'branch': 'b'}}
-        idle_gone = {'lane': 'idle', 'current_run': None, 'run': None}
+        idle_gone = {'lane': 'idle', 'current_run': None, 'run': 'running', 'runner_alive': False, 'executor_alive': False}
+        unreadable = {'lane': 'idle', 'current_run': None, 'run': 'running', 'runner_alive': None, 'executor_alive': None}
+        half = {'lane': 'idle', 'current_run': None, 'run': 'running', 'runner_alive': False}
+        absent = {'lane': 'idle', 'current_run': None, 'run': None}
         still = {'lane': 'busy', 'current_run': 'r', 'run': 'running', 'runner_alive': True}
         unknown = {'error': 'ssh status timeout'}
-        for probe, expected in ((finished, True), (idle_gone, True), (still, False), (unknown, False)):
+        for probe, expected in ((finished, True), (idle_gone, True), (unreadable, False), (half, False), (absent, False), (still, False), (unknown, False)):
             with self.subTest(probe=probe):
                 self.assertEqual(ad.run_stopped(probe, 'r'), expected)
         st = {'issue': n, 'run': 'r', 'cancel_pending': True}

@@ -1425,7 +1425,8 @@ def open_pr_for_issue(n, runner=None, repo=None):
         need(isinstance(nodes, list) and isinstance(page, dict) and isinstance(page.get("hasNextPage"), bool), "page")
         for pr in nodes:
             need(isinstance(pr, dict) and isinstance(pr.get("number"), int), "pull request")
-            if pr.get("state") != "OPEN": continue
+            need(isinstance(pr.get("state"), str) and pr["state"], "PR state")
+            if pr["state"] != "OPEN": continue
             refs = pr.get("closingIssuesReferences")
             need(isinstance(refs, dict) and isinstance(refs.get("nodes"), list)
                  and isinstance(refs.get("pageInfo"), dict) and refs["pageInfo"].get("hasNextPage") is False,
@@ -1471,11 +1472,11 @@ def guarded_requeue(n):
 
 def run_stopped(probe, run):
     """The run is verifiably over in the real REMOTE_STATUS protocol: a result exists, or the lane is idle
-    and no live runner holds the run. An error or an unknown state is not proof."""
+    and the runner and executor are explicitly reported dead. An error, an unknown or a missing liveness field is not proof."""
     if not isinstance(probe, dict) or "error" in probe: return False
     if isinstance(probe.get("run"), dict): return True
     return (probe.get("lane") == "idle" and probe.get("current_run") != run
-            and probe.get("runner_alive") is not True and probe.get("executor_alive") is not True)
+            and probe.get("runner_alive") is False and probe.get("executor_alive") is False)
 
 def cancel_guarded_dispatch(lane, cfg, st):
     """Keep the lane claimed until abort and fresh remote state confirm it stopped."""
