@@ -122,7 +122,8 @@ def diff(base, head, private, findings):
     patch = git('diff', '--no-ext-diff', '--find-renames', '--find-copies', '--find-copies-harder', '--text', '--unified=0', base, head, '--')
     file_no = line_no = 0
     in_hunk = False
-    for line in decode(patch).splitlines():
+    # Git patch records end only at LF; other separators belong to the content.
+    for line in decode(patch).split('\n'):
         if line.startswith('diff --git '):
             file_no += 1
             in_hunk = False
@@ -158,7 +159,7 @@ def commits(base, head, private, findings):
                 if len(fields) != 6:
                     continue
                 oid = fields[0].strip().decode('ascii')
-                for number, line in enumerate(decode(fields[1]).splitlines(), 1):
+                for number, line in enumerate(decode(fields[1]).split('\n'), 1):
                     scan(line, 'commit:' + oid + ':' + str(number), private, findings)
                 for field, value in zip(('author-name', 'author-email', 'committer-name', 'committer-email'), fields[2:]):
                     scan(decode(value), 'commit:' + oid + ':' + field, private, findings,
@@ -228,7 +229,7 @@ def main():
                 with open(args.file, 'rb') as stream:
                     data = stream.read()
             label = hashlib.sha256(args.label.encode()).hexdigest()[:8]
-            for number, line in enumerate(decode(data).splitlines(), 1):
+            for number, line in enumerate(decode(data).split('\n'), 1):
                 scan(line, 'text:' + label + ':' + str(number), private, findings)
         elif args.command == 'diff':
             diff(args.base, args.head, private, findings)

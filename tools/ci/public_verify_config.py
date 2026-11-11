@@ -13,7 +13,7 @@ def main():
     # Blank lines and comments contain no rules. Malformed nonempty rules
     # remain configured so the scanner can reject them rather than skip them.
     configured = any(line.strip() and not line.strip().startswith("#")
-                     for line in content.splitlines())
+                     for line in content.split("\n"))
     with Path(os.environ["GITHUB_OUTPUT"]).open("a", encoding="utf-8") as stream:
         stream.write("configured=" + str(configured).lower() + "\n")
     if not configured:

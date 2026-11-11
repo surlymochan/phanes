@@ -208,6 +208,89 @@ class PublicVerifyScannerTests(unittest.TestCase):
         self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
         self.assertNotIn(PRIVATE_ADDRESS, result.stdout + result.stderr)
 
+    def check_embedded_separator(self, separator):
+        # Keep the regex escaped in the configuration: the separator is data
+        # in the Git blob/message, not a separator between denylist rules.
+        env = {"PUBLIC_VERIFY_DENYLIST": "account\t" + ACCOUNT_TERM +
+               "\naccount\tre:fixture\\s+leak\n"}
+        embedded = "fixture" + separator + "leak"
+        cases = (
+            ("after-prefix", "safe" + separator + ACCOUNT_TERM + " " + PRIVATE_ADDRESS,
+             ACCOUNT_TERM),
+            ("between-matches", ACCOUNT_TERM + separator + PRIVATE_ADDRESS, ACCOUNT_TERM),
+            ("inside-match", embedded + " " + PRIVATE_ADDRESS, embedded),
+        )
+        for name, value, account in cases:
+            with self.subTest(scenario=name):
+                repo = self.make_repo(name)
+                base = self.git(repo, "rev-parse", "HEAD")
+                # Bytes avoid newline translation, including for lone CR.
+                data = value + "\n" + PRIVATE_ADDRESS + "\n"
+                (repo / "keep.txt").write_bytes(data.encode("utf-8"))
+                self.git(repo, "add", ".")
+                self.git(repo, "commit", "--cleanup=verbatim", "-qm", data)
+                results = {
+                    "diff": self.scan("diff", "--base", base, "--head", "HEAD",
+                                      "--format", "json", cwd=repo, env=env),
+                    "tree": self.scan("tree", "--format", "json", cwd=repo, env=env),
+                    "commits": self.scan("commits", "--base", base, "--head", "HEAD",
+                                         "--format", "json", cwd=repo, env=env),
+                    "stdin": self.scan("text", "--label", "fixture", "--format", "json",
+                                       data=data, env=env),
+                    "file": self.scan("text", "--label", "fixture", "--format", "json",
+                                      "--file", str(repo / "keep.txt"), env=env),
+                }
+                expected = sorted((("account", digest(account)),
+                                   ("ip", digest(PRIVATE_ADDRESS)),
+                                   ("ip", digest(PRIVATE_ADDRESS))))
+                for command, result in results.items():
+                    with self.subTest(command=command):
+                        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+                        found = self.findings(result)
+                        self.assertEqual(sorted((item["category"], item["hash"])
+                                                for item in found), expected)
+                        # The embedded separator must not advance the LF line number.
+                        self.assertEqual([item["location"].rsplit(":", 1)[1]
+                                          for item in found].count("1"), 2)
+                        self.assertEqual([item["location"].rsplit(":", 1)[1]
+                                          for item in found].count("2"), 1)
+                        self.assertNotIn(account, result.stdout + result.stderr)
+                        self.assertNotIn(PRIVATE_ADDRESS, result.stdout + result.stderr)
+                self.assertEqual(
+                    [(item["category"], item["hash"]) for item in self.findings(results["diff"])],
+                    [(item["category"], item["hash"]) for item in self.findings(results["tree"])])
+
+    def test_embedded_carriage_return(self):
+        self.check_embedded_separator("\r")
+
+    def test_embedded_vertical_tab(self):
+        self.check_embedded_separator("\x0b")
+
+    def test_embedded_form_feed(self):
+        self.check_embedded_separator("\x0c")
+
+    def test_embedded_next_line(self):
+        self.check_embedded_separator("\x85")
+
+    def test_embedded_line_separator(self):
+        self.check_embedded_separator("\u2028")
+
+    def test_denylist_preserves_embedded_separators(self):
+        for separator in ("\r", "\x0b", "\x0c", "\x85", "\u2028"):
+            with self.subTest(separator=repr(separator)):
+                value = "fixture" + separator + "leak"
+                rules = "account\t" + value + "\n"
+                path = self.root / "rules.txt"
+                path.write_bytes(rules.encode("utf-8"))
+                for options, env in ((("--denylist", str(path)), None),
+                                     ((), {"PUBLIC_VERIFY_DENYLIST": rules})):
+                    result = self.scan("text", "--label", "fixture", "--format", "json",
+                                       *options, data=value, env=env)
+                    self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+                    self.assertEqual([(item["category"], item["hash"])
+                                      for item in self.findings(result)],
+                                     [("account", digest(value))])
+
     def test_commits_scans_author_and_committer_identities(self):
         repo = self.make_repo()
         base = self.git(repo, "rev-parse", "HEAD")
@@ -312,7 +395,10 @@ class PublicVerifyAdditionalTests(unittest.TestCase):
     setUp = PublicVerifyScannerTests.setUp
 
     def test_denylist_configuration_reporting(self):
+        comment_continuations = tuple("# fixture comment" + separator + "fixture continuation"
+                                      for separator in ("\r", "\x0b", "\x0c", "\x85", "\u2028"))
         for value in (None, "", " \t\r\n", "# fixture comment\n  # another\n",
+                      *comment_continuations,
                       "account\tunused-fixture", "unknown\tfixture", "host\tre:["):
             with self.subTest(value=value):
                 output = self.root / "output"
