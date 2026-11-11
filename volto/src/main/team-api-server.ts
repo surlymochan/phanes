@@ -1,3 +1,4 @@
+import { routeNibiruInbound } from "./team-api/route-nibiru-inbound";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { createRequire } from "node:module";
 import { dirname, join } from "node:path";
@@ -836,6 +837,7 @@ export class TeamApiServer {
       // relies on is each module answering "unmatched" for a method it does not serve rather than
       // 404 on its own: the 404 below is the only one in the Team API, which is what keeps a wrong
       // method on a known path answering 404 - never 405 - exactly as the released clients expect.
+      if ((await routeNibiruInbound(context, this.#options, hidden)) === "handled") return;
       if ((await this.#routeTeam(context)) === "handled") return;
       if ((await this.#routeRemoteScreen(context)) === "handled") return;
       if ((await this.#routeDirect(context)) === "handled") return;
@@ -1765,7 +1767,9 @@ export class TeamApiServer {
             )
         : value;
     const sideRoute = teamSideRouteCodec(route.path);
-    const body = sideRoute
+    const body = route.path === "/v1/a2a/nibiru/tasks"
+      ? JSON.stringify(visibleValue)
+      : sideRoute
       ? JSON.stringify(sideRoute.response(route.path, status, visibleValue, options))
       : teamHttpCodec(route.protocol).encodeResponse(route.method, route.path, status, visibleValue, options);
     response.writeHead(status, { "Content-Type": "application/json; charset=utf-8" });

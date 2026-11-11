@@ -18,6 +18,7 @@ test("local transport delivers once across retries and rejects unknown agents wi
     const connect = () => createNibiruInbound({ mailbox, hasAgent: (id) => id === "agent-a" });
     let transport = connect();
     const request = {
+      principalId: "member-1",
       idempotencyKey: "external-1",
       taskId: "task-1",
       recipientAgentId: "agent-a",

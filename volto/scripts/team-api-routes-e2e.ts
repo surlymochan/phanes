@@ -454,6 +454,7 @@ const fakeAgents: TeamApiAgents = {
 const mailbox: TeamApiMailbox = {
   resolveAttachment: (id) =>
     Effect.succeed(id === "att-1" ? { path: attachmentPath, mimeType: "text/plain", name: "report one.txt" } : null),
+  enqueue: () => Effect.die("The attachment routes never enqueue."),
 };
 
 // The holders whose browser control a route gave back, so a session end can be checked.
