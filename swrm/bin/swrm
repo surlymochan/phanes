@@ -7814,8 +7814,14 @@ def bus_worker_run(issue, cfg, args, policy):
             command += ["--verify", effective_verify]
         process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
                                    start_new_session=True)
-        bus_comment(cfg["repo"], issue["number"],
-                    f"<!-- swrm-bus:running claim={own_claim['id']} at={bus_timestamp()} -->")
+        try:
+            bus_comment(cfg["repo"], issue["number"],
+                        f"<!-- swrm-bus:running claim={own_claim['id']} at={bus_timestamp()} -->")
+        except Exception as error:
+            # The receipt is best effort; keep supervising the started executor
+            # even if GitHub or the local event log is temporarily unavailable.
+            with contextlib.suppress(Exception):
+                bus_event(os.path.join(rdir, "events.jsonl"), f"running receipt failed: {error}")
         while process.poll() is None:
             current = gh_transport(f"repos/{cfg['repo']}/issues/{issue['number']}")
             if labels["cancelled"] in issue_label_names(current):

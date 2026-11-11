@@ -737,6 +737,85 @@ print(json.dumps({'type':'message_end','message':message}), flush=True)
         self.assertIn("executor process could not start", result["summary"])
         self.assertEqual(self.bus_status_rows()[0]["bus_state"], "done")
 
+    def test_worker_supervises_executor_when_running_receipt_fails(self):
+        for status, log_fails in (("done", False), ("failed", False), ("done", True)):
+            with self.subTest(status=status, log_fails=log_fails):
+                os.environ["OPENSWARM_FAKE_GH_LOGIN"] = "planner"
+                run_id = f"receipt-error-{status}-{log_fails}"
+                number = self.create_bus_card(run_id)
+                args = argparse.Namespace(name="external-agent", backend="pi", model=None,
+                                          budget_minutes=1, repos="org/target", verify=None)
+                os.environ["OPENSWARM_FAKE_GH_LOGIN"] = "executor"
+                release = self.root / f"{run_id}-release"
+                rdir = Path(xs.RUNS) / run_id
+                report = {**self.report(status), "summary": "actual executor result"}
+                script = """
+import json, pathlib, sys, time
+release, result, report = sys.argv[1:]
+deadline = time.monotonic() + 15
+while not pathlib.Path(release).exists():
+    if time.monotonic() >= deadline:
+        sys.exit(2)
+    time.sleep(0.01)
+pathlib.Path(result).write_text(json.dumps({'result': json.loads(report)}))
+sys.exit(1 if json.loads(report)['status'] == 'failed' else 0)
+"""
+                popen, post_comment, transport = xs.subprocess.Popen, xs.bus_comment, xs.gh_transport
+                children, supervised = [], []
+                receipt_failed = False
+
+                def start_executor(command, *args, **kwargs):
+                    if len(command) > 2 and command[2] == "run":
+                        child = popen([xs.sys.executable, "-c", script, str(release),
+                                       str(rdir / "result.json"), json.dumps(report)], *args, **kwargs)
+                        children.append(child)
+                        child.communicate = mock.Mock(wraps=child.communicate)
+                        return child
+                    return popen(command, *args, **kwargs)
+
+                def fail_receipt(repo, issue_number, body):
+                    nonlocal receipt_failed
+                    if "swrm-bus:running" in body:
+                        self.assertIsNone(children[0].poll())
+                        receipt_failed = True
+                        raise xs.BusError("temporary running receipt error")
+                    if xs.bus_parse_result(body):
+                        self.assertIsNotNone(children[0].poll(), "result must wait for executor exit")
+                    return post_comment(repo, issue_number, body)
+
+                def observe_supervision(endpoint, *args, **kwargs):
+                    if receipt_failed and endpoint == f"repos/org/bus/issues/{number}":
+                        if not release.exists():
+                            self.assertIsNone(children[0].poll())
+                            supervised.append(True)
+                            release.touch()
+                    return transport(endpoint, *args, **kwargs)
+
+                event = xs.bus_event
+                with mock.patch.object(xs, "bus_worker_clone"), \
+                        mock.patch.object(xs.subprocess, "Popen", side_effect=start_executor), \
+                        mock.patch.object(xs, "bus_comment", side_effect=fail_receipt), \
+                        mock.patch.object(xs, "gh_transport", side_effect=observe_supervision), \
+                        mock.patch.object(xs, "bus_event", side_effect=OSError("log unavailable") if log_fails else event):
+                    try:
+                        self.assertTrue(xs.bus_worker_run(self.issue(number), self.cfg, args, self.policy))
+                    finally:
+                        for child in children:
+                            if child.poll() is None:
+                                child.kill()
+                            child.wait(timeout=5)
+                self.assertTrue(receipt_failed)
+                self.assertEqual(supervised, [True])
+                children[0].communicate.assert_called_once_with()
+                self.assertEqual(children[0].returncode, 1 if status == "failed" else 0)
+                results = [xs.bus_parse_result(comment["body"]) for comment in self.issue(number)["comments"]]
+                self.assertEqual([result for result in results if result],
+                                 [{**report, "branch": f"swrm/{run_id}", "commit": None, "pr_url": None}])
+                self.assertIn(f"swrm:{status}", {label["name"] for label in self.issue(number)["labels"]})
+                if not log_fails:
+                    self.assertIn("running receipt failed: temporary running receipt error",
+                                  (rdir / "events.jsonl").read_text())
+
     def test_worker_writes_a_reservation_receipt_before_it_claims(self):
         """#2159: the worker reserves the card before the claim, so the dispatcher can see it."""
         number = self.create_bus_card("reserve-order")
