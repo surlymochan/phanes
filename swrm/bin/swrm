@@ -6972,6 +6972,11 @@ def cmd_review(args, policy):
 
 BUS_STATES = ("queued", "claimed", "done", "failed", "cancelled")
 BUS_EXECUTOR_BACKENDS = ("codex", "ocgo", "deepseek", "cursor", "agy", "pi")
+BUS_RESERVE_MARKER = "swrm-bus:reserve"
+BUS_RESERVE_TTL_SECONDS = 300
+BUS_RESERVE_RE = re.compile(r"<!--\s*" + re.escape(BUS_RESERVE_MARKER)
+                            + r"\s+worker=([A-Za-z0-9_.-]{1,64})\s+at=(\S+?)\s*-->")
+BUS_RUNNING_RE = re.compile(r"<!--\s*swrm-bus:running\s+claim=(\d+)\s+at=(\S+?)\s*-->")
 BUS_REPO_RE = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
 BUS_RUN_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,99}$")
 BUS_SHA_RE = re.compile(r"^[0-9a-fA-F]{40,64}$")
@@ -6982,6 +6987,10 @@ BUS_SECRET_RE = re.compile(
 
 class BusError(RuntimeError):
     pass
+
+
+class BusHeldError(BusError):
+    """A worker holds the bus card, so the withdrawal was refused."""
 
 
 def bus_redact(value):
@@ -7038,6 +7047,72 @@ def gh_pages(endpoint):
         page += 1
 
 
+def bus_timestamp(moment=None):
+    """An ISO-8601 UTC timestamp for the bus protocol markers."""
+    when = dt.datetime.fromtimestamp(moment, dt.timezone.utc) if moment is not None else dt.datetime.now(dt.timezone.utc)
+    return when.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def bus_reservation_comment(worker, moment=None):
+    """The machine-marked receipt a worker leaves before it claims a card."""
+    name = str(worker or "").strip()
+    if not re.fullmatch(r"[A-Za-z0-9_.-]{1,64}", name):
+        name = "unknown"
+    return f"<!-- {BUS_RESERVE_MARKER} worker={name} at={bus_timestamp(moment)} -->"
+
+
+def bus_reservation(comment):
+    """The reservation receipt carried by a comment, if it carries the marker."""
+    body = comment.get("body")
+    if not isinstance(body, str):
+        return None
+    match = BUS_RESERVE_RE.search(body)
+    return {"worker": match.group(1), "at": match.group(2)} if match else None
+
+
+def bus_reservation_stamp(comment):
+    """The reservation time: the marker timestamp wins over the comment time."""
+    receipt = bus_reservation(comment)
+    if receipt and to_epoch(receipt.get("at")) is not None:
+        return receipt["at"]
+    return comment.get("created_at")
+
+
+def bus_trusted_reservations(comments, allowed):
+    """Reservation receipts written by allowlisted workers only."""
+    return [comment for comment in comments
+            if str((comment.get("user") or {}).get("login") or "").casefold() in allowed
+            and bus_reservation(comment)]
+
+
+def bus_latest_reservation(comments, allowed):
+    """The newest trusted receipt, including historical reservations."""
+    receipts = []
+    for comment in bus_trusted_reservations(comments, allowed):
+        moment = to_epoch(bus_reservation_stamp(comment))
+        if moment is None:
+            continue
+        receipts.append((moment, comment))
+    return max(receipts, key=lambda item: item[0])[1] if receipts else None
+
+
+def bus_fresh_reservation(comments, allowed, window_seconds):
+    """The newest reservation receipt that is still inside the freshness window."""
+    receipt = bus_latest_reservation(comments, allowed)
+    if receipt and NOW() - to_epoch(bus_reservation_stamp(receipt)) <= float(window_seconds):
+        return receipt
+    return None
+
+
+def bus_reserve_ttl(value):
+    """The reservation freshness window in seconds."""
+    try:
+        seconds = int(float(value))
+    except (TypeError, ValueError):
+        raise BusError("policy.bus.reserve_ttl_seconds must be a number of seconds")
+    return max(1, min(86400, seconds))
+
+
 def bus_config(policy, repo=None):
     cfg = dict(policy.get("bus") or {})
     if repo:
@@ -7053,6 +7128,7 @@ def bus_config(policy, repo=None):
         raise BusError("policy.bus.allowed_planners must be a list of GitHub logins")
     cfg["allowed_planners"] = [login.strip().casefold() for login in planners]
     cfg["poll_seconds"] = min(30, max(0.01, float(cfg.get("poll_seconds", 15))))
+    cfg["reserve_ttl_seconds"] = bus_reserve_ttl(cfg.get("reserve_ttl_seconds", BUS_RESERVE_TTL_SECONDS))
     prefix = str(cfg.get("labels_prefix") or "swrm").strip().rstrip(":")
     if not re.fullmatch(r"[A-Za-z0-9_.-]+", prefix):
         raise BusError("policy.bus.labels_prefix must be a simple label prefix")
@@ -7102,11 +7178,32 @@ def bus_comment(repo, number, body):
     return gh_transport(f"repos/{repo}/issues/{number}/comments", "POST", {"body": body})
 
 
-def bus_cancel_issue(repo, number, cfg, reason):
+def bus_card_hold(comments, cfg):
+    """What holds a bus card: a fresh reservation receipt or an existing claim."""
+    reservation = bus_fresh_reservation(comments, cfg["allowed_executors"],
+                                        cfg.get("reserve_ttl_seconds", BUS_RESERVE_TTL_SECONDS))
+    if reservation:
+        receipt = bus_reservation(reservation) or {}
+        return (f"a reservation from {receipt.get('worker') or 'an unknown worker'}"
+                f" at {bus_reservation_stamp(reservation)}")
+    claim = bus_winning_claim(comments, cfg["allowed_executors"])
+    if claim:
+        return f"a claim from {bus_claim(claim) or 'an unknown worker'}"
+    return None
+
+
+def bus_cancel_issue(repo, number, cfg, reason, force=False):
+    # A worker that reserved or claimed the card is working on it: read that
+    # state before withdrawing the card, and let --force override it.
+    hold = bus_card_hold(bus_comments(repo, number), cfg)
+    if hold and not force:
+        raise BusHeldError(f"bus card #{number} is held by {hold}; refusing to cancel it,"
+                           " repeat with --force to override")
     states = {state: bus_label(cfg, state) for state in BUS_STATES}
     bus_set_issue_labels(repo, number, cfg, add=[states["cancelled"]],
                          remove=[states[s] for s in ("queued", "claimed", "done", "failed")])
-    bus_comment(repo, number, f"swrm cancelled this run: {bus_redact(reason)}")
+    trace = f" (forced override: {hold})" if hold else (" (forced override)" if force else "")
+    bus_comment(repo, number, f"swrm cancelled this run: {bus_redact(reason)}{trace}")
 
 
 def bus_remote(cwd):
@@ -7451,10 +7548,17 @@ def cmd_bus_run(args, policy, rid, rdir, task, title, budget_min):
     while not final_status:
         if (jload(f"{rdir}/status.json", {}) or {}).get("stop_requested"):
             current = gh_transport(f"repos/{cfg['repo']}/issues/{number}")
-            if states["cancelled"] not in issue_label_names(current):
+            if states["cancelled"] in issue_label_names(current):
+                final_status = "stopped"
+                break
+            try:
                 bus_cancel_issue(cfg["repo"], number, cfg, "planner requested stop")
-            final_status = "stopped"
-            break
+            except BusHeldError as error:
+                # A worker holds the card: keep watching it instead of withdrawing the work.
+                bus_event(event_path, f"stop refused: {error}")
+            else:
+                final_status = "stopped"
+                break
         current = gh_transport(f"repos/{cfg['repo']}/issues/{number}")
         comments = bus_comments(cfg["repo"], number)
         for comment in comments:
@@ -7484,7 +7588,11 @@ def cmd_bus_run(args, policy, rid, rdir, task, title, budget_min):
         if final_status:
             break
         if NOW() >= deadline:
-            bus_cancel_issue(cfg["repo"], number, cfg, "planner budget expired")
+            try:
+                bus_cancel_issue(cfg["repo"], number, cfg, "planner budget expired")
+            except BusHeldError as error:
+                # The local budget can expire without withdrawing a worker's card.
+                bus_event(event_path, f"budget cancellation refused: {error}")
             final_status = "budget_exceeded"
             break
         time.sleep(min(cfg["poll_seconds"], max(0.01, deadline - NOW())))
@@ -7534,6 +7642,26 @@ def cmd_bus_init(args, policy):
     print(json.dumps({"ok": True, "repo": repo, "created_labels": created, "updated_files": updated}, indent=2))
 
 
+def bus_card_state(label_state, reservation, claim, comments):
+    """The progress state of a bus card: queued, reserved, claimed, running or done."""
+    if label_state in ("done", "failed", "cancelled"):
+        return "done"
+    if claim:
+        claimer = str((claim.get("user") or {}).get("login") or "").casefold()
+        own_comments = [comment for comment in comments
+                        if str((comment.get("user") or {}).get("login") or "").casefold() == claimer]
+        if any(bus_parse_result(comment.get("body") or "") for comment in own_comments):
+            return "done"
+        for comment in own_comments:
+            marker = BUS_RUNNING_RE.search(comment.get("body") or "")
+            if marker and marker.group(1) == str(claim.get("id")) and to_epoch(marker.group(2)) is not None:
+                return "running"
+        return "claimed"
+    if reservation:
+        return "reserved"
+    return "queued"
+
+
 def cmd_bus_status(args, policy):
     cfg = bus_config(policy, getattr(args, "repo", None))
     states = {state: bus_label(cfg, state) for state in BUS_STATES}
@@ -7546,13 +7674,21 @@ def cmd_bus_status(args, policy):
             continue
         comments = bus_comments(cfg["repo"], issue["number"])
         claim = bus_winning_claim(comments, cfg["allowed_executors"])
+        reservation = bus_latest_reservation(comments, cfg["allowed_executors"])
+        fresh_reservation = bus_fresh_reservation(comments, cfg["allowed_executors"], cfg["reserve_ttl_seconds"])
         created = to_epoch(issue.get("created_at"))
         state = next((value for value in BUS_STATES if states[value] in names), "open")
         claimed_at = claim.get("created_at") if claim else None
         claimed = to_epoch(claimed_at)
+        reserved_at = bus_reservation_stamp(reservation) if reservation else None
+        reserved = to_epoch(reserved_at)
         rows.append({"number": issue.get("number"), "title": issue.get("title"), "url": issue.get("html_url"),
-                     "state": state, "executor": bus_claim(claim) if claim else None,
+                     "state": state,
+                     "bus_state": bus_card_state(state, fresh_reservation, claim, comments),
+                     "executor": bus_claim(claim) if claim else None,
                      "age_minutes": max(0, int((NOW() - created) / 60)) if created else None,
+                     "reserved_at": reserved_at,
+                     "reserve_latency_seconds": int(reserved - created) if reserved is not None and created is not None else None,
                      "claimed_at": claimed_at,
                      "claim_latency_seconds": int(claimed - created) if claimed is not None and created is not None else None})
     if args.json:
@@ -7562,8 +7698,10 @@ def cmd_bus_status(args, policy):
     else:
         for row in rows:
             age = f"{row['age_minutes']}m" if row["age_minutes"] is not None else "-"
+            reserved_in = f"{row['reserve_latency_seconds']}s" if row["reserve_latency_seconds"] is not None else "-"
             claimed_in = f"{row['claim_latency_seconds']}s" if row["claim_latency_seconds"] is not None else "-"
-            print(f"#{row['number']} {row['state']:<10} executor={row['executor'] or '-':<20} age={age}  {row['title']} claimed_in={claimed_in}")
+            print(f"#{row['number']} {row['bus_state']:<10} executor={row['executor'] or '-':<20} age={age}"
+                  f"  {row['title']} reserved_in={reserved_in} claimed_in={claimed_in}")
 
 
 def bus_issue_task(issue):
@@ -7631,6 +7769,9 @@ def bus_worker_run(issue, cfg, args, policy):
     comments = bus_comments(cfg["repo"], issue["number"])
     if not bus_worker_task_is_trusted(issue, task, comments, cfg["allowed_planners"]):
         return False
+    # Reserve the card before the clone so the dispatcher can see that a worker
+    # picked it up. The receipt never decides the winner: the claim below does.
+    bus_comment(cfg["repo"], issue["number"], bus_reservation_comment(args.name))
     bus_set_issue_labels(cfg["repo"], issue["number"], cfg, add=[labels["claimed"]], remove=[labels["queued"]])
     own_claim = bus_comment(cfg["repo"], issue["number"], f"/claim {args.name}")
     winner = bus_winning_claim(bus_comments(cfg["repo"], issue["number"]), cfg["allowed_executors"])
@@ -7673,6 +7814,14 @@ def bus_worker_run(issue, cfg, args, policy):
             command += ["--verify", effective_verify]
         process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
                                    start_new_session=True)
+        try:
+            bus_comment(cfg["repo"], issue["number"],
+                        f"<!-- swrm-bus:running claim={own_claim['id']} at={bus_timestamp()} -->")
+        except Exception as error:
+            # The receipt is best effort; keep supervising the started executor
+            # even if GitHub or the local event log is temporarily unavailable.
+            with contextlib.suppress(Exception):
+                bus_event(os.path.join(rdir, "events.jsonl"), f"running receipt failed: {error}")
         while process.poll() is None:
             current = gh_transport(f"repos/{cfg['repo']}/issues/{issue['number']}")
             if labels["cancelled"] in issue_label_names(current):
@@ -13380,7 +13529,16 @@ def cmd_stop(args, policy):
         set_status(rdir, stop_requested=NOW())
         if st.get("bus_issue") and st.get("bus_repo"):
             cfg = bus_config(policy)
-            bus_cancel_issue(st["bus_repo"], st["bus_issue"], cfg, "planner requested stop")
+            try:
+                bus_cancel_issue(st["bus_repo"], st["bus_issue"], cfg, "planner requested stop",
+                                 force=bool(getattr(args, "force", False)))
+            except BusHeldError as error:
+                # A worker holds the card: the card stays live and the planner keeps watching it.
+                set_status(rdir, stop_requested=False)
+                print(json.dumps({"id": args.run_id, "signalled": [], "refused": str(error),
+                                  "note": "the bus card is held by a worker; repeat with --force to cancel it anyway"},
+                                 ensure_ascii=False))
+                return
         print(json.dumps({"id": args.run_id, "signalled": ["cancelled"] if st.get("bus_issue") else [],
                           "note": "the GitHub issue was cancelled; the bus runner will finalize shortly"}))
         return
@@ -14963,6 +15121,8 @@ def main():
 
     sp = sub.add_parser("stop", help="terminate a running run")
     sp.add_argument("run_id")
+    sp.add_argument("--force", action="store_true",
+                    help="cancel a bus card even when a worker reserved or claimed it")
 
     sp = sub.add_parser("fleet", help="status and execution across configured hosts")
     fleet_sub = sp.add_subparsers(dest="fleet_cmd", required=True)
