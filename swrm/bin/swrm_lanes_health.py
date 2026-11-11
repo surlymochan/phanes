@@ -117,6 +117,12 @@ def snapshot_report(path, moment=None, threshold_seconds=180) -> dict:
         report["status"] = "unreadable"
         report["error"] = "the snapshot is not a JSON object"
         return report
+    health = data.get("_server_health")
+    report["lanes"] = {
+        name: {key: row.get(key) for key in
+               ("server_alive", "server_last_success", "server_restart_count")}
+        for name, row in health.items() if isinstance(row, dict)
+    } if isinstance(health, dict) else {}
     stamp = data.get("_at")
     report["at"] = stamp if isinstance(stamp, str) else None
     phase = data.get("_phase")
@@ -281,6 +287,10 @@ def render(snapshot: dict, writer: dict, found: list) -> str:
         writer_line = f"pid {writer.get('pid')}, no heartbeat ({writer.get('heartbeat_path')})"
     lines = [f"lanes-status  {snapshot['status']:<9}  {line}  {snapshot.get('path')}",
              f"autodispatch  {writer['status']:<9}  {writer_line}"]
+    for name, row in snapshot.get("lanes", {}).items():
+        lines.append(f"lane {name}  server_alive={row.get('server_alive')} "
+                     f"server_last_success={row.get('server_last_success')} "
+                     f"server_restart_count={row.get('server_restart_count')}")
     for alert in found:
         lines.append(f"WARNING {alert['message']}")
     return "\n".join(lines)
