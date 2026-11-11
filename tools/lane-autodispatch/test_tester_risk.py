@@ -2,6 +2,7 @@
 from pr_guard_fixtures import no_open_prs
 import importlib.util
 import json
+from card_fixtures import fixture_json
 import os
 from pathlib import Path
 import subprocess
@@ -124,9 +125,9 @@ class TesterRiskDispatchTests(unittest.TestCase):
         @no_open_prs
         def fake_sh(cmd, **kwargs):
             if cmd[:3] == ["gh", "issue", "list"]:
-                return 0, json.dumps([row]), ""
+                return 0, fixture_json([row]), ""
             if cmd[:3] == ["gh", "issue", "view"]:
-                return 0, json.dumps(row), ""
+                return 0, fixture_json(row), ""
             if cmd[:3] == ["gh", "issue", "edit"]:
                 return 0, "", ""
             if cmd[:2] == ["gh", "api"]:

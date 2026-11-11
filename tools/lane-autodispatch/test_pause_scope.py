@@ -34,6 +34,7 @@ PAUSE**（整个派发循环）也算进去（拆自 #1366 第 3 项）。
 import importlib.util
 import inspect
 import json
+from card_fixtures import fixture_json
 import os
 import shutil
 import tempfile
@@ -205,7 +206,7 @@ class TickPauseTests(PauseHarness):
 
         def fake_gh(args, timeout=60):
             if args[:2] == ["issue", "list"]:
-                return 0, json.dumps(self.ISSUES), ""
+                return 0, fixture_json(self.ISSUES), ""
             if args[:2] == ["issue", "view"]:
                 number = int(args[2])
                 for row in self.ISSUES:

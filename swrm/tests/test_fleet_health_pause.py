@@ -31,7 +31,7 @@ for:
 * the thresholds of the policy are the thresholds the health check judges with.
 
 Every test is offline: a fake ``ssh`` on ``PATH`` answers the probes and the
-whole control plane lives in a scratch directory inside the worktree.  The
+whole control plane lives in a private temporary directory for each test.  The
 suite stays red until the implementation lands.
 """
 
@@ -45,6 +45,8 @@ import sys
 import tempfile
 import time
 import unittest
+
+from _broker_wait import short_tmp_root
 
 HERE = pathlib.Path(__file__).resolve().parent
 ROOT = HERE.parent                      # swrm/
@@ -94,18 +96,11 @@ elif "df" in lowered:
 """
 
 
-def scratch_root():
-    """The scratch directory of this suite, inside the worktree."""
-    root = REPO_ROOT / ".tmp" / "fleet-health-tests"
-    root.mkdir(parents=True, exist_ok=True)
-    return root
-
-
 class FleetHealthPauseTests(unittest.TestCase):
     """The fleet health probe and the host pause it writes."""
 
     def setUp(self):
-        self.root = pathlib.Path(tempfile.mkdtemp(prefix="health-", dir=str(scratch_root())))
+        self.root = pathlib.Path(tempfile.mkdtemp(prefix="health-", dir=short_tmp_root()))
         self.addCleanup(shutil.rmtree, self.root, ignore_errors=True)
         self.home = self.root / "home"
         self.home.mkdir()

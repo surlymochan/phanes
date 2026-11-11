@@ -61,6 +61,7 @@ from pr_guard_fixtures import no_open_prs
 import importlib.util
 import inspect
 import json
+from card_fixtures import fixture_json
 import os
 import re
 import shutil
@@ -287,12 +288,12 @@ class Fleet:
                      "labels": list(issue["labels"]), "state": issue["state"],
                      "createdAt": issue.get("createdAt")}
                     for number, issue in sorted(self.issues.items()) if issue["state"] == "OPEN"]
-            return 0, json.dumps(rows), ""
+            return 0, fixture_json(rows), ""
         if args[:2] == ["issue", "view"]:
             issue = self.issues.get(int(args[2]))
             if issue is None:
                 return 1, "", "gh: no such issue"
-            return 0, json.dumps({"number": int(args[2]), "state": issue["state"], "body": issue["body"],
+            return 0, fixture_json({"number": int(args[2]), "state": issue["state"], "body": issue["body"],
                                   "labels": [{"name": name} for name in issue["labels"]]}), ""
         if args[:2] == ["issue", "edit"]:
             issue = self.issues.get(int(args[2]))

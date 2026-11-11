@@ -25,6 +25,7 @@ dispatcher and the live pause store are never read or written.
 """
 import importlib.util
 import json
+from card_fixtures import fixture_json
 import os
 import shutil
 import tempfile
@@ -223,7 +224,7 @@ class PauseTickTests(PauseDeadlineHarness):
 
         def fake_gh(args, timeout=60):
             if args[:2] == ["issue", "list"]:
-                return 0, json.dumps(self.ISSUES), ""
+                return 0, fixture_json(self.ISSUES), ""
             if args[:2] == ["issue", "view"]:
                 number = int(args[2])
                 for row in self.ISSUES:

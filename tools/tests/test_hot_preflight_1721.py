@@ -244,6 +244,7 @@ class Scenario:
         # `Scenario.replenish()` on purpose
         self.module.replenish = lambda k, state: []
         self.module.preflight_card = lambda text: None  # these scenarios judge the hot files, not the card lint
+        self.module.card_quality = lambda text: None  # nor the dispatch card quality (#1853)
         self.lanes = {name: {"host": host, "backend": "pi", "repo": "/tmp/fleet",
                               "fleet": "/tmp/swrm-fleet"} for name, host in lanes}
         self.state = {}
