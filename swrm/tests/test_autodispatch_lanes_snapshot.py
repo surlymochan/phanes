@@ -16,6 +16,10 @@ The tests below pin the contract of the writer:
 * the reader and the writer name the same file, on the deployed path and on a configured
   one.
 """
+import sys as _sys
+from pathlib import Path as _P
+_sys.path.insert(0, str(_P(__file__).resolve().parents[2] / "tools" / "lane-autodispatch"))
+from pr_guard_fixtures import no_open_prs
 import importlib.machinery
 import importlib.util
 import json
@@ -348,7 +352,7 @@ class DispatcherFixture:
             mock.patch.object(ad, "dispatch", dispatch),
             mock.patch.object(ad, "replenish", replenish),
             mock.patch.object(ad, "save_state", lambda state: None),
-            mock.patch.object(ad, "gh", lambda *a, **k: (0, "", "")),
+            mock.patch.object(ad, "gh", no_open_prs(lambda *a, **k: (0, "", ""))),
             mock.patch.object(ad, "sh", lambda *a, **k: (0, "0" * 40, "")),
         ]
 
@@ -515,7 +519,7 @@ class SlowStepTests(unittest.TestCase):
                     mock.patch.object(ad, "label_state", lambda *a, **k: ("fresh", {})), \
                     mock.patch.object(ad, "replenish", lambda *a, **k: []), \
                     mock.patch.object(ad, "save_state", lambda *a, **k: None), \
-                    mock.patch.object(ad, "gh", lambda *a, **k: (0, "", "")), \
+                    mock.patch.object(ad, "gh", no_open_prs(lambda *a, **k: (0, "", ""))), \
                     mock.patch.object(ad, "sh", lambda *a, **k: (0, "0" * 40, "")):
                 ad.tick(lanes, {}, 0)
 
