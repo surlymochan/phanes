@@ -399,7 +399,7 @@ interface TeamApiProviders {
   pasteSignIn: boolean;
 }
 
-export type TeamApiMailbox = Pick<MailboxStore, "resolveAttachment">;
+export type TeamApiMailbox = Pick<MailboxStore, "resolveAttachment" | "enqueue">;
 export type TeamApiSidebarLayout = Pick<
   SidebarLayoutStore,
   "getSnapshot" | "mutate" | "removeAgent" | "placeDuplicateAfter" | "withProfileAssignment"

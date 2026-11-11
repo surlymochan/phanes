@@ -17,7 +17,7 @@ export class UnknownA2ARecipientError extends Error {
   }
 }
 
-export function createNibiruInbound(options: { mailbox: MailboxStore; hasAgent: (agentId: string) => boolean }) {
+export function createNibiruInbound(options: { mailbox: Pick<MailboxStore, "enqueue">; hasAgent: (agentId: string) => boolean }) {
   return {
     accept(request: NibiruInboundRequest) {
       return Effect.gen(function* () {
