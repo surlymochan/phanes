@@ -1,0 +1,172 @@
+#!/usr/bin/env python3
+"""Read-only audit of fleet capacity reservations."""
+import argparse
+import json
+import os
+from pathlib import Path
+import sqlite3
+import sys
+import time
+from urllib.parse import quote
+
+TERMINAL = {'finished', 'failed', 'partial', 'dead', 'budget_exceeded', 'done', 'cancelled',
+            'canceled', 'stopped', 'error', 'timeout', 'aborted', 'merged', 'unroutable'}
+KINDS = {'ghost': 'ghost_leases', 'expired_unreclaimed': 'expired_unreclaimed',
+         'double_claim': 'double_claims'}
+
+
+def run_record(root, run_id):
+    """Merge lifecycle records and report gaps without guessing missing fields."""
+    # Run IDs are untrusted database contents, not paths.
+    if not run_id or Path(run_id).name != run_id or run_id in ('.', '..'):
+        return None, {'invalid_run_id'}
+    directory = root / run_id
+    if not directory.is_dir():
+        return None, {'directory_missing'}
+    records, reasons = {}, set()
+    found = False
+    for name in ('status.json', 'result.json', 'run.json'):
+        try:
+            with (directory / name).open(encoding='utf-8') as stream:
+                found = True
+                value = json.load(stream)
+            if isinstance(value, dict):
+                records[name] = value
+            else:
+                reasons.add('invalid_record')
+        except FileNotFoundError:
+            pass  # These files are optional at different lifecycle stages.
+        except (ValueError, UnicodeError):
+            reasons.add('invalid_json')
+        except OSError:
+            found = True
+            reasons.add('unreadable_file')
+    if not found:
+        reasons.add('files_missing')
+    if not records:
+        return None, reasons
+
+    def status(record):
+        return str(record.get('status') or record.get('state') or '').strip().lower()
+
+    # A terminal result wins even before status.json has been finalized. During
+    # execution status.json is authoritative; run.json is a compatibility fallback.
+    result = records.get('result.json', {})
+    order = ('result.json', 'status.json', 'run.json') if status(result) in TERMINAL else (
+        'status.json', 'result.json', 'run.json')
+    ordered = [records[name] for name in order if name in records]
+    run_status = next((status(record) for record in ordered if status(record)), '')
+    card = next((str(record[key]).strip() for record in ordered
+                 for key in ('issue', 'title')
+                 if isinstance(record.get(key), (str, int))
+                 and not isinstance(record[key], bool) and str(record[key]).strip()), None)
+    if card is None:
+        reasons.add('missing_card')
+    if not run_status:
+        reasons.add('missing_status')
+    return {'status': run_status, 'card': card}, reasons
+
+
+def audit(db_path, runs, state_path, grace):
+    now = time.time()
+    uri = 'file:' + quote(str(db_path.resolve()), safe='/') + '?mode=ro'
+    with sqlite3.connect(uri, uri=True) as db:
+        db.row_factory = sqlite3.Row
+        rows = [dict(row) for row in db.execute(
+            'SELECT token, host, run_id, lease_expires FROM reservations ORDER BY token')]
+    try:
+        with state_path.open(encoding='utf-8') as stream:
+            state = json.load(stream)
+        if not isinstance(state, dict) or not isinstance(state.get('alerts'), dict):
+            raise ValueError('invalid audit state')
+    except FileNotFoundError:
+        state = {'alerts': {}}
+    ledger = state['alerts']
+    alerts = []
+    active_keys = set()
+
+    def add(kind, key, members, detail):
+        dedupe = json.dumps([kind, key], ensure_ascii=True, separators=(',', ':'))
+        previous = ledger.get(dedupe)
+        ongoing = isinstance(previous, dict) and previous.get('active', False)
+        first = previous['first_seen'] if ongoing else now
+        ledger[dedupe] = {'kind': kind, 'first_seen': first, 'active': True}
+        active_keys.add(dedupe)
+        alerts.append({'kind': kind, 'host': members[0]['host'],
+                       'run_id': members[0]['run_id'], 'dedupe_key': dedupe,
+                       'first_seen': first, 'status': 'ongoing' if ongoing else 'new',
+                       'detail': detail})
+
+    by_run, by_card = {}, {}
+    missing = 0
+    missing_reasons = {}
+    for row in rows:
+        by_run.setdefault(row['run_id'], []).append(row)
+        record, reasons = run_record(runs, row['run_id'])
+        if reasons:
+            missing += 1
+            for reason in sorted(reasons):
+                missing_reasons[reason] = missing_reasons.get(reason, 0) + 1
+        if record is not None:
+            status = str(record.get('status') or record.get('state') or '').lower()
+            if status in TERMINAL:
+                add('ghost', row['token'], [row], {'status': status})
+            card = record['card']
+            if card and row['lease_expires'] is not None and row['lease_expires'] > now:
+                by_card.setdefault(str(card), []).append(row)
+        if row['lease_expires'] is not None and row['lease_expires'] < now - grace:
+            add('expired_unreclaimed', row['token'], [row],
+                {'lease_expires': row['lease_expires']})
+    for label, groups in (('run', by_run), ('card', by_card)):
+        for key, members in sorted(groups.items()):
+            # Same-run duplicates are already covered by the run grouping.
+            if len(members) < 2 or (label == 'card' and len({r['run_id'] for r in members}) < 2):
+                continue
+            add('double_claim', [label, key], members,
+                {'holders': [{'host': r['host'], 'run_id': r['run_id']} for r in members]})
+    for key, entry in list(ledger.items()):
+        if key not in active_keys:
+            entry['active'] = False
+            if entry['first_seen'] < now - 86400:
+                del ledger[key]
+    metrics = {name: sum(a['kind'] == kind for a in alerts) for kind, name in KINDS.items()}
+    metrics.update({'lease_age_seconds': None,
+                    'lease_age_reason': 'Coordinator does not record acquire queue time.',
+                    'missing_run_records': missing,
+                    'missing_run_record_reasons': missing_reasons})
+    window = {name: sum(entry['kind'] == kind and now - 86400 <= entry['first_seen'] <= now
+                        for entry in ledger.values()) for kind, name in KINDS.items()}
+    with state_path.open('w', encoding='utf-8') as stream:
+        json.dump(state, stream)
+    return {'alerts': alerts, 'metrics': metrics, 'window_24h': window}
+
+
+def main():
+    home = Path(os.environ.get('HOME', '~')).expanduser()
+    capacity = Path(os.environ.get('OPENSWARM_FLEET_CAPACITY_DIR') or home / '.claude/swrm-fleet-capacity')
+    data = Path(os.environ.get('OPENSWARM_HOME') or home / '.claude/swrm')
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--db', type=Path, default=capacity / 'capacity.sqlite')
+    parser.add_argument('--runs', type=Path, default=data / 'runs')
+    parser.add_argument('--state', type=Path)
+    parser.add_argument('--grace-seconds', type=float, default=60)
+    parser.add_argument('--health', action='store_true', help='include health metrics')
+    args = parser.parse_args()
+    if not 0 <= args.grace_seconds < float('inf'):
+        parser.error('grace must be finite and nonnegative')
+    state = args.state or args.db.with_name('fleet-capacity-audit-state.json')
+    if (state.resolve() == args.db.resolve() or
+            (state.exists() and args.db.exists() and os.path.samefile(state, args.db))):
+        parser.error('state must differ from database')
+    if state.resolve().is_relative_to(args.runs.resolve()):
+        parser.error('state must be outside the runs directory')
+    try:
+        print(json.dumps(audit(args.db, args.runs, state, args.grace_seconds)))
+    except (OSError, ValueError, sqlite3.Error, KeyError, TypeError) as exc:
+        print('audit failed: ' + str(exc), file=sys.stderr)
+        return 1
+    return 0
+
+
+if __name__ == '__main__':
+    sys.exit(main())
