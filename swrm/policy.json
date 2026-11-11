@@ -308,7 +308,7 @@
     "repo": null,
     "allowed_executors": [],
     "allowed_planners": [],
-    "poll_seconds": 60,
+    "poll_seconds": 15,
     "labels_prefix": "swrm",
     "open_pr": false
   },

@@ -27,7 +27,7 @@ Configure `policy.local.json` under `$OPENSWARM_HOME`:
     "allowed_planners": ["<planner-github-login>"],
     "worker_repos": ["<target-owner>/<target-repo>"],
     "worker_verify_allow": ["<exact-verify-command>"],
-    "poll_seconds": 60,
+    "poll_seconds": 15,
     "labels_prefix": "swrm",
     "open_pr": false
   }
