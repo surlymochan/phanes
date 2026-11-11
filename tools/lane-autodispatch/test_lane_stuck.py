@@ -472,7 +472,10 @@ class LaneStuckTickTest(unittest.TestCase):
                                     "budget_minutes": 0.002, "read_only": True}
                             clock = [time.time()]
                             child = Transport()
-                            with mock.patch.object(engine, "NOW", side_effect=lambda: clock[0]):
+                            # The fixture is a Pi lane without a broker: the broker probe added
+                            # for #1714 is not under test here and would end every run early.
+                            with mock.patch.object(engine, "NOW", side_effect=lambda: clock[0]), \
+                                 mock.patch.object(engine, "pi_broker_lane_uses_socket", return_value=False):
                                 result = engine.lane_do_run(lane, spec, child, None, {})
                             self.assertEqual(result["status"], "budget_exceeded" if index < 4 else
                                              "done" if index == 4 else "failed")
