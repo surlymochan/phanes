@@ -53,6 +53,11 @@ Run:
     python3 -m unittest tools.tests.test_impl_card_task_book -v
 """
 
+try:
+    from tools.tests._test_tmp import short_tmp_root
+except ImportError:
+    from _test_tmp import short_tmp_root
+
 import importlib.util
 import json
 from pathlib import Path
@@ -83,8 +88,8 @@ REQUIREMENT_TWO_MARKERS = (r"(?:tick|集成|integration)", r"(?:测试|test)")
 
 
 def scratch_dir():
-    """A temporary directory inside the worktree (the repo keeps `.tmp/` ignored)."""
-    base = ROOT / ".tmp"
+    """An owned temporary directory inside the worktree."""
+    base = Path(short_tmp_root())
     base.mkdir(exist_ok=True)
     return tempfile.TemporaryDirectory(dir=str(base))
 

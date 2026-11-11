@@ -421,6 +421,9 @@ class CredentialOptInTest(unittest.TestCase):
     """Reading other tools' auth/account files must be explicit opt-in."""
 
     def setUp(self):
+        environment = mock.patch.dict(os.environ)
+        environment.start()
+        self.addCleanup(environment.stop)
         self.home = tempfile.mkdtemp()
         self.addCleanup(shutil.rmtree, self.home, True)
         claims = base64.urlsafe_b64encode(json.dumps(

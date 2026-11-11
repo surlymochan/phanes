@@ -160,6 +160,10 @@ class LanePrSubmitTests(unittest.TestCase):
     """The submit path: what the AD really sends to GitHub for each sample."""
 
     def setUp(self):
+        environment = mock.patch.dict(os.environ)
+        environment.start()
+        self.addCleanup(environment.stop)
+        os.environ.pop(MODULE.PR_VALIDATION_ENV, None)
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         for name, value in (("D", self.tmp.name), ("sh", MODULE.sh), ("gh", MODULE.gh), ("log", MODULE.log)):
@@ -323,6 +327,10 @@ class LaneRunInfoReadPathTests(unittest.TestCase):
               "workspace": {"repo": "~/work/phanes-fleet"}, "backend": "codex", "model": "gpt"}
 
     def setUp(self):
+        environment = mock.patch.dict(os.environ)
+        environment.start()
+        self.addCleanup(environment.stop)
+        os.environ.pop(MODULE.PR_VALIDATION_ENV, None)
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         for name, value in (("D", self.tmp.name), ("sh", MODULE.sh), ("gh", MODULE.gh), ("log", MODULE.log)):
