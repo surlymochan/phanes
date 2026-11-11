@@ -18,6 +18,19 @@ def _restore_environment():
     os.environ.update(_original_environment)
 
 
+# Record allocations, including TemporaryDirectory (which calls mkdtemp).
+# The PID prevents a forked worker from claiming its parent's fixture roots.
+_owned_fixture_roots = set()
+_mkdtemp = tempfile.mkdtemp
+
+
+def _registered_mkdtemp(*args, **kwargs):
+    directory = _mkdtemp(*args, **kwargs)
+    _owned_fixture_roots.add((os.path.realpath(directory), os.getpid()))
+    return directory
+
+
+tempfile.mkdtemp = _registered_mkdtemp
 atexit.register(_restore_environment)
 _home = tempfile.mkdtemp(prefix="swrm-test-home-")
 atexit.register(shutil.rmtree, _home, ignore_errors=True)
@@ -39,13 +52,21 @@ def load():
     spec = importlib.util.spec_from_loader("swrm", loader)
     mod = importlib.util.module_from_spec(spec)
     loader.exec_module(mod)
-    cleanup = mod.cleanup_executor_tmp
 
     def cleanup_owned_fixture(worktree):
-        target = mod.executor_worktree_root(worktree)
+        target = os.path.realpath(mod.executor_worktree_root(worktree))
         if os.path.realpath(target) == os.path.realpath(_ceiling):
             raise AssertionError("test attempted to clean the real checkout scratch root")
-        return cleanup(worktree)
+        if not any(owner == os.getpid() and
+                   os.path.commonpath((target, root)) == root
+                   for root, owner in _owned_fixture_roots):
+            raise AssertionError("test attempted to clean an unregistered fixture root")
+        # Do not call the production helper: it resolves the worktree again.
+        tmpdir = os.path.join(target, ".swrm-tmp")
+        if os.path.islink(tmpdir):
+            os.unlink(tmpdir)
+        else:
+            shutil.rmtree(tmpdir, ignore_errors=True)
 
     mod.cleanup_executor_tmp = cleanup_owned_fixture
     mod.DEFAULT_KNOWLEDGE_REPO = os.path.join(_home, "agent-knowledge")

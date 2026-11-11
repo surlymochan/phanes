@@ -19,7 +19,10 @@ probe and the control plane tree lives in a scratch directory inside the
 worktree. The suite stays red until the #1666 implementation lands.
 """
 
-from _test_tmp import short_tmp_root
+try:
+    from tools.tests._test_tmp import short_tmp_root
+except ImportError:
+    from _test_tmp import short_tmp_root
 
 import contextlib
 import importlib.util

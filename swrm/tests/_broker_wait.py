@@ -15,12 +15,16 @@ _owned_roots = set()
 def short_tmp_root():
     """Return a new owned root; never hand a caller a shared cleanup target.
 
-    Keep paths short for Unix sockets and inside the checkout. Each invocation
+    Keep paths short for Unix sockets even with a checkout-local TMPDIR. Each invocation
     is private, including repeated calls in the same worker or test.
     """
-    base = Path(__file__).resolve().parents[2] / ".t"
-    base.mkdir(exist_ok=True)
-    root = tempfile.mkdtemp(prefix="", dir=str(base))
+    base = tempfile.gettempdir()
+    # Leave room for fixture subdirectories and the socket filename.
+    checkout = str(Path(__file__).resolve().parents[2])
+    if (len(os.fsencode(os.path.realpath(base))) > 24 or
+            os.path.commonpath((os.path.realpath(base), checkout)) == checkout):
+        base = "/tmp"
+    root = tempfile.mkdtemp(prefix="", dir=base)
     _owned_roots.add((root, os.getpid()))
     atexit.register(_remove_owned_root, root, os.getpid())
     return root

@@ -45,7 +45,10 @@ Run them offline:
 """
 from __future__ import annotations
 
-from _test_tmp import short_tmp_root
+try:
+    from tools.tests._test_tmp import short_tmp_root
+except ImportError:
+    from _test_tmp import short_tmp_root
 
 import importlib.util
 import json

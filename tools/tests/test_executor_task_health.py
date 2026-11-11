@@ -404,7 +404,10 @@ class ProbeTestCase(unittest.TestCase):
     @staticmethod
     def scratch_dir():
         """An owned temporary directory inside the worktree."""
-        from _test_tmp import short_tmp_root
+        try:
+            from tools.tests._test_tmp import short_tmp_root
+        except ImportError:
+            from _test_tmp import short_tmp_root
         base = Path(short_tmp_root())
         base.mkdir(exist_ok=True)
         return base

@@ -1,4 +1,7 @@
-from _test_tmp import short_tmp_root
+try:
+    from tools.tests._test_tmp import short_tmp_root
+except ImportError:
+    from _test_tmp import short_tmp_root
 
 #!/usr/bin/env python3
 """Reproduction of #1732: the card pre-review standard of the casting reform.

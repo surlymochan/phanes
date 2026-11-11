@@ -29,7 +29,10 @@ Run:
     python3 -m unittest tools.tests.test_fix_round_brief -v
 """
 
-from _test_tmp import short_tmp_root
+try:
+    from tools.tests._test_tmp import short_tmp_root
+except ImportError:
+    from _test_tmp import short_tmp_root
 
 import importlib.util
 from pathlib import Path

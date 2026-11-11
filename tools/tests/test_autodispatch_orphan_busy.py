@@ -1,4 +1,9 @@
 """Busy orphan recovery without real network or GitHub operations."""
+try:
+    from tools.tests._test_tmp import short_tmp_root
+except ImportError:
+    from _test_tmp import short_tmp_root
+
 import contextlib
 import fcntl
 import importlib.util
@@ -101,7 +106,7 @@ class BusyOrphanTests(unittest.TestCase):
                     pid=12345, completed=False, fail_write=False, executor_alive=False,
                     executor_pid=DEAD_PID, omit_executor_alive=False, attempt_started=False,
                     pgid=DEAD_PGID, group="empty", holder=False):
-        scratch = ROOT / ".swrm-tmp"
+        scratch = Path(short_tmp_root())
         scratch.mkdir(exist_ok=True)
         with tempfile.TemporaryDirectory(dir=scratch) as tmp:
             home = Path(tmp)
@@ -178,7 +183,7 @@ class BusyOrphanTests(unittest.TestCase):
     def run_remote_status(self, runner_pid, executor_pid, hold_events=False,
                           execution_started=None, attempt_started=None,
                           pgid=DEAD_PGID, group="empty"):
-        scratch = ROOT / ".swrm-tmp"
+        scratch = Path(short_tmp_root())
         scratch.mkdir(exist_ok=True)
         with tempfile.TemporaryDirectory(dir=scratch) as tmp:
             home = Path(tmp)
@@ -323,7 +328,7 @@ class BusyOrphanTests(unittest.TestCase):
     def test_a_setsidded_child_without_a_recorded_process_group_is_unknown(self):
         namespace = {}
         exec(self.ad.REMOTE_STATE_HOME + self.ad.REMOTE_LIVENESS, namespace)
-        scratch = ROOT / ".swrm-tmp"
+        scratch = Path(short_tmp_root())
         scratch.mkdir(exist_ok=True)
         with tempfile.TemporaryDirectory(dir=scratch) as tmp:
             marker = Path(tmp) / "child.pid"

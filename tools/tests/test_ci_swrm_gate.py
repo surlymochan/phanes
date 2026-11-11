@@ -7,7 +7,10 @@ The tests run the real gate script and the real diff command of phanes.yml again
 scratch repository that contains such a rename.
 """
 
-from _test_tmp import short_tmp_root
+try:
+    from tools.tests._test_tmp import short_tmp_root
+except ImportError:
+    from _test_tmp import short_tmp_root
 
 import os
 from pathlib import Path
