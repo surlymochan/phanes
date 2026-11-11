@@ -1400,31 +1400,44 @@ def gh(args, timeout=60):
 
 # Refs #1772: port the old paginated lookup, without its stale map cache.
 def open_pr_for_issue(n, runner=None, repo=None):
-    """Return an OPEN PR number, or None; every failed/incomplete read raises."""
+    """Return an OPEN PR number, or None; every failed, truncated or malformed read raises."""
     runner = runner or gh; repo = repo or REPO
     owner, name = repo.split("/")
     cursor, seen = "", set()
+    def need(condition, what):
+        if not condition: raise RuntimeError(f"open PR lookup incomplete: {what}")
     while True:
         query = ('query{repository(owner:%s,name:%s){pullRequests(states:OPEN,first:100%s){'
-                 'nodes{number state body headRefName closingIssuesReferences(first:100){nodes{number}}}'
+                 'nodes{number state body headRefName closingIssuesReferences(first:100){nodes{number} pageInfo{hasNextPage}}}'
                  'pageInfo{hasNextPage endCursor}}}}' %
                  (json.dumps(owner), json.dumps(name), ',after:' + json.dumps(cursor) if cursor else ''))
         # api does not accept -R; the injected runner follows the normal gh contract.
         rc, out, err = runner(["api", "graphql", "-f", "query=" + query])
         if rc: raise RuntimeError("open PR lookup failed")
         data = json.loads(out)
+        need(isinstance(data, dict), "response")
         if data.get("errors"): raise RuntimeError("open PR GraphQL errors")
-        connection = data["data"]["repository"]["pullRequests"]
-        for pr in connection["nodes"]:
+        repository = (data.get("data") or {}).get("repository") if isinstance(data.get("data"), dict) else None
+        need(isinstance(repository, dict), "repository")
+        connection = repository.get("pullRequests")
+        need(isinstance(connection, dict), "pullRequests")
+        nodes, page = connection.get("nodes"), connection.get("pageInfo")
+        need(isinstance(nodes, list) and isinstance(page, dict) and isinstance(page.get("hasNextPage"), bool), "page")
+        for pr in nodes:
+            need(isinstance(pr, dict) and isinstance(pr.get("number"), int), "pull request")
             if pr.get("state") != "OPEN": continue
-            linked = {row["number"] for row in pr["closingIssuesReferences"]["nodes"]}
+            refs = pr.get("closingIssuesReferences")
+            need(isinstance(refs, dict) and isinstance(refs.get("nodes"), list)
+                 and isinstance(refs.get("pageInfo"), dict) and refs["pageInfo"].get("hasNextPage") is False,
+                 "closing references of PR #%s are missing or truncated" % pr["number"])
+            need(all(isinstance(row, dict) and isinstance(row.get("number"), int) for row in refs["nodes"]), "closing reference")
+            linked = {row["number"] for row in refs["nodes"]}
             linked.update(int(m.group(1)) for m in CLOSING_RE.finditer(pr.get("body") or ""))
             linked.update(int(x) for x in re.findall(r"(?:^|[/\-])issue([1-9]\d*)(?=[-/_]|$)", pr.get("headRefName") or ""))
             if int(n) in linked: return pr["number"]
-        page = connection["pageInfo"]
         if not page["hasNextPage"]: return None
-        cursor = page["endCursor"]
-        if not cursor or cursor in seen: raise RuntimeError("open PR pagination did not advance")
+        cursor = page.get("endCursor")
+        need(isinstance(cursor, str) and cursor and cursor not in seen, "pagination did not advance")
         seen.add(cursor)
 
 def pr_allows_requeue(n):
@@ -1456,11 +1469,19 @@ def guarded_requeue(n):
         log(f"WARNING #{n} requeue unverified ({exc}); retry next tick", brain=True)
         return False
 
+def run_stopped(probe, run):
+    """The run is verifiably over in the real REMOTE_STATUS protocol: a result exists, or the lane is idle
+    and no live runner holds the run. An error or an unknown state is not proof."""
+    if not isinstance(probe, dict) or "error" in probe: return False
+    if isinstance(probe.get("run"), dict): return True
+    return (probe.get("lane") == "idle" and probe.get("current_run") != run
+            and probe.get("runner_alive") is not True and probe.get("executor_alive") is not True)
+
 def cancel_guarded_dispatch(lane, cfg, st):
     """Keep the lane claimed until abort and fresh remote state confirm it stopped."""
     try:
         probe = remote(lane, cfg, st["run"])
-        if probe.get("runner_alive") is False and probe.get("lane") == "idle":
+        if run_stopped(probe, st["run"]):
             if not pr_allows_requeue(st["issue"]): return True
             clear_workflow_label(st["issue"], "in-progress")
             return True
@@ -1468,7 +1489,7 @@ def cancel_guarded_dispatch(lane, cfg, st):
                               f"{cfg.get('fleet', '~/.local/bin/swrm-fleet')} stop {shlex.quote(st['run'])}"))
         if rc or not json.loads(out).get("signalled"): raise RuntimeError("abort not acknowledged")
         probe = remote(lane, cfg, st["run"])
-        if probe.get("runner_alive") is not False or probe.get("lane") != "idle":
+        if not run_stopped(probe, st["run"]):
             raise RuntimeError("run termination unverified")
         if not pr_allows_requeue(st["issue"]): return True
         clear_workflow_label(st["issue"], "in-progress")

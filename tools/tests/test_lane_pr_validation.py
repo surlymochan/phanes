@@ -511,7 +511,7 @@ class ReassignmentGuardTests(unittest.TestCase):
             return 0, json.dumps({'data': {'repository': {'pullRequests': {
                 'nodes': prs, 'pageInfo': {'hasNextPage': more, 'endCursor': 'next'}}}}}), ''
         pr = {'number': 99, 'state': 'OPEN', 'body': 'Closes #7', 'headRefName': '',
-              'closingIssuesReferences': {'nodes': []}}
+              'closingIssuesReferences': {'nodes': [], 'pageInfo': {'hasNextPage': False}}}
         with mock.patch.object(MODULE, 'gh', side_effect=[page([dict(pr, number=i, body='') for i in range(100)], True), page([pr])]) as gh:
             self.assertEqual(MODULE.open_pr_for_issue(7), 99)
             self.assertIn('after:', gh.call_args.args[0][-1])
@@ -586,3 +586,51 @@ class ReassignmentGuardTests(unittest.TestCase):
         with mock.patch.object(ad, 'cancel_guarded_dispatch', return_value=False), mock.patch.object(ad, 'open_pr_for_issue', return_value=99):
             case.tick()
         self.assertTrue(case.state[fixture.LANE]['cancel_pending'])
+
+    def lookup(self, response, issue=7):
+        with mock.patch.object(MODULE, 'gh', return_value=(0, json.dumps(response), '')):
+            return MODULE.open_pr_for_issue(issue)
+
+    def connection(self, nodes, more=False):
+        return {'data': {'repository': {'pullRequests': {'nodes': nodes, 'pageInfo': {'hasNextPage': more, 'endCursor': 'c'}}}}}
+
+    def test_truncated_closing_references_fail_closed(self):
+        pr = {'number': 5, 'state': 'OPEN', 'body': '', 'headRefName': 'x',
+              'closingIssuesReferences': {'nodes': [{'number': 1}], 'pageInfo': {'hasNextPage': True}}}
+        with self.assertRaises(RuntimeError): self.lookup(self.connection([pr]))
+        pr['closingIssuesReferences']['pageInfo'] = {'hasNextPage': False}
+        pr['closingIssuesReferences']['nodes'] = [{'number': 7}]
+        self.assertEqual(self.lookup(self.connection([pr])), 5)
+
+    def test_malformed_pages_fail_closed(self):
+        good = {'number': 5, 'state': 'OPEN', 'body': '', 'headRefName': '',
+                'closingIssuesReferences': {'nodes': [], 'pageInfo': {'hasNextPage': False}}}
+        bad = [
+            {'data': {'repository': {'pullRequests': {'nodes': {}, 'pageInfo': {'hasNextPage': False}}}}},
+            {'data': {'repository': {'pullRequests': {'nodes': [], 'pageInfo': {'hasNextPage': None}}}}},
+            {'data': {'repository': {'pullRequests': {'nodes': [], 'pageInfo': {}}}}},
+            {'data': {'repository': {'pullRequests': None}}},
+            {'data': {'repository': None}}, {'data': None}, [], {},
+            self.connection([dict(good, closingIssuesReferences={'nodes': {}, 'pageInfo': {'hasNextPage': False}})]),
+            self.connection([dict(good, closingIssuesReferences={'nodes': []})]),
+            self.connection([dict(good, number='5')]),
+        ]
+        for response in bad:
+            with self.subTest(response=response):
+                with self.assertRaises(RuntimeError): self.lookup(response)
+        self.assertIsNone(self.lookup(self.connection([good])))
+
+    def test_cancel_accepts_the_real_remote_protocol_of_a_finished_or_idle_run(self):
+        case, fixture = self.fixture(); ad = case.module; n = fixture.ISSUE
+        finished = {'lane': 'idle', 'current_run': None, 'run': {'status': 'done', 'branch': 'b'}}
+        idle_gone = {'lane': 'idle', 'current_run': None, 'run': None}
+        still = {'lane': 'busy', 'current_run': 'r', 'run': 'running', 'runner_alive': True}
+        unknown = {'error': 'ssh status timeout'}
+        for probe, expected in ((finished, True), (idle_gone, True), (still, False), (unknown, False)):
+            with self.subTest(probe=probe):
+                self.assertEqual(ad.run_stopped(probe, 'r'), expected)
+        st = {'issue': n, 'run': 'r', 'cancel_pending': True}
+        with mock.patch.object(ad, 'sh', return_value=(0, '{"signalled":["abort"]}', '')), \
+                mock.patch.object(ad, 'remote', return_value=finished), \
+                mock.patch.object(ad, 'open_pr_for_issue', return_value=99):
+            self.assertTrue(ad.cancel_guarded_dispatch(fixture.LANE, case.lanes[fixture.LANE], st))
