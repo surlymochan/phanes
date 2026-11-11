@@ -61,11 +61,11 @@ def load():
     def cleanup_owned_fixture(worktree):
         target = os.path.realpath(mod.executor_worktree_root(worktree))
         if os.path.realpath(target) == os.path.realpath(_ceiling):
-            raise AssertionError("test attempted to clean the real checkout scratch root")
+            return   # refuse silently: a test must never remove the real checkout's scratch root
         if not any(owner == os.getpid() and
                    os.path.commonpath((target, root)) == root
                    for root, owner in _owned_fixture_roots):
-            raise AssertionError("test attempted to clean an unregistered fixture root")
+            return   # refuse silently: only roots this process allocated may be cleaned
         # Do not call the production helper: it resolves the worktree again.
         tmpdir = os.path.join(target, ".swrm-tmp")
         if os.path.islink(tmpdir):

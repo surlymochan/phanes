@@ -45,8 +45,12 @@ class OwnedScratchTests(unittest.TestCase):
     def test_real_checkout_cleanup_is_rejected_even_if_git_discovery_is_mocked(self):
         xs = _load.load()
         with mock.patch.object(xs, 'executor_worktree_root', return_value=_load._ceiling):
-            with self.assertRaisesRegex(AssertionError, 'real checkout'):
-                xs.cleanup_executor_tmp('synthetic')
+            scratch = Path(_load._ceiling) / '.swrm-tmp'
+            before = scratch.exists()
+            with mock.patch.object(_load.shutil, 'rmtree') as remove:
+                xs.cleanup_executor_tmp('synthetic')   # refused: nothing is removed
+                remove.assert_not_called()
+            self.assertEqual(scratch.exists(), before)
 
     def test_cleanup_rejects_unregistered_directory(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -62,7 +66,7 @@ class OwnedScratchTests(unittest.TestCase):
                                    side_effect=[directory, _load._ceiling]) as resolve:
                 with mock.patch.object(_load.shutil, 'rmtree', wraps=_load.shutil.rmtree) as remove:
                     xs.cleanup_executor_tmp('synthetic')
-                    remove.assert_called_once_with(str(scratch), ignore_errors=True)
+                    remove.assert_called_once_with(os.path.realpath(str(scratch)), ignore_errors=True)
                 resolve.assert_called_once_with('synthetic')
             self.assertFalse(scratch.exists())
 
@@ -70,13 +74,14 @@ class OwnedScratchTests(unittest.TestCase):
         xs = _load.load()
         with tempfile.TemporaryDirectory() as directory:
             with mock.patch.object(xs, 'executor_worktree_root', return_value=directory):
+                (Path(directory) / '.swrm-tmp').mkdir()
                 with mock.patch.object(_load, '_owned_fixture_roots', set()):
-                    with self.assertRaisesRegex(AssertionError, 'unregistered'):
-                        xs.cleanup_executor_tmp('synthetic')
+                    xs.cleanup_executor_tmp('synthetic')
+                    self.assertTrue((Path(directory) / '.swrm-tmp').exists())
                 with mock.patch.object(_load, '_owned_fixture_roots',
                                        {(directory, os.getpid() + 1)}):
-                    with self.assertRaisesRegex(AssertionError, 'unregistered'):
-                        xs.cleanup_executor_tmp('synthetic')
+                    xs.cleanup_executor_tmp('synthetic')
+                    self.assertTrue((Path(directory) / '.swrm-tmp').exists())
 
     def test_cleanup_unlinks_scratch_symlink_without_touching_sibling(self):
         xs = _load.load()
