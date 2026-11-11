@@ -16,19 +16,55 @@ KINDS = {'ghost': 'ghost_leases', 'expired_unreclaimed': 'expired_unreclaimed',
 
 
 def run_record(root, run_id):
+    """Merge lifecycle records and report gaps without guessing missing fields."""
     # Run IDs are untrusted database contents, not paths.
     if not run_id or Path(run_id).name != run_id or run_id in ('.', '..'):
-        return None
-    # Completed results take precedence over a stale active status record.
-    for name in ('result.json', 'run.json', 'status.json'):
+        return None, {'invalid_run_id'}
+    directory = root / run_id
+    if not directory.is_dir():
+        return None, {'directory_missing'}
+    records, reasons = {}, set()
+    found = False
+    for name in ('status.json', 'result.json', 'run.json'):
         try:
-            with (root / run_id / name).open(encoding='utf-8') as stream:
+            with (directory / name).open(encoding='utf-8') as stream:
+                found = True
                 value = json.load(stream)
             if isinstance(value, dict):
-                return value
-        except (OSError, ValueError):
-            pass
-    return None
+                records[name] = value
+            else:
+                reasons.add('invalid_record')
+        except FileNotFoundError:
+            pass  # These files are optional at different lifecycle stages.
+        except (ValueError, UnicodeError):
+            reasons.add('invalid_json')
+        except OSError:
+            found = True
+            reasons.add('unreadable_file')
+    if not found:
+        reasons.add('files_missing')
+    if not records:
+        return None, reasons
+
+    def status(record):
+        return str(record.get('status') or record.get('state') or '').strip().lower()
+
+    # A terminal result wins even before status.json has been finalized. During
+    # execution status.json is authoritative; run.json is a compatibility fallback.
+    result = records.get('result.json', {})
+    order = ('result.json', 'status.json', 'run.json') if status(result) in TERMINAL else (
+        'status.json', 'result.json', 'run.json')
+    ordered = [records[name] for name in order if name in records]
+    run_status = next((status(record) for record in ordered if status(record)), '')
+    card = next((str(record[key]).strip() for record in ordered
+                 for key in ('issue', 'title')
+                 if isinstance(record.get(key), (str, int))
+                 and not isinstance(record[key], bool) and str(record[key]).strip()), None)
+    if card is None:
+        reasons.add('missing_card')
+    if not run_status:
+        reasons.add('missing_status')
+    return {'status': run_status, 'card': card}, reasons
 
 
 def audit(db_path, runs, state_path, grace):
@@ -63,16 +99,19 @@ def audit(db_path, runs, state_path, grace):
 
     by_run, by_card = {}, {}
     missing = 0
+    missing_reasons = {}
     for row in rows:
         by_run.setdefault(row['run_id'], []).append(row)
-        record = run_record(runs, row['run_id'])
-        if record is None:
+        record, reasons = run_record(runs, row['run_id'])
+        if reasons:
             missing += 1
-        else:
+            for reason in sorted(reasons):
+                missing_reasons[reason] = missing_reasons.get(reason, 0) + 1
+        if record is not None:
             status = str(record.get('status') or record.get('state') or '').lower()
             if status in TERMINAL:
                 add('ghost', row['token'], [row], {'status': status})
-            card = record.get('issue') or record.get('title')
+            card = record['card']
             if card and row['lease_expires'] is not None and row['lease_expires'] > now:
                 by_card.setdefault(str(card), []).append(row)
         if row['lease_expires'] is not None and row['lease_expires'] < now - grace:
@@ -93,7 +132,8 @@ def audit(db_path, runs, state_path, grace):
     metrics = {name: sum(a['kind'] == kind for a in alerts) for kind, name in KINDS.items()}
     metrics.update({'lease_age_seconds': None,
                     'lease_age_reason': 'Coordinator does not record acquire queue time.',
-                    'missing_run_records': missing})
+                    'missing_run_records': missing,
+                    'missing_run_record_reasons': missing_reasons})
     window = {name: sum(entry['kind'] == kind and now - 86400 <= entry['first_seen'] <= now
                         for entry in ledger.values()) for kind, name in KINDS.items()}
     with state_path.open('w', encoding='utf-8') as stream:

@@ -537,6 +537,118 @@ class FleetCapacityAuditTests(unittest.TestCase):
                         'the audit must count the run records it could not read: %s'
                         % json.dumps(report)[:400])
 
+    def assert_incomplete_run(self, reasons, kinds=()):
+        before_db = digest(self.db)
+        before_runs = self.files(self.runs)
+        report, process = self.audit(db=self.db, runs=self.runs,
+                                     state=self.state_path, health=True)
+        self.assertEqual(process.returncode, 0, report)
+        self.assertEqual(self.kinds(report), list(kinds))
+        metrics = self.live_metrics(report)
+        self.assertEqual(metrics['missing_run_records'], 1)
+        self.assertEqual(metrics['missing_run_record_reasons'], reasons)
+        self.assertEqual(digest(self.db), before_db)
+        self.assertEqual(self.files(self.runs), before_runs)
+
+    def test_a_missing_run_directory_has_a_health_reason(self):
+        self.add_reservation('1' * 32, 'worker', 'run-missing')
+        self.assert_incomplete_run({'directory_missing': 1})
+
+    def test_an_invalid_run_id_is_counted_without_reading_outside_runs(self):
+        self.add_reservation('1' * 32, 'worker', '../outside')
+        self.assert_incomplete_run({'invalid_run_id': 1})
+
+    def test_an_empty_run_directory_has_a_health_reason(self):
+        self.add_reservation('1' * 32, 'worker', 'run-empty')
+        (self.runs / 'run-empty').mkdir()
+        self.assert_incomplete_run({'files_missing': 1})
+
+    def test_corrupt_run_json_has_a_health_reason(self):
+        self.add_reservation('1' * 32, 'worker', 'run-corrupt')
+        directory = self.runs / 'run-corrupt'
+        directory.mkdir()
+        (directory / 'result.json').write_text('{broken', encoding='utf-8')
+        self.assert_incomplete_run({'invalid_json': 1})
+
+    def test_non_object_run_json_has_a_health_reason(self):
+        self.add_reservation('1' * 32, 'worker', 'run-invalid')
+        directory = self.runs / 'run-invalid'
+        directory.mkdir()
+        (directory / 'result.json').write_text('[]', encoding='utf-8')
+        self.assert_incomplete_run({'invalid_record': 1})
+
+    def test_an_unreadable_record_has_a_health_reason(self):
+        # A directory in place of a file fails to open even when tests run as root.
+        self.add_reservation('1' * 32, 'worker', 'run-unreadable')
+        (self.runs / 'run-unreadable' / 'status.json').mkdir(parents=True)
+        self.assert_incomplete_run({'unreadable_file': 1})
+
+    def test_a_readable_record_without_a_card_is_counted(self):
+        self.add_reservation('1' * 32, 'worker', 'run-no-card')
+        directory = self.runs / 'run-no-card'
+        directory.mkdir()
+        (directory / 'result.json').write_text('{"status":"running"}', encoding='utf-8')
+        self.assert_incomplete_run({'missing_card': 1})
+
+    def test_blank_card_fields_are_counted(self):
+        self.add_reservation('1' * 32, 'worker', 'run-blank')
+        self.add_run('run-blank', title='   ')
+        self.assert_incomplete_run({'missing_card': 1})
+
+    def test_a_record_without_a_status_is_counted(self):
+        self.add_reservation('1' * 32, 'worker', 'run-no-status')
+        directory = self.runs / 'run-no-status'
+        directory.mkdir()
+        (directory / 'status.json').write_text('{"title":"the card"}', encoding='utf-8')
+        self.assert_incomplete_run({'missing_status': 1})
+
+    def test_multiple_gaps_count_a_reservation_once_with_all_reasons(self):
+        self.add_reservation('1' * 32, 'worker', 'run-empty-record')
+        directory = self.runs / 'run-empty-record'
+        directory.mkdir()
+        (directory / 'status.json').write_text('{}', encoding='utf-8')
+        self.assert_incomplete_run({'missing_card': 1, 'missing_status': 1})
+
+    def test_missing_card_does_not_hide_a_ghost(self):
+        self.add_reservation('1' * 32, 'worker', 'run-no-card')
+        self.add_run('run-no-card', status='partial')
+        self.assert_incomplete_run({'missing_card': 1}, kinds=['ghost'])
+
+    def test_a_terminal_result_borrows_the_active_records_card(self):
+        self.add_reservation('1' * 32, 'worker', 'run-merged')
+        self.add_run('run-merged', status='partial')
+        self.add_run('run-merged', title='the card', name='status.json')
+        report, _ = self.audit(db=self.db, runs=self.runs, state=self.state_path, health=True)
+        self.assertEqual(self.kinds(report), ['ghost'])
+        self.assertEqual(self.live_metrics(report)['missing_run_records'], 0)
+        self.assertEqual(self.live_metrics(report)['missing_run_record_reasons'], {})
+
+    def test_active_status_takes_precedence_over_nonterminal_fallbacks(self):
+        for token, run_id in (('1' * 32, 'run-first'), ('2' * 32, 'run-second')):
+            self.add_reservation(token, 'worker', run_id)
+            self.add_run(run_id, title='active card', name='status.json')
+            self.add_run(run_id, title=run_id, name='result.json')
+            self.add_run(run_id, title=run_id, name='run.json')
+        report, _ = self.audit(db=self.db, runs=self.runs, state=self.state_path)
+        self.assertEqual(self.kinds(report), ['double_claim'])
+        self.assertEqual(self.live_metrics(report)['missing_run_records'], 0)
+
+    def test_blank_fields_use_valid_fallback_card_and_status(self):
+        for token, run_id in (('1' * 32, 'run-first'), ('2' * 32, 'run-second')):
+            self.add_reservation(token, 'worker', run_id)
+            self.add_run(run_id, title='   ', status='', name='status.json')
+            self.add_run(run_id, title='fallback card', name='run.json')
+        report, _ = self.audit(db=self.db, runs=self.runs, state=self.state_path, health=True)
+        self.assertEqual(self.kinds(report), ['double_claim'])
+        self.assertEqual(self.live_metrics(report)['missing_run_records'], 0)
+
+    def test_a_corrupt_result_preserves_status_detection_and_reports_the_gap(self):
+        for token, run_id in (('1' * 32, 'run-first'), ('2' * 32, 'run-second')):
+            self.add_reservation(token, 'worker', run_id)
+            self.add_run(run_id, title='active card', name='status.json')
+        (self.runs / 'run-first' / 'result.json').write_text('{broken', encoding='utf-8')
+        self.assert_incomplete_run({'invalid_json': 1}, kinds=['double_claim'])
+
     def test_the_state_file_of_the_audit_belongs_next_to_the_database(self):
         # The state file of the audit is configurable, but its default is next
         # to the coordinator database it reads (Refs #2157).
