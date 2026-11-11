@@ -2,7 +2,7 @@
 
 ## e1885 decision
 
-Replace each placeholder with evidence from the completed experiment. This record
+Replace each angle-bracket field with evidence from the completed experiment. This record
 is a proposal decision; ARCHITECTURE.md remains the architecture specification.
 
 Frozen manifest digest: <sha256 digest>

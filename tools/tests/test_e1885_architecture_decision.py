@@ -10,7 +10,7 @@ Frozen manifest digest: sha256:''' + 'a' * 64 + '''
 Report digest: sha256:''' + 'b' * 64 + '''
 Paired sample count: 12
 Discordant results: 3 old only, 4 new only
-Extra runs: 24
+Extra runs: 24 reruns of flaky pairs
 Queue impact: 5 minutes longer
 Quota impact: 24 additional runs
 INFRA counted as PASS: no
@@ -60,6 +60,42 @@ class DecisionTests(unittest.TestCase):
     def test_shipped_template_fails(self):
         path = Path(__file__).resolve().parents[2] / 'handoff' / 'ARCHITECTURE-PROPOSAL.md'
         self.assertTrue(validate(path.read_text(encoding='utf-8')))
+
+    def test_empty_filler_is_not_evidence(self):
+        for field in ('Discordant results', 'Extra runs', 'Queue impact', 'Quota impact', 'Rationale'):
+            for filler in ('N/A', 'none', 'TBD', '-', 'unknown', 'to be determined', 'same'):
+                line = [l for l in VALID.splitlines() if l.startswith(field + ':')][0]
+                errors = validate(VALID.replace(line, field + ': ' + filler))
+                self.assertTrue(errors, (field, filler))
+
+    def test_numbers_required_for_counts(self):
+        self.assertTrue(validate(VALID.replace('3 old only, 4 new only', 'several differences were seen')))
+        self.assertTrue(validate(VALID.replace('Extra runs: 24 reruns of flaky pairs', 'Extra runs: a few more were needed')))
+
+    def test_infra_pass_in_natural_language(self):
+        for sentence in ('INFRA results were counted as PASS.', 'infra -> pass', 'PASS (INFRA)',
+                         'INFRA   is   PASS', 'Infra outcomes count as pass;', 'INFRA=PASS'):
+            self.assertTrue(validate(VALID + '\n' + sentence + '\n'), sentence)
+
+    def test_negated_infra_statements_are_allowed(self):
+        for sentence in ('INFRA results were not counted as PASS.', 'INFRA is never counted as PASS.',
+                         'All non-INFRA runs PASS.'):
+            self.assertEqual(validate(VALID + '\n' + sentence + '\n'), [], sentence)
+
+    def test_filled_shipped_template_passes(self):
+        path = Path(__file__).resolve().parents[2] / 'handoff' / 'ARCHITECTURE-PROPOSAL.md'
+        text = path.read_text(encoding='utf-8')
+        filled = {
+            'Frozen manifest digest': 'sha256:' + 'a' * 64, 'Report digest': 'sha256:' + 'b' * 64,
+            'Paired sample count': '12', 'Discordant results': '3 old only, 4 new only',
+            'Extra runs': '24 reruns of flaky pairs', 'Queue impact': '5 minutes longer',
+            'Quota impact': '24 additional runs', 'INFRA counted as PASS': 'no',
+            'Decision': 'adopt', 'Rationale': 'The paired results support adoption.'}
+        lines = []
+        for line in text.splitlines():
+            field = line.split(':', 1)[0]
+            lines.append(field + ': ' + filled[field] if field in filled else line)
+        self.assertEqual(validate('\n'.join(lines) + '\n'), [])
 
 
 if __name__ == '__main__':

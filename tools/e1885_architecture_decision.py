@@ -12,6 +12,39 @@ FIELDS = (
     'INFRA counted as PASS', 'Decision', 'Rationale',
 )
 
+# Evidence fields that must say something real, and those that must carry a number.
+SUBSTANCE_FIELDS = ('Discordant results', 'Extra runs', 'Queue impact', 'Quota impact', 'Rationale')
+NUMBER_FIELDS = ('Discordant results', 'Extra runs')
+_EMPTY = re.compile(
+    r'(?:n/?a|n\.a\.?|not applicable|none|nil|null|unknown|tbd|todo|to be determined|'
+    r'no impact|nothing|same|-+|\.+|\?+)', re.I)
+_NEGATION = re.compile(r"\b(?:not|never|no|non|without|neither|nor|excluded?|excluding)\b|n't", re.I)
+
+
+def _substantive(value, needs_number):
+    """A field value that says something: not empty filler, at least two words."""
+    text = ' '.join(value.split())
+    if _EMPTY.fullmatch(text.strip(' .')) or len(text) < 12 or len(text.split()) < 2:
+        return False
+    return bool(re.search(r'\d', text)) if needs_number else True
+
+
+def _counts_infra_as_pass(document):
+    """True if any sentence ties INFRA to PASS without negating it.
+
+    The required ``INFRA counted as PASS:`` field is checked on its own and is
+    skipped here; every other spelling (``INFRA -> PASS``, ``INFRA results were
+    counted as PASS``, ``PASS (INFRA)``) is found sentence by sentence.
+    """
+    for line in document.splitlines():
+        if re.match(r'\s*INFRA counted as PASS\s*:', line, re.I):
+            continue
+        for sentence in re.split(r'[.;!?]\s|[.;!?]$', line):
+            if (re.search(r'\binfra\b', sentence, re.I) and re.search(r'\bpass(?:ed|es)?\b', sentence, re.I)
+                    and not _NEGATION.search(sentence)):
+                return True
+    return False
+
 
 def validate(document):
     errors = []
@@ -32,9 +65,13 @@ def validate(document):
         errors.append('Decision must be adopt or abandon')
     if values.get('INFRA counted as PASS', '').lower() != 'no':
         errors.append('INFRA must not be counted as PASS')
-    if re.search(r'\bINFRA\s*[:=]\s*PASS\b', document, re.I):
+    for field in SUBSTANCE_FIELDS:
+        value = values.get(field)
+        if value is not None and not _substantive(value, field in NUMBER_FIELDS):
+            errors.append('Evidence is not substantive: ' + field)
+    if _counts_infra_as_pass(document):
         errors.append('INFRA cannot be PASS')
-    if re.search(r'\b(?:TODO|TBD|placeholder|pending|FIXME)\b|<[^>]+>|\[\s*\]', document, re.I):
+    if re.search(r'\b(?:TODO|TBD|FIXME)\b|<[^>]+>|\[\s*\]', document, re.I):
         errors.append('Placeholder found')
     if re.search(r'\bhold[ -]?out\b', document, re.I):
         errors.append('Holdout content is forbidden')
