@@ -8,9 +8,14 @@ FIXTURE_STATE = os.path.join(HERE, "fixtures", "state.json")
 # Unversioned fixtures below this checkout must not discover its .git and
 # consequently clean the real executor scratch directory.
 _original_environment = dict(os.environ)
-_ceiling = os.path.dirname(ROOT)
+_ceiling = os.path.dirname(ROOT)   # the real checkout root (identity checks below)
+# The git ceiling must be the temp root, not the checkout: a ceiling stops git from
+# ascending *into* the listed directory, so a checkout ceiling would also hide the
+# checkout from tests that legitimately run git inside it.  Fixtures live below the
+# temp root and can therefore never climb into a checkout that contains it.
+_temp_ceiling = os.path.realpath(tempfile.gettempdir())
 os.environ["GIT_CEILING_DIRECTORIES"] = os.pathsep.join(
-    filter(None, (os.environ.get("GIT_CEILING_DIRECTORIES"), _ceiling)))
+    filter(None, (os.environ.get("GIT_CEILING_DIRECTORIES"), _temp_ceiling)))
 
 
 def _restore_environment():
