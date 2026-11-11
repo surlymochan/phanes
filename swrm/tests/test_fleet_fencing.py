@@ -73,7 +73,7 @@ def losing_executor(_decision, _state, _prompt, wd, rdir, _timeout, _event_file)
 
 class FleetFencingTests(unittest.TestCase):
     def setUp(self):
-        self.tmp = tempfile.TemporaryDirectory(prefix="swrm-fencing-")
+        self.tmp = tempfile.TemporaryDirectory(prefix="swrm-fencing-", dir=HERE)
         self.addCleanup(self.tmp.cleanup)
         self.root = pathlib.Path(self.tmp.name)
         for name, value in (("DATA", str(self.root / "data")),
@@ -99,6 +99,10 @@ class FleetFencingTests(unittest.TestCase):
         prefix = os.path.realpath(str(self.root))
         for key in [key for key in xs._FLEET_RESERVATIONS
                     if os.path.realpath(key).startswith(prefix)]:
+            renewal = xs._FLEET_RENEWALS.pop(key, None)
+            if renewal:
+                renewal[0].set()
+                renewal[1].join(2)
             xs._FLEET_RESERVATIONS.pop(key, None)
 
     def coordinator(self, **payload):
@@ -218,6 +222,189 @@ class FleetFencingTests(unittest.TestCase):
                 db.execute("UPDATE reservations SET lease_expires=0 WHERE token=?", (saved["token"],))
 
         self.assert_fenced_writeback(*self.dispatch(verify_hook=expire), reason="expired")
+
+    def test_recovery_and_reissue_during_verify_rejects_old_holder(self):
+        boot = self.root / "boot"
+        boot.write_text("11111111-1111-1111-1111-111111111111")
+        self.capacity.mkdir()
+        (self.capacity / "boot-probes.json").write_text(json.dumps({
+            "broker": [sys.executable, "-c",
+                       "import pathlib,sys; print(pathlib.Path(sys.argv[1]).read_text())", str(boot)]}))
+
+        def recover(run_dir):
+            saved = self.reservation_of(run_dir)
+            renewal = xs._FLEET_RENEWALS.pop(os.path.realpath(run_dir))
+            renewal[0].set()
+            renewal[1].join(2)
+            with sqlite3.connect(self.capacity / "capacity.sqlite") as db:
+                db.execute("UPDATE reservations SET lease_expires=0 WHERE token=?", (saved["token"],))
+            boot.write_text("22222222-2222-2222-2222-222222222222")
+            reply = self.coordinator(op="recover", host="broker", run_id=saved["run_id"], token=saved["token"])
+            self.assertEqual(reply.get("recovered"), 1, reply)
+            reply = self.coordinator(op="acquire", run_id=saved["run_id"], token="b" * 32, backend="agy")
+            self.assertTrue(reply.get("admitted"), reply)
+            self.assertGreater(reply["fence"], saved["fence"])
+            self.assertTrue(self.coordinator(op="validate", run_id=saved["run_id"], token="b" * 32,
+                                             fence=reply["fence"])["ok"])
+
+        self.assert_fenced_writeback(*self.dispatch(verify_hook=recover), reason="token_mismatch")
+
+    def test_invalid_acquire_fences_never_start_the_executor(self):
+        for value in (None, "7", 7.0, True, False, 0, -1):
+            with self.subTest(fence=value):
+                reply = {"ok": True, "admitted": True}
+                if value is not None:
+                    reply["fence"] = value
+                executor = mock.Mock(side_effect=plain_executor)
+                with mock.patch.object(xs, "fleet_guard_answer", return_value=(0, reply)), \
+                        mock.patch.object(xs, "renew_fleet_slot") as renew:
+                    run_dir, result, status = self.dispatch(executor=executor)
+                executor.assert_not_called()
+                renew.assert_not_called()
+                self.assert_fenced_writeback(run_dir, result, status, reason="invalid_fence")
+                self.assertTrue((run_dir / "fleet-release-pending.json").exists())
+
+    def test_guarded_reservation_without_valid_fence_fails_closed(self):
+        run_dir = self.root / "legacy"
+        run_dir.mkdir()
+        for value in (None, "7", 7.0, True, 0, -1):
+            with self.subTest(fence=value):
+                payload = {"run_id": "legacy", "token": "a" * 32}
+                if value is not None:
+                    payload["fence"] = value
+                verdict = xs.fleet_fence_verdict(str(run_dir), (["guard"], payload))
+                self.assertEqual(verdict, {"ok": False, "reason": "invalid_fence"})
+
+    def test_guarded_run_cannot_skip_validation_when_record_is_missing(self):
+        run_dir = self.root / "missing"
+        run_dir.mkdir()
+        with mock.patch.object(xs, "fleet_guard_command", return_value=["guard"]):
+            self.assertEqual(xs.fleet_fence_verdict(str(run_dir)), {"ok": False, "reason": "missing"})
+        xs.set_status(str(run_dir), fleet_guarded=True)
+        with mock.patch.object(xs, "fleet_guard_command", return_value=None):
+            self.assertEqual(xs.fleet_fence_verdict(str(run_dir)), {"ok": False, "reason": "missing"})
+
+    def test_unknown_validate_responses_are_fenced_at_publication(self):
+        invalid = [None, [], True, {}, {"ok": True}, {"ok": "true", "valid": True, "fence": 1},
+                   {"ok": True, "valid": "true", "fence": 1},
+                   {"ok": True, "valid": True, "fence": True},
+                   {"ok": True, "valid": True, "fence": 999}]
+        for reply in invalid:
+            with self.subTest(reply=reply):
+                answer = xs.fleet_guard_answer
+
+                def malformed(command, payload):
+                    if payload["op"] == "validate":
+                        return 0, reply
+                    return answer(command, payload)
+
+                with mock.patch.object(xs, "fleet_guard_answer", side_effect=malformed):
+                    run_dir, result, status = self.dispatch()
+                self.assert_fenced_writeback(run_dir, result, status, reason="invalid_response")
+                saved = self.reservation_of(run_dir)
+                self.coordinator(op="release", run_id=saved["run_id"], token=saved["token"])
+
+    def test_nonzero_validate_exit_cannot_authorize_writeback(self):
+        run_dir = self.root / "nonzero"
+        run_dir.mkdir()
+        with mock.patch.object(xs, "fleet_guard_answer", return_value=(1, {"ok": True, "valid": True, "fence": 7})):
+            verdict = xs.fleet_fence_verdict(str(run_dir), (["guard"], {
+                "run_id": "nonzero", "token": "a" * 32, "fence": 7}))
+        self.assertFalse(verdict["ok"])
+
+    def test_unavailable_validate_is_fenced_with_a_trace(self):
+        answer = xs.fleet_guard_answer
+
+        def unavailable(command, payload):
+            if payload["op"] == "validate":
+                raise RuntimeError("coordinator unavailable")
+            return answer(command, payload)
+
+        with mock.patch.object(xs, "fleet_guard_answer", side_effect=unavailable):
+            outcome = self.dispatch()
+        self.assert_fenced_writeback(*outcome, reason="coordinator_unavailable")
+
+    def test_unknown_renew_responses_are_not_accepted_as_renewal(self):
+        for reply in (None, [], {}, {"ok": "true"}, {"ok": True},
+                      {"ok": True, "lease_expires": True},
+                      {"ok": True, "lease_expires": "later"},
+                      {"ok": True, "lease_expires": float("nan")},
+                      {"ok": True, "lease_expires": 0}):
+            with self.subTest(reply=reply), \
+                    mock.patch.object(xs, "fleet_guard_answer", return_value=(0, reply)), \
+                    contextlib.redirect_stderr(io.StringIO()):
+                with self.assertRaises(RuntimeError):
+                    xs.fleet_guard_call(["guard"], {"op": "renew"})
+
+    def dispatch_lane(self, verify_hook=None, fleet=True):
+        rid = "lane-fence"
+        run_dir = pathlib.Path(xs.RUNS) / rid
+        run_dir.mkdir(parents=True)
+        lane = {"name": "test", "backend": "agy", "model": "fake"}
+        spec = {"run_id": rid, "started": xs.NOW(), "budget_minutes": 1,
+                "task": "task", "verify": "check"}
+        ws = {"mode": "cwd", "repo": str(self.cwd), "root": str(self.cwd), "path": str(self.cwd)}
+        child = mock.Mock()
+        child.alive.return_value = True
+        child.boundary.finish.return_value = (True, [])
+        final = {"status": "done", "files_changed": ["fence.txt"]}
+
+        def verify(*args):
+            if fleet:
+                saved = self.reservation_of(run_dir)
+                self.assertTrue(self.coordinator(op="validate", run_id=rid, token=saved["token"],
+                                                 fence=saved["fence"])["ok"])
+                self.assertFalse((run_dir / "fleet-release-pending.json").exists())
+            if verify_hook:
+                verify_hook(run_dir)
+            return {"rc": 0, "output": "passed", "failing": []}
+
+        env = {"OPENSWARM_FLEET_GUARD_CONFIG": str(self.guard if fleet else self.root / "no-guard.json"),
+               "OPENSWARM_FLEET_CAPACITY_DIR": str(self.capacity)}
+        with mock.patch.dict(os.environ, env), \
+                mock.patch.object(xs, "load_policy", return_value={}), \
+                mock.patch.object(xs, "lane_prepare_workspace", return_value=ws), \
+                mock.patch.object(xs, "run_workspace_prepare", return_value=None), \
+                mock.patch.object(xs, "add_lessons_to_prompt", side_effect=lambda p, *a: (p, [])), \
+                mock.patch.object(xs, "add_patterns_to_prompt", side_effect=lambda p, *a: (p, [])), \
+                mock.patch.object(xs, "lane_control_messages"), \
+                mock.patch.object(xs, "lane_write_state"), \
+                mock.patch.object(xs, "git", return_value=(0, "fence.txt\n", "")), \
+                mock.patch.object(xs, "changed_paths", return_value=["fence.txt"]), \
+                mock.patch.object(xs, "lockfiles_changed", return_value=False), \
+                mock.patch.object(xs, "finalize_workspace", return_value={"commit": None}), \
+                mock.patch.object(xs, "run_verify", side_effect=verify), \
+                mock.patch.object(xs, "cleanup_executor_tmp"), \
+                mock.patch.object(xs, "start_fleet_release_worker"), \
+                mock.patch.object(xs, "lane_run_turn", return_value=(
+                    final, {}, None, 0, str(run_dir / "events.jsonl"), None)) as turn:
+            result = xs.lane_do_run(lane, spec, child, None, spec)
+        self.assertEqual(turn.call_count, 1)
+        self.assertEqual(json.loads((run_dir / "result.json").read_text()), result)
+        status = json.loads((run_dir / "status.json").read_text())
+        return run_dir, result, status
+
+    def test_lane_holds_fence_through_verify_and_releases_after_publication(self):
+        release = xs.release_fleet_slot
+        published = []
+
+        def checked_release(rdir):
+            published.append(json.loads((pathlib.Path(rdir) / "result.json").read_text())["status"])
+            return release(rdir)
+
+        with mock.patch.object(xs, "release_fleet_slot", side_effect=checked_release):
+            _run_dir, result, _status = self.dispatch_lane()
+        self.assertEqual(result["status"], "done")
+        self.assertEqual(published, ["done"])
+
+    def test_lane_lost_fence_during_verify_is_rejected_at_publication(self):
+        self.assert_fenced_writeback(*self.dispatch_lane(verify_hook=self.release_at_writeback))
+
+    def test_single_machine_lane_is_unaffected(self):
+        with mock.patch.object(xs, "fleet_guard_answer") as guard:
+            _run_dir, result, _status = self.dispatch_lane(fleet=False)
+        self.assertEqual(result["status"], "done")
+        guard.assert_not_called()
 
     def test_normal_release_follows_result_publication(self):
         release = xs.release_fleet_slot

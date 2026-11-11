@@ -561,7 +561,7 @@ class FleetCapacityTests(unittest.TestCase):
         rdir = os.path.join(self.temp.name, 'runs', 'cancelled')
         with mock.patch.object(xs, 'fleet_guard_command', return_value=['guard']), \
              mock.patch.object(xs, 'start_fleet_release_worker'), \
-             mock.patch.object(xs, 'fleet_guard_call', side_effect=[{'admitted': True}, {'released': True}]) as call:
+             mock.patch.object(xs, 'fleet_guard_call', side_effect=[{'admitted': True, 'fence': 1}, {'released': True}]) as call:
             self.assertFalse(xs.reserve_provider_slot(rdir, 'codex', None, {'concurrency': {'total': 2}},
                                                       keep_waiting=lambda: False))
             self.assertTrue(xs.retry_fleet_release(rdir))
