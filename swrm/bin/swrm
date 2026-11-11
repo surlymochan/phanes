@@ -7580,7 +7580,11 @@ def cmd_bus_run(args, policy, rid, rdir, task, title, budget_min):
         if final_status:
             break
         if NOW() >= deadline:
-            bus_cancel_issue(cfg["repo"], number, cfg, "planner budget expired", force=True)
+            try:
+                bus_cancel_issue(cfg["repo"], number, cfg, "planner budget expired")
+            except BusHeldError as error:
+                # The local budget can expire without withdrawing a worker's card.
+                bus_event(event_path, f"budget cancellation refused: {error}")
             final_status = "budget_exceeded"
             break
         time.sleep(min(cfg["poll_seconds"], max(0.01, deadline - NOW())))

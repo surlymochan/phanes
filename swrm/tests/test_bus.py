@@ -238,7 +238,12 @@ class BusTests(unittest.TestCase):
         result = json.loads((Path(xs.RUNS) / run_id / "result.json").read_text())
         self.assertEqual(result["status"], "budget_exceeded")
         self.assertIsNone(result["result"])
-        self.assertIn("swrm:cancelled", {label["name"] for label in self.issue()["labels"]})
+        # The result is untrusted, but the allowed executor's claim still holds
+        # the card. Budget expiry must leave its labels intact.
+        self.assertEqual({label["name"] for label in self.issue()["labels"]}, {"swrm:done"})
+        events = (Path(xs.RUNS) / run_id / "events.jsonl").read_text()
+        self.assertIn("budget cancellation refused", events)
+        self.assertIn("--force", events)
 
     def test_concurrent_label_writers_do_not_clobber_each_other(self):
         created = xs.bus_create_issue("org/bus", self.cfg, "race", "label race", {
@@ -329,6 +334,38 @@ class BusTests(unittest.TestCase):
         names = {label["name"] for label in self.issue()["labels"]}
         self.assertIn("swrm:cancelled", names)
         self.assertTrue(any("budget expired" in comment["body"] for comment in self.issue()["comments"]))
+
+    def test_budget_expiry_preserves_reserved_and_claimed_cards(self):
+        for hold in ("reservation", "claim", "claimed-label"):
+            with self.subTest(hold=hold):
+                create_issue = xs.bus_create_issue
+
+                def create_held_issue(*args, **kwargs):
+                    issue = create_issue(*args, **kwargs)
+                    body = self.reserve_body() if hold == "reservation" else "/claim external-agent"
+                    self.add_comment(issue["number"], body)
+                    if hold == "claimed-label":
+                        self.set_labels(issue["number"], ["claimed"], ["queued"])
+                    return issue
+
+                # Install the hold before the planner can reach its deadline check.
+                with mock.patch.object(xs, "bus_create_issue", side_effect=create_held_issue), \
+                        mock.patch.object(xs, "bus_remote", return_value=(str(self.repo), str(self.bare), "org/target")), \
+                        contextlib.redirect_stdout(io.StringIO()):
+                    with self.assertRaises(SystemExit) as stopped:
+                        xs.cmd_run(self.run_args(budget=0.001), self.policy)
+                self.assertEqual(stopped.exception.code, 1)
+                issue = self.state()["repos"]["org/bus"]["issues"][-1]
+                names = xs.issue_label_names(issue)
+                self.assertNotIn("swrm:cancelled", names)
+                self.assertIn("swrm:claimed" if hold == "claimed-label" else "swrm:queued", names)
+                self.assertFalse(any("cancelled this run" in row["body"] for row in issue["comments"]))
+                run_id = xs.bus_extract_task(issue["body"])["run_id"]
+                rdir = Path(xs.RUNS) / run_id
+                self.assertEqual(json.loads((rdir / "result.json").read_text())["status"], "budget_exceeded")
+                events = (rdir / "events.jsonl").read_text()
+                self.assertIn("budget cancellation refused", events)
+                self.assertIn("--force", events)
 
     def test_bus_init_is_idempotent(self):
         args = argparse.Namespace(repo="org/bus")
@@ -704,32 +741,17 @@ print(json.dumps({'type':'message_end','message':message}), flush=True)
         self.assertTrue(cancelled, "a receipt or claim from an unlisted worker must not block")
 
     def test_reservation_window_is_configurable(self):
-        """#2159: the freshness window is a bus policy knob.
-
-        The issue does not name the key, so the test looks for a spelling that
-        shortens the window and skips when the policy exposes none of them.
-        """
-        candidates = ("reserve_ttl_seconds", "reserve_window_seconds", "reserve_fresh_seconds",
-                      "reserve_freshness_seconds", "reserve_max_age_seconds", "reserve_seconds")
-        try:
-            source = Path(xs.__file__).read_text(encoding="utf-8")
-            mined = re.findall(r"[\"']([a-z_]*reserve[a-z_]*(?:second|ttl|window|fresh|age|timeout)[a-z_]*)[\"']",
-                               source)
-            candidates = tuple(dict.fromkeys(mined + list(candidates)))
-        except OSError:
-            pass
-        shortened = False
-        for key in candidates:
-            number = self.create_bus_card("window-" + key.replace("_", "-"))
-            receipt = self.add_comment(number, self.reserve_body(), login="executor")
-            self.backdate_comment(number, receipt["id"], 5)
-            cfg = xs.bus_config(xs.deep_merge(self.policy, {"bus": {key: 1}}))
-            cancelled, _ = self.cancel(number, "planner stop", cfg=cfg)
-            if cancelled:
-                shortened = True
-                break
-        if not shortened:
-            self.skipTest("no recognized bus policy key shortened the reservation freshness window")
+        """#2159: the documented policy key must change the freshness window."""
+        self.assertEqual(self.cfg["reserve_ttl_seconds"], 300)
+        number = self.create_bus_card("configured-window")
+        receipt = self.add_comment(number, self.reserve_body(), login="executor")
+        self.backdate_comment(number, receipt["id"], 5)
+        cancelled, _ = self.cancel(number)
+        self.assertFalse(cancelled, "the default window must still protect this receipt")
+        cfg = xs.bus_config(xs.deep_merge(self.policy, {"bus": {"reserve_ttl_seconds": 1}}))
+        self.assertEqual(cfg["reserve_ttl_seconds"], 1)
+        cancelled, _ = self.cancel(number, cfg=cfg)
+        self.assertTrue(cancelled, "the configured shorter window must expire this receipt")
 
     def test_bus_docs_document_the_reservation_protocol(self):
         """#2159: the bus protocol documentation must describe the receipt and the override."""

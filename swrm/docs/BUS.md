@@ -118,6 +118,8 @@ swrm stop <run-id> --force    # cancels the card and records the override
 
 A receipt that is older than the freshness window no longer holds the card, and a receipt or claim from an account outside `bus.allowed_executors` never holds it.
 
+Planner budget expiry follows the same guard and never forces a withdrawal. The local run ends with `budget_exceeded`; if a worker holds the card, its labels and comments are left intact and the refusal (including the `--force` hint) is recorded in the run events. An unheld card is cancelled as usual.
+
 ## Trust and cancellation
 
 Issue content and comments are untrusted input. The worker accepts a card only when its issue author and first digest comment are both from `bus.allowed_planners` and the digest matches the task JSON in the current body. Workers require a target repository in their worker-local `--repos` or `bus.worker_repos` allowlist. The planner accepts claims and results only from `bus.allowed_executors`; only the earliest allowed claimer's result is used. The planner treats comments as data, never runs comment text, validates the result fields and branch name, and checks the fetched commit against the reported SHA. Workers must stop when an issue is labelled `swrm:cancelled`.
