@@ -338,6 +338,8 @@ class LaneStuckTickTest(unittest.TestCase):
         self.check_tick_real_term_and_engine_terminals("stopped")
 
     def check_tick_real_term_and_engine_terminals(self, blocking):
+        if not Path("/proc/self/wchan").exists():
+            self.skipTest("needs the Linux procfs wchan and stat files")
         # Adapt the RPC transport, clock and SSH, retaining the real turn driver,
         # workspace preparation, events, results and ledger. The stalled transport
         # also fails to close its child, leaving a real process tree for the probe
