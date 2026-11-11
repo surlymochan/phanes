@@ -257,6 +257,16 @@ class RoleController:
         ] = {}
         for event in self._events:
             self._reduce(event)
+        runs = self.control_dir / "runs"
+        if runs.exists() or runs.is_symlink():
+            from tools.evalid_run_state import scan_runs
+
+            if self._log.exists():
+                self._changes = scan_runs(runs, events_path=self._log)
+            else:
+                # Standalone receipts lack the private controller evidence needed
+                # to authorize a transition, but must still be checked for conflicts.
+                scan_runs(runs)
 
     def _read_log(self) -> list[dict[str, Any]]:
         if not self._log.exists():
