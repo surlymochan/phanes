@@ -97,6 +97,27 @@ class DecisionTests(unittest.TestCase):
             lines.append(field + ': ' + filled[field] if field in filled else line)
         self.assertEqual(validate('\n'.join(lines) + '\n'), [])
 
+    def test_not_available_is_not_evidence(self):
+        cases = {'Queue impact': 'not available', 'Discordant results': '0 not available',
+                 'Quota impact': 'Not Available', 'Rationale': 'n.a. unknown', 'Extra runs': '无',
+                 'Discordant results ': '未知'}
+        for field, filler in cases.items():
+            field = field.strip()
+            line = [l for l in VALID.splitlines() if l.startswith(field + ':')][0]
+            self.assertTrue(validate(VALID.replace(line, field + ': ' + filler)), (field, filler))
+
+    def test_infra_counted_as_pass_after_unrelated_negation(self):
+        text = VALID + '\nNo reruns were needed, and INFRA results were counted as PASS.\n'
+        self.assertTrue(validate(text))
+
+    def test_infra_and_pass_tracked_separately_is_allowed(self):
+        text = VALID + '\nINFRA failures and PASS results were tracked separately.\n'
+        self.assertEqual(validate(text), [])
+
+    def test_structured_infra_field_must_be_no(self):
+        self.assertTrue(validate(VALID.replace('INFRA counted as PASS: no', 'INFRA counted as PASS: yes')))
+        self.assertTrue(validate(VALID.replace('INFRA counted as PASS: no\n', '')))
+
 
 if __name__ == '__main__':
     unittest.main()

@@ -15,33 +15,38 @@ FIELDS = (
 # Evidence fields that must say something real, and those that must carry a number.
 SUBSTANCE_FIELDS = ('Discordant results', 'Extra runs', 'Queue impact', 'Quota impact', 'Rationale')
 NUMBER_FIELDS = ('Discordant results', 'Extra runs')
-_EMPTY = re.compile(
-    r'(?:n/?a|n\.a\.?|not applicable|none|nil|null|unknown|tbd|todo|to be determined|'
-    r'no impact|nothing|same|-+|\.+|\?+)', re.I)
-_NEGATION = re.compile(r"\b(?:not|never|no|non|without|neither|nor|excluded?|excluding)\b|n't", re.I)
+# Vague phrases carry no evidence; they are removed and what remains must still be substantive.
+_VAGUE = re.compile(
+    r'(?<![A-Za-z])(?:not\s+available|unavailable|not\s+applicable|not\s+measured|not\s+recorded|not\s+known|'
+    r'n/?a|n\.a\.?|none|nil|null|unknown|tbd|todo|to\s+be\s+determined|no\s+impact|nothing|'
+    r'same)(?![A-Za-z])|无|未知|不适用|暂无', re.I)
+_INFRA_PASS = re.compile(
+    r'\bINFRA\b[^.;\n]{0,40}?(?:->|=>|=|:)\s*PASS\b|\bINFRA\s+(?:is|are|was|were)\s+PASS\b|'
+    r'\bPASS\s*\(\s*INFRA\s*\)|\b(?:count(?:s|ed)?|treat(?:s|ed)?|scored|recorded|reported|marked)\s+as\s+PASS\b', re.I)
+_NEGATED = re.compile(r"(?:\bnot|\bnever|n't|\bnor)\s+$", re.I)
 
 
 def _substantive(value, needs_number):
-    """A field value that says something: not empty filler, at least two words."""
-    text = ' '.join(value.split())
-    if _EMPTY.fullmatch(text.strip(' .')) or len(text) < 12 or len(text.split()) < 2:
+    """A field value that says something once vague phrases are removed."""
+    text = ' '.join(_VAGUE.sub(' ', value).replace('-', ' ').split()).strip(' .,;:')
+    if len(text) < 12 or len(text.split()) < 2:
         return False
     return bool(re.search(r'\d', text)) if needs_number else True
 
 
 def _counts_infra_as_pass(document):
-    """True if any sentence ties INFRA to PASS without negating it.
+    """True if the text says INFRA counts as PASS in one of the explicit spellings.
 
-    The required ``INFRA counted as PASS:`` field is checked on its own and is
-    skipped here; every other spelling (``INFRA -> PASS``, ``INFRA results were
-    counted as PASS``, ``PASS (INFRA)``) is found sentence by sentence.
+    The structured field ``INFRA counted as PASS:`` is validated on its own and
+    its line is skipped here. Other lines are matched on explicit phrases only
+    (``counted as PASS``, ``INFRA -> PASS``, ``PASS (INFRA)``); a phrase directly
+    preceded by not/never/n't is a denial and is allowed. No sentence guessing.
     """
     for line in document.splitlines():
         if re.match(r'\s*INFRA counted as PASS\s*:', line, re.I):
             continue
-        for sentence in re.split(r'[.;!?]\s|[.;!?]$', line):
-            if (re.search(r'\binfra\b', sentence, re.I) and re.search(r'\bpass(?:ed|es)?\b', sentence, re.I)
-                    and not _NEGATION.search(sentence)):
+        for match in _INFRA_PASS.finditer(line):
+            if not _NEGATED.search(line[:match.start()]):
                 return True
     return False
 
