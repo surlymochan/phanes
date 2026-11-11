@@ -57,9 +57,10 @@ class DecisionTests(unittest.TestCase):
         for field in ('Discordant results', 'Extra runs', 'Queue impact', 'Quota impact', 'Rationale', 'INFRA counted as PASS'):
             self.assertTrue(validate(VALID.replace(field + ':', 'Other:')), field)
 
-    def test_shipped_template_fails(self):
+    def test_shipped_decision_is_complete(self):
+        # The e1885 experiment has finished; the recorded decision must pass every check.
         path = Path(__file__).resolve().parents[2] / 'handoff' / 'ARCHITECTURE-PROPOSAL.md'
-        self.assertTrue(validate(path.read_text(encoding='utf-8')))
+        self.assertEqual(validate(path.read_text(encoding='utf-8')), [])
 
     def test_empty_filler_is_not_evidence(self):
         for field in ('Discordant results', 'Extra runs', 'Queue impact', 'Quota impact', 'Rationale'):
