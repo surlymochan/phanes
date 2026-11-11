@@ -1,0 +1,18 @@
+name: public-verify
+
+on:
+  pull_request:
+    types: [opened, synchronize, edited, reopened]
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  public-verify:
+    uses: ./.github/workflows/public-verify-reusable.yml
+    with:
+      scanner_ref: ${{ github.sha }}
+    secrets:
+      PUBLIC_VERIFY_DENYLIST: ${{ secrets.PUBLIC_VERIFY_DENYLIST }}
