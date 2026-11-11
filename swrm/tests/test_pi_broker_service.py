@@ -14,6 +14,8 @@ import sys
 import tempfile
 import unittest
 
+from _broker_wait import short_tmp_root
+
 SCRIPT = pathlib.Path(__file__).resolve().parents[1] / 'bin' / 'pi-broker-service'
 CACHE_REL = pathlib.Path('Library') / 'Caches' / 'swrm-pi-broker'
 NODE_REL = pathlib.Path('.local') / 'node-v24.14.1' / 'bin' / 'node'
@@ -33,7 +35,7 @@ def _temp_home():
     once Library/Caches/swrm-pi-broker/broker.sock is appended."""
     if os.name == 'nt':
         return tempfile.TemporaryDirectory(prefix='os-')
-    return tempfile.TemporaryDirectory(prefix='os-', dir='/tmp')
+    return tempfile.TemporaryDirectory(prefix='os-', dir=short_tmp_root())
 
 
 def _install_fake_node(home):

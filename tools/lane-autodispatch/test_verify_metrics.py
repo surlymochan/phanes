@@ -53,10 +53,15 @@ of a verify card and the snapshot carries no verify metric at all.
 验收：`python3 -m pytest -q tools/lane-autodispatch/test_verify_metrics.py`
 """
 from __future__ import annotations
+import sys
+from pathlib import Path as _FixturePath
+sys.path.insert(0, str(_FixturePath(__file__).resolve().parent))
+from pr_guard_fixtures import no_open_prs
 
 import importlib.util
 import inspect
 import json
+from card_fixtures import fixture_json
 import os
 import re
 import shutil
@@ -276,18 +281,19 @@ class Fleet:
         }
 
     # --- the AD's `gh` -------------------------------------------------------------------
+    @no_open_prs
     def gh(self, args, timeout=60):
         if args[:2] == ["issue", "list"]:
             rows = [{"number": number, "title": issue["title"], "body": issue["body"],
                      "labels": list(issue["labels"]), "state": issue["state"],
                      "createdAt": issue.get("createdAt")}
                     for number, issue in sorted(self.issues.items()) if issue["state"] == "OPEN"]
-            return 0, json.dumps(rows), ""
+            return 0, fixture_json(rows), ""
         if args[:2] == ["issue", "view"]:
             issue = self.issues.get(int(args[2]))
             if issue is None:
                 return 1, "", "gh: no such issue"
-            return 0, json.dumps({"number": int(args[2]), "state": issue["state"], "body": issue["body"],
+            return 0, fixture_json({"number": int(args[2]), "state": issue["state"], "body": issue["body"],
                                   "labels": [{"name": name} for name in issue["labels"]]}), ""
         if args[:2] == ["issue", "edit"]:
             issue = self.issues.get(int(args[2]))

@@ -120,9 +120,10 @@ def test_swrm_finish_keeps_artifacts_when_a_result_carries_malformed_usage():
             json.dumps(
                 {
                     "id": "run-malformed",
+                    "usage": {"inputTokens": 17},
                     "attempts": [
-                        {"meta": {"usage": {"inputTokens": "bad"}}},
-                        {"meta": {"usage": {"inputTokens": 17}}},
+                        {"backend": "cursor", "model": "model", "meta": {"usage": {"inputTokens": "bad"}}},
+                        {"backend": "cursor", "model": "model", "meta": {"usage": {"inputTokens": 17}}},
                     ],
                 }
             ),

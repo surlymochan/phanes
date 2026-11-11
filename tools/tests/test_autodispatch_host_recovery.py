@@ -44,6 +44,15 @@ Run them offline:
     python3 -m unittest discover -s tools/tests -p 'test_autodispatch_host_recovery.py' -v
 """
 from __future__ import annotations
+import sys
+from pathlib import Path as _FixturePath
+sys.path.append(str(_FixturePath(__file__).resolve().parents[1] / "lane-autodispatch"))
+from pr_guard_fixtures import no_open_prs
+
+try:
+    from tools.tests._test_tmp import short_tmp_root
+except ImportError:
+    from _test_tmp import short_tmp_root
 
 import importlib.util
 import json
@@ -58,7 +67,7 @@ from unittest.mock import patch
 ROOT = Path(__file__).resolve().parents[2]
 AUTODISPATCH_PATH = ROOT / "tools" / "lane-autodispatch" / "autodispatch.py"
 HEALTH_PAUSE_PATH = ROOT / "tools" / "check-health-pause.py"
-SCRATCH = ROOT / ".swrm-tmp"
+SCRATCH = Path(short_tmp_root())
 
 LANE = "GH2"
 HOST = "lane-host"
@@ -93,7 +102,7 @@ def remote_status(**overrides):
     alive (``runner_alive`` is None) and it does not even know the state of the run
     (``run_state`` is "missing")."""
     status = {"lane": "idle", "current_run": None, "run": "running",
-              "runner_alive": None, "run_state": "missing"}
+              "runner_alive": None, "executor_alive": None, "run_state": "missing"}
     status.update(overrides)
     return status
 
@@ -106,6 +115,8 @@ class FakeGitHub:
         self.calls = []               # every call, in order
         self.edits = []               # the `gh issue edit` calls only
         self.fail_edits = False
+
+    @no_open_prs
 
     def __call__(self, args, timeout=60):
         args = list(args)
@@ -146,6 +157,7 @@ class OrphanRunTests(unittest.TestCase):
 
     def setUp(self):
         self.module = load_module("autodispatch_host_recovery", AUTODISPATCH_PATH)
+        self.module.card_quality = lambda text: None  # these scenarios judge the lane recovery, not the card quality
         self.fleet = FakeGitHub({ISSUE: {"state": "OPEN", "labels": ["lane-ready", "in-progress"]}})
         self.module.gh = self.fleet
         self.module.log = lambda *args, **kwargs: None
@@ -176,12 +188,54 @@ class OrphanRunTests(unittest.TestCase):
     def test_a_dead_runner_is_requeued(self):
         """A run whose runner is dead is cleaned up and its card is re-queued."""
         state = lane_state()
-        status = remote_status(runner_alive=False)
+        status = remote_status(runner_alive=False, executor_alive=False)
         self.assertTrue(self.module.reconcile(LANE, LANE_CFG, state, status, {}),
                         "a run whose runner is dead must be re-queued")
         self.assertNotIn("in-progress", self.fleet.issues[ISSUE]["labels"],
                          "the re-queued card loses its in-progress label")
         self.assertTrue(self.dispatchable(), "the re-queued card is dispatchable again")
+
+    def test_an_unknown_executor_session_is_not_requeued(self):
+        """A run whose executor session cannot be verified keeps its card.
+
+        The remote host proves that a session is gone only with the process group
+        of the executor; without that proof the run may still be executing, and
+        re-queueing its card would dispatch the same work twice (Refs #1663)."""
+        state = lane_state()
+        status = remote_status(runner_alive=False, executor_alive=None)
+        self.assertFalse(self.module.reconcile(LANE, LANE_CFG, state, status, {}),
+                         "a run whose executor session is unknown must not be re-queued")
+        self.assertEqual(self.fleet.edits, [],
+                         "no label may be changed while the executor session is unknown")
+        self.assertIn("in-progress", self.fleet.issues[ISSUE]["labels"],
+                      "the card must keep its in-progress label while the session is unknown")
+
+    def test_a_live_executor_session_is_not_requeued(self):
+        """A run whose executor session is alive keeps its card."""
+        state = lane_state()
+        status = remote_status(runner_alive=False, executor_alive=True)
+        self.assertFalse(self.module.reconcile(LANE, LANE_CFG, state, status, {}),
+                         "a run whose executor session is alive must not be re-queued")
+        self.assertEqual(self.fleet.edits, [])
+        self.assertIn("in-progress", self.fleet.issues[ISSUE]["labels"])
+
+    def test_an_unknown_executor_session_is_never_verified_as_lost(self):
+        """The recovery of a host keeps a run whose executor session is unknown.
+
+        The remote host proves that a session is gone only with the process
+        group of the executor; without that proof the run may still be
+        executing, so neither the lane nor the card may be released."""
+        state = lane_state()
+        status = remote_status(lane="busy", current_run=RUN, runner_alive=False,
+                               executor_alive=None)
+        control = {LANE: state, "_recovery": {LANE: {"run": RUN}}}
+        self.assertFalse(self.module.verify_recovered_run(LANE, LANE_CFG, state, status, control),
+                         "a run whose executor session is unknown must not be released")
+        self.assertIn(LANE, control["_recovery"])
+        self.assertEqual(self.fleet.edits, [],
+                         "no label may be changed while the executor session is unknown")
+        self.assertIn("in-progress", self.fleet.issues[ISSUE]["labels"],
+                      "the card must keep its in-progress label while the session is unknown")
 
     def test_a_young_run_with_an_unknown_liveness_is_not_requeued(self):
         """A run that just started is never re-queued, whatever the liveness says."""
@@ -196,7 +250,7 @@ class OrphanRunTests(unittest.TestCase):
         self.fleet.fail_edits = True
         state = lane_state()
         self.assertFalse(self.module.reconcile(LANE, LANE_CFG, state,
-                                               remote_status(runner_alive=False), {}))
+                                               remote_status(runner_alive=False, executor_alive=False), {}))
         self.assertIn("in-progress", self.fleet.issues[ISSUE]["labels"])
 
 
@@ -210,6 +264,7 @@ class RecoveryTickTests(unittest.TestCase):
         self.state_dir = self.root / "state"
         self.state_dir.mkdir()
         self.module = load_module("autodispatch_host_recovery_tick", AUTODISPATCH_PATH)
+        self.module.card_quality = lambda text: None  # these scenarios judge the lane recovery, not the card quality
         self.fleet = FakeGitHub({ISSUE: {"state": "OPEN", "labels": ["lane-ready", "in-progress"]}})
         self.status = remote_status()
         # the dispatcher runs against the sandbox: no real state dir, no real fleet
@@ -219,6 +274,7 @@ class RecoveryTickTests(unittest.TestCase):
         self.module.log = lambda *args, **kwargs: None
         self.module.sh = self.fake_sh
         self.module.remote = lambda lane, cfg, run="": self.status
+        self.module.clear_orphan_lane = lambda lane, cfg, run: True
         self.module.replenish = lambda count, state: []
         self.module.BACKOFF.clear()
         # the pause store of the operator must not leak into the test
@@ -268,7 +324,7 @@ class RecoveryTickTests(unittest.TestCase):
 
     def test_the_tick_releases_the_lane_of_a_run_with_a_dead_runner(self):
         """The lane of a run whose runner is dead is released and its card re-queued."""
-        self.status = remote_status(runner_alive=False)
+        self.status = remote_status(runner_alive=False, executor_alive=False)
         state = self.tick({LANE: lane_state()})
         self.assertNotIn(LANE, state,
                          "the lane of a run whose runner is dead is released")
@@ -278,7 +334,7 @@ class RecoveryTickTests(unittest.TestCase):
                       "the re-queued card carries the lane-ready label again")
 
     def test_the_tick_keeps_the_lane_when_requeue_label_update_fails(self):
-        self.status = remote_status(runner_alive=False)
+        self.status = remote_status(runner_alive=False, executor_alive=False)
         self.fleet.fail_edits = True
         state = self.tick({LANE: lane_state()})
         self.assertIn(LANE, state,
@@ -333,6 +389,7 @@ class HostPauseAttributionTests(unittest.TestCase):
 
     def setUp(self):
         self.module = load_module("autodispatch_host_pause", AUTODISPATCH_PATH)
+        self.module.card_quality = lambda text: None  # these scenarios judge the lane recovery, not the card quality
         self.module.log = lambda *args, **kwargs: None
 
     def test_the_marker_of_the_dispatcher_is_attributed(self):
@@ -356,6 +413,7 @@ class RunnerLivenessTests(unittest.TestCase):
 
     def setUp(self):
         self.module = load_module("autodispatch_runner_liveness", AUTODISPATCH_PATH)
+        self.module.card_quality = lambda text: None  # these scenarios judge the lane recovery, not the card quality
 
     def test_a_live_runner(self):
         self.assertEqual(self.module.runner_liveness({"runner_alive": True}), "alive")
@@ -381,6 +439,7 @@ class HostRecoveryPauseTests(unittest.TestCase):
         self.root = Path(tempfile.mkdtemp(prefix="ad-host-pause-", dir=str(SCRATCH)))
         self.addCleanup(shutil.rmtree, self.root, ignore_errors=True)
         self.module = load_module("autodispatch_host_recovery_pause", AUTODISPATCH_PATH)
+        self.module.card_quality = lambda text: None  # these scenarios judge the lane recovery, not the card quality
         self.module.D = str(self.root)
         self.module.log = lambda *args, **kwargs: None
 
@@ -538,6 +597,7 @@ class HostRecoveryTickTests(RecoveryTickTests):
         state = self.tick({LANE: lane_state()})
         self.host_back()
         self.status = remote_status(lane="busy", current_run=RUN, runner_alive=False,
+                                    executor_alive=False,
                                     run_state="running")
         state = self.tick(state)
         self.assertFalse(self.host_pause().exists(),
@@ -566,6 +626,7 @@ class HostRecoveryTickTests(RecoveryTickTests):
         state = self.tick({LANE: lane_state()})
         self.host_back()
         self.status = remote_status(lane="busy", current_run=RUN, runner_alive=False,
+                                    executor_alive=False,
                                     run_state="running")
         self.fleet.fail_edits = True
         state = self.tick(state)
@@ -587,6 +648,7 @@ class HostRecoveryTickTests(RecoveryTickTests):
         state = self.tick({LANE: lane_state()})
         self.host_back()
         self.status = remote_status(lane="busy", current_run=RUN, runner_alive=False,
+                                    executor_alive=False,
                                     run_state="running")
         state = self.tick(state)
         self.assertTrue(pause.exists(),

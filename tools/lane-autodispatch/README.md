@@ -364,3 +364,49 @@ REPORT: dropped — 旧 .lane-review 文件载体已由 main 过滤，按 issue 
 ## 热文件预检（#1721）
 
 `hot_policy.json` 是 backlog 铸卡和 AD 派发共用的上限配置；变更配置后须与脚本及 `hotfiles.py` 一同部署。卡片用 `热文件：path/to/file` 声明修改文件。导入时冲突卡保留待重试，`mint-log.json` 记录预检；同批已铸卡计入占用。`lanes-status.json` 的 `_blocked_details` 给出原因、文件及自首次观测以来的等待秒数；这些卡不计入 `_ready` 和补给水位。旧在途状态缺少 `hot` 字段时，声明了热文件的卡保守等待，直到旧任务结束。文档文件按既有规则豁免。
+
+## PR 交付换标（#1772 A/2）
+
+成功创建 PR 后，移除 `lane-ready`、`in-progress` 并添加 `lane-pr`。
+终态采用**流转标签子集**口径：完整标签与
+`{lane-ready, in-progress, lane-pr}` 的交集恰为 `{lane-pr}`；保留 p1、backend、planner 等其它标签。
+每次尝试均先 gh 实读，读取失败不写；写后再次 gh 实读核验，最多尝试三次。
+耗尽后返回 False、写 brain WARNING，提交路径在 `error` 报告交付标签未核验（`status` 仍记录 PR 已创建），不能当作换标成功。
+远端持续不可用时无法保证摘除 lane-ready；告警要求人工修复，不会主动加回 lane-ready。
+开放 PR、已合并未关闭 issue、重排及派发并发守卫属于 B 卡。
+旧 `openswarm/lib/dispatch` 已退役：REPORT: dropped；仅移植旧 PR 的交付换标结构到当前工具。
+
+| BLOCKER / 验收或失败模式 → 修复 | 文件 | 对应测试（tools/tests/） |
+| --- | --- | --- |
+| B4 完整标签口径冲突 → 流转子集判定，增删仅三个流转标签 | autodispatch.py | test_lane_pr_relabel.RelabelTests.test_metadata_preserved |
+| B5 缺写后核验 → gh 新读取，残留 in-progress 则重试 | autodispatch.py | test_lane_pr_relabel.RelabelTests.test_stale_readback_retries |
+| R3 三次不收敛静默 → False + brain WARNING | autodispatch.py | test_lane_pr_relabel.RelabelTests.test_nonconvergence_warns_and_fails |
+| R2 实读失败 → 本轮不写，下轮重新实读 | autodispatch.py | test_lane_pr_relabel.RelabelTests.test_read_and_write_exceptions_retry |
+| API 读/写及写后读取持续失败 → 三轮后告警 | autodispatch.py | test_lane_pr_relabel.RelabelTests.test_persistent_exceptions_warn_and_fail |
+
+验证：`python3 -m unittest discover -s tools/tests -p 'test_lane_pr*.py'`；
+`python3 -m unittest discover -s tools/lane-autodispatch -p 'test_*.py'`。
+
+## 开放 PR 重派守卫（#1772 B/2）
+
+`open_pr_for_issue(n)` 移植旧 #1774 的 OPEN 分页查询，不缓存结果。重排写入前后、候选选择和紧邻 dispatch 前后均检查；未知状态阻断操作。复用 A 卡的换标核验，保留非流转标签。派发事后状态未知也撤销 run，撤销须经远端实读确认；失败保留 `cancel_pending`，下周期先补偿，禁止收割该 run。
+
+根因是旧实现把不完整/失败查询当成无 PR，且只修标签，没有撤销已经启动的执行。本实现区分未知与无 PR，并保留失败补偿状态。当前交付 **partial**：下列新增测试通过，但全套旧夹具未支持查询，尚未完成逐测试移除修复的变异验证；实现加测试超过本卡 150 行预算。
+
+| BLOCKER / 验收 → 修复 | 文件 | 对应测试（tools/tests） |
+| --- | --- | --- |
+| R1 B1 编号 None → 使用卡 n | autodispatch.py | test_lane_pr_validation.ReassignmentGuardTests.test_tick_dispatch_races |
+| R1 B2 遗漏重排与缺 lane-pr → 共用 guarded_requeue | autodispatch.py、../requeue-quota-failed.py | test_requeue_quota_failed.QuotaPrGuardTests.test_open_pr_query_failure_and_write_race |
+| R1 B3 前 100 截断、合并 PR 误判 → OPEN 完整分页 | autodispatch.py | test_lane_pr_validation.ReassignmentGuardTests.test_paginated_open_only_lookup |
+| R1 B4 标签终态 → 复用 A 卡，非流转标签保留（本卡不改） | autodispatch.py | test_lane_pr_relabel.RelabelTests（现有测试） |
+| R1 B5 查询与重排写入竞态 → 写后复核修复 | autodispatch.py | test_lane_pr_validation.ReassignmentGuardTests.test_requeue_write_race_and_failed_readback |
+| R2 B1 校验查询失败仍重排 → 阻断并保留 run | autodispatch.py | test_lane_pr_validation.ReassignmentGuardTests.test_requeue_paths_fail_closed_and_repair |
+| R2 B2 派发竞态、事后查询失败 → 紧邻复核、撤销、告警 | autodispatch.py | test_lane_pr_validation.ReassignmentGuardTests.test_tick_dispatch_races |
+| R2 B3 完整标签集合争议 → 按本卡/Boss 非流转标签保留 | autodispatch.py | test_lane_pr_relabel.py（A 卡既有覆盖） |
+| R2 B4 / R3 B3 缺映射 → 本表 | README.md | test_lane_pr_validation.py、test_requeue_quota_failed.py（本表所列命令） |
+| R3 B1 撤销无核验 → 实读远端、保留补偿状态 | autodispatch.py | test_lane_pr_validation.ReassignmentGuardTests.test_cancel_is_verified_and_retained_for_retry |
+| R3 B2 缺集成失败路径 → tick 与各重排失败注入 | autodispatch.py | test_lane_pr_validation.ReassignmentGuardTests.test_tick_dispatch_races、test_requeue_paths_fail_closed_and_repair |
+| 失败 run、启动失败、校验退回 → 重排统一守卫 | autodispatch.py | test_lane_pr_validation.ReassignmentGuardTests.test_requeue_paths_fail_closed_and_repair |
+| 开放 PR 不派发且日志可见 → 候选拦截并修标签 | autodispatch.py | test_lane_pr_validation.ReassignmentGuardTests.test_tick_dispatch_races |
+
+验证：`python3 -m unittest discover -s tools/tests -p 'test_lane_pr*.py'`（38 通过）；`python3 -m unittest discover -s tools/tests -p 'test_requeue_quota_failed.py'`（6 通过）。`tools/lane-autodispatch` 全套尚未通过；其旧 fake 必须补齐新增 API 响应，不能以放开查询失败路径修测试。`openswarm/lib/dispatch` 已退役：REPORT: dropped。

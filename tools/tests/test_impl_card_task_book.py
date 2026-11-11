@@ -1,3 +1,7 @@
+import sys
+from pathlib import Path as _FixturePath
+sys.path.append(str(_FixturePath(__file__).resolve().parents[1] / "lane-autodispatch"))
+from pr_guard_fixtures import no_open_prs
 """Reproduction of #1839: the task book of an impl card must carry two hard requirements.
 
 The issue asks for the task book (the text a lane receives for a card) of a *new*
@@ -49,6 +53,11 @@ Run:
     python3 -m unittest tools.tests.test_impl_card_task_book -v
 """
 
+try:
+    from tools.tests._test_tmp import short_tmp_root
+except ImportError:
+    from _test_tmp import short_tmp_root
+
 import importlib.util
 import json
 from pathlib import Path
@@ -79,8 +88,8 @@ REQUIREMENT_TWO_MARKERS = (r"(?:tick|集成|integration)", r"(?:测试|test)")
 
 
 def scratch_dir():
-    """A temporary directory inside the worktree (the repo keeps `.tmp/` ignored)."""
-    base = ROOT / ".tmp"
+    """An owned temporary directory inside the worktree."""
+    base = Path(short_tmp_root())
     base.mkdir(exist_ok=True)
     return tempfile.TemporaryDirectory(dir=str(base))
 
@@ -124,6 +133,7 @@ class FakeGitHub:
         return rows
 
     # -- the dispatcher entry points ----------------------------------------------
+    @no_open_prs
     def gh(self, args, timeout=60):
         self.calls.append(list(args))
         if args[:2] == ["issue", "create"]:
@@ -182,7 +192,8 @@ class ImplCardTaskBookTests(unittest.TestCase):
         self.tmp = scratch_dir()
         self.addCleanup(self.tmp.cleanup)
         for name, value in (("D", self.tmp.name), ("sh", MODULE.sh), ("gh", MODULE.gh), ("log", MODULE.log),
-                            ("preflight_card", lambda text: None)):  # the card lint is not under test here
+                            ("preflight_card", lambda text: None),  # the card lint is not under test here
+                            ("card_quality", lambda text: None)):  # nor the dispatch card quality
             self.addCleanup(setattr, MODULE, name, getattr(MODULE, name))
             setattr(MODULE, name, value)
         self.github = FakeGitHub()

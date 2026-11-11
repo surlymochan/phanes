@@ -3646,6 +3646,303 @@ def plan_pi(prof, st, policy, forced, notes):
     return {"backend": "pi", "model": model, "effort": None, "tier": tier}, None
 
 
+# ---------------------------------------------------------------- pi broker recovery
+#
+# The MiniMax broker is the single point of failure of a Pi host: every Pi run
+# of that host goes through its AF_UNIX socket.  A broker that died used to end
+# every Pi run of the host with a vague exec_error, and only a human restart
+# brought the host back (Refs #1714).  The executor therefore probes the socket
+# before every dispatch, restarts a dead broker with a capped backoff and
+# verifies the fresh broker with a minimal session (no run budget).  The state of
+# every host is kept, so the fleet status can report an interrupted Pi channel.
+
+PI_BROKER_DEFAULT_SOCKET = "/run/swrm-pi/broker.sock"
+PI_BROKER_DEFAULT_MODEL = "MiniMax-M3.1-Flash"
+PI_BROKER_STATE_FILE = "broker-recovery.json"
+PI_BROKER_BRAIN_FILE = "brain.log"
+PI_BROKER_RESTART_LOG = "broker-restart.log"
+PI_BROKER_UNAVAILABLE_RE = re.compile(r"pi broker (?:unavailable|channel interrupted)", re.I)
+# The broker processes stay alive on purpose: they are the broker of the host.  They are
+# kept here so the interpreter does not warn about a running child.
+_BROKER_RESTART_PROCESSES = []
+# The restart command of the deployment: it starts the broker again on the socket
+# the executor probes (bin/pi-broker-restart).
+PI_BROKER_DEFAULT_RESTART_CMD = os.path.join(os.path.dirname(os.path.realpath(__file__)), "pi-broker-restart")
+
+
+def broker_recovery_module():
+    """The broker recovery module (bin/broker_recovery.py), loaded by path."""
+    name = "swrm_broker_recovery"
+    module = sys.modules.get(name)
+    if module is None:
+        path = os.path.join(os.path.dirname(os.path.realpath(__file__)), "broker_recovery.py")
+        spec = importlib.util.spec_from_file_location(name, path)
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[name] = module
+        spec.loader.exec_module(module)
+    return module
+
+
+def pi_broker_socket_path(lane=None):
+    """The broker socket of a Pi lane: the exported variable, then the lane field, then the default.
+
+    The exported variable comes first: it is what bin/pi-isolated hands to the
+    sandbox, so it is the socket the run really talks to.
+    """
+    lane = lane or {}
+    return str(envvar("PI_BROKER_SOCKET") or lane.get("broker_socket") or PI_BROKER_DEFAULT_SOCKET)
+
+
+def pi_broker_model(lane=None, policy=None):
+    """The model the broker serves; the minimal session has to ask for exactly this one."""
+    lane = lane or {}
+    policy = policy if policy is not None else load_policy()
+    cfg = policy.get("pi") or {}
+    return str(lane.get("model") or cfg.get("default_model") or envvar("PI_ISOLATED_MODEL")
+               or PI_BROKER_DEFAULT_MODEL)
+
+
+def pi_broker_isolation_required(policy=None):
+    """True when the Pi run goes through the broker socket (the isolated launcher).
+
+    Only an isolated Pi talks to the model through the broker; a plain Pi run
+    never touches the socket and must not be blocked by a broker that is down.
+    """
+    policy = policy if policy is not None else load_policy()
+    return bool((policy.get("pi") or {}).get("require_isolation", sys.platform != "darwin"))
+
+
+def pi_broker_lane_uses_socket(lane=None, policy=None):
+    """True when this Pi lane really talks to the model through the broker socket.
+
+    A lane that names its broker socket uses it; a lane without one falls back
+    to the isolation setting, because the isolated launcher always talks to the
+    broker. Explicit binary overrides are checked against the isolated launcher.
+    A plain (unisolated) Pi lane never touches the socket and must not
+    be blocked by a broker that is down.
+    """
+    lane = lane or {}
+    if lane.get("backend") != "pi":
+        return False
+    if lane.get("broker_socket") or envvar("PI_BROKER_SOCKET"):
+        return True
+    binary = envvar("PI_RPC_BIN") or lane.get("binary")
+    if binary:
+        return os.path.basename(os.path.realpath(binary)) == "pi-isolated"
+    return pi_broker_isolation_required(policy)
+
+
+def pi_broker_number(value, default, cast):
+    """A policy number of the broker settings, falling back to the default."""
+    try:
+        return cast(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def pi_broker_settings(policy=None):
+    """The broker recovery settings of the live policy (``pi.broker``)."""
+    policy = policy if policy is not None else load_policy()
+    cfg = (policy.get("pi") or {}).get("broker") or {}
+    module = broker_recovery_module()
+    attempts = pi_broker_number(cfg.get("attempts"), module.DEFAULT_ATTEMPTS, int)
+    return {
+        "attempts": max(1, attempts),
+        "backoff_base_s": pi_broker_number(cfg.get("backoff_base_s"), module.DEFAULT_BACKOFF_BASE_S, float),
+        "backoff_cap_s": pi_broker_number(cfg.get("backoff_cap_s"), module.DEFAULT_BACKOFF_CAP_S, float),
+        # Without an explicit threshold the alert follows the number of attempts.
+        "alert_failures": max(1, pi_broker_number(cfg.get("alert_failures"), attempts, int)),
+        # Without a configured command the deployment restarts the broker with
+        # bin/pi-broker-restart, so a dead socket is not a dead host.
+        "restart_cmd": (cfg.get("restart_cmd") or envvar("PI_BROKER_RESTART_CMD")
+                        or PI_BROKER_DEFAULT_RESTART_CMD),
+        "restart_grace_s": pi_broker_number(cfg.get("restart_grace_s"), 5.0, float),
+        "socket_wait_s": pi_broker_number(cfg.get("socket_wait_s"), module.DEFAULT_SOCKET_WAIT_S, float),
+        "session_timeout_s": pi_broker_number(cfg.get("session_timeout_s"),
+                                              module.DEFAULT_SESSION_TIMEOUT_S, float),
+        "brain_log": cfg.get("brain_log") or envvar("PI_BROKER_BRAIN_LOG"),
+        "state_path": os.path.join(DATA, PI_BROKER_STATE_FILE),
+    }
+
+
+def pi_broker_state_path():
+    """The file the recovery state of every host is kept in."""
+    return pi_broker_settings()["state_path"]
+
+
+def pi_broker_brain_log_path(policy=None):
+    """Where the reconnect events go: the policy, the environment, then the executor's brain log."""
+    configured = pi_broker_settings(policy)["brain_log"]
+    return os.path.expanduser(str(configured)) if configured else os.path.join(DATA, PI_BROKER_BRAIN_FILE)
+
+
+def pi_broker_restart_argv(command):
+    """The argv of the restart command.
+
+    A command with a path is resolved against the swrm root (the default is
+    `bin/pi-broker-restart`), a command without one is looked up on the PATH.
+    The command `none` disables the restart: a host whose broker is managed by
+    a service manager wants to see the failure, not a second broker.
+    """
+    if not command:
+        return None
+    if isinstance(command, str) and command.strip().lower() == "none":
+        return None
+    argv = shlex.split(command) if isinstance(command, str) else [str(part) for part in command]
+    if not argv:
+        return None
+    head = argv[0]
+    if os.path.isabs(head):
+        return argv
+    if os.sep in head:
+        return [os.path.join(SKILL_DIR, head), *argv[1:]]
+    found = shutil.which(head)
+    if found:
+        return [found, *argv[1:]]
+    candidate = os.path.join(SKILL_DIR, head)
+    if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
+        return [candidate, *argv[1:]]
+    return argv
+
+
+def pi_broker_restart_tail(path, limit=200):
+    """The last lines of the restart log: the reason of a failed restart."""
+    try:
+        with open(path, encoding="utf-8", errors="ignore") as stream:
+            text = stream.read()
+    except OSError:
+        return ""
+    text = " ".join(line.strip() for line in text.splitlines() if line.strip())
+    return (": " + text[-limit:]) if text else ""
+
+
+def pi_broker_restart(policy=None, socket_path=None):
+    """The callable that restarts the local broker, or None when no restart is configured.
+
+    The command is started detached: a broker service that stays in the foreground
+    is the broker itself.  A command that fails right away is a failed restart.
+    The socket path travels in the environment, so bin/pi-broker-restart binds
+    the broker to the socket the executor probes.
+    """
+    settings = pi_broker_settings(policy)
+    argv = pi_broker_restart_argv(settings["restart_cmd"])
+    if not argv:
+        return None
+    grace = max(0.0, float(settings["restart_grace_s"]))
+    log_path = os.path.join(DATA, PI_BROKER_RESTART_LOG)
+
+    def restart(timeout=None):
+        env = dict(os.environ)
+        if socket_path:
+            env["OPENSWARM_PI_BROKER_SOCKET"] = str(socket_path)
+            env["PI_BROKER_SOCKET"] = str(socket_path)
+        try:
+            os.makedirs(DATA, exist_ok=True)
+            log = open(log_path, "wb")
+        except OSError:
+            log = subprocess.DEVNULL
+        try:
+            proc = subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                                    stderr=log, start_new_session=True, env=env)
+        finally:
+            if log is not subprocess.DEVNULL:
+                log.close()
+        try:
+            code = proc.wait(timeout=min(grace, timeout) if timeout is not None else grace)
+        except subprocess.TimeoutExpired:
+            # The command is still running: it is the broker, not a launcher.
+            _BROKER_RESTART_PROCESSES.append(proc)
+            return
+        if code:
+            raise RuntimeError("broker restart failed (rc=%s)%s" % (code, pi_broker_restart_tail(log_path)))
+
+    return restart
+
+
+def pi_broker_minimal_session(socket_path, model, timeout=None):
+    """The budget-free minimal session: one tiny request over the broker socket.
+
+    The session always has a timeout: a broker that accepts the connection but
+    never answers must not block the dispatch forever.
+    """
+    limit = min(10.0, max(0.001, float(timeout))) if timeout else 10.0
+
+    def validate(timeout=None):
+        remaining = min(limit, timeout) if timeout is not None else limit
+        return broker_recovery_module().minimal_session(socket_path, model=model, timeout=remaining)
+
+    return validate
+
+
+def pi_broker_ensure_ready(lane=None, policy=None, host=None):
+    """Make sure the Pi channel of this host can be used, recovering a dead broker.
+
+    The probe is light (one connect).  A dead socket is restarted with a capped
+    exponential backoff and the fresh broker is verified with a minimal session;
+    a channel that stays broken keeps the host interrupted, and the fleet status
+    reports it.
+    """
+    policy = policy if policy is not None else load_policy()
+    settings = pi_broker_settings(policy)
+    module = broker_recovery_module()
+    socket_path = pi_broker_socket_path(lane)
+    recovery = module.BrokerRecovery(
+        socket_path,
+        host=host or socket.gethostname(),
+        restart=pi_broker_restart(policy, socket_path),
+        validate=pi_broker_minimal_session(socket_path, pi_broker_model(lane, policy),
+                                            settings["session_timeout_s"]),
+        attempts=settings["attempts"],
+        backoff_base_s=settings["backoff_base_s"],
+        backoff_cap_s=settings["backoff_cap_s"],
+        alert_failures=settings["alert_failures"],
+        socket_wait_s=settings["socket_wait_s"],
+        state_path=settings["state_path"],
+        brain_log=pi_broker_brain_log_path(policy),
+    )
+    return recovery.ensure_ready()
+
+
+def pi_broker_record(host=None):
+    """The recovery record of this host, as the fleet status reads it."""
+    module = broker_recovery_module()
+    return module.host_state(module.read_state(pi_broker_state_path()), host or socket.gethostname())
+
+
+def pi_broker_channels(lanes=None, policy=None):
+    """The broker socket of every Pi lane of this host that really uses one."""
+    return {lane["name"]: pi_broker_socket_path(lane) for lane in (lanes or [])
+            if isinstance(lane, dict) and lane.get("name")
+            and pi_broker_lane_uses_socket(lane, policy)}
+
+
+def pi_broker_channel_status(lanes=None):
+    """The Pi broker channel of this host: does the socket answer, is the channel interrupted?
+
+    The status is what the fleet status turns into an alert: a host whose Pi
+    channel is interrupted keeps its other backends, so this is a warning and
+    never a pause (Refs #1714).
+    """
+    channels = pi_broker_channels(lanes)
+    if not channels:
+        return None
+    module = broker_recovery_module()
+    record = pi_broker_record()
+    problems = []
+    policy = load_policy()
+    for lane in lanes:
+        path = channels.get(lane.get("name"))
+        if path and not module.minimal_session(path, model=pi_broker_model(lane, policy),
+                                               timeout=pi_broker_settings(policy)["session_timeout_s"])[0]:
+            problems.append("broker socket %s does not answer a minimal session" % path)
+    if record.get("interrupted"):
+        problems.append(record.get("detail") or record.get("result") or
+                        "the last recovery never validated a session")
+    return {"ok": not problems, "interrupted": bool(problems), "sockets": sorted(set(channels.values())),
+            "failures": record.get("failures") or 0, "alert": record.get("alert"),
+            "detail": "; ".join(problems) if problems else "broker socket answers"}
+
+
 def minimax_key_from_pi():
     """Read Pi's MiniMax credential without exposing it in command arguments."""
     # Resolved at call time, honouring $HOME first: Windows home resolution
@@ -3953,6 +4250,13 @@ def set_status(rdir, **kw):
     with open(os.path.join(rdir, "status.lock"), "a") as lock:
         _flock(lock, LOCK_EX)
         s = jload(f"{rdir}/status.json", {}) or {}
+        if "executor_pid" in kw:
+            # A restarted executor must never inherit the previous group's proof.
+            s.pop("executor_pgid", None)
+            try:
+                kw["executor_pgid"] = os.getpgid(kw["executor_pid"])
+            except (OSError, TypeError, ValueError):
+                pass
         s.update(kw)
         s["updated"] = NOW()
         jsave(f"{rdir}/status.json", s)
@@ -4323,6 +4627,8 @@ def executor_error_class(rc, final, err_text, backend=None):
         return "auth"
     if rc == 75 or (RATE_LIMIT_RE.search(err_text or "") and (rc != 0 or final is None)):
         return "rate_limit"
+    if rc != 0 and PI_BROKER_UNAVAILABLE_RE.search(err_text or ""):
+        return "broker_unavailable"
     if rc != 0 or final is None:
         return "exec_error"
     return None
@@ -5322,6 +5628,16 @@ def exec_pi(d, st, prompt, wd, rdir, timeout, evp):
         open(evp, "w").close()
         return 1, None, {"usage": {}, "resume_supported": False}, "isolated Pi cannot resume a session"
     cfg = load_policy().get("pi") or {}
+    if isolated:
+        # The isolated Pi talks to the model through the broker socket: probe it first and
+        # recover a dead broker instead of ending the run with a vague exec_error.
+        broker = pi_broker_ensure_ready({"model": d.get("model")})
+        if not broker.get("ok"):
+            detail = "pi broker unavailable: %s" % (broker.get("detail") or broker.get("result"),)
+            open(evp, "w").close()
+            with open(evp + ".err", "w") as f:
+                f.write(detail + "\n")
+            return 1, None, {"usage": {k: 0 for k in PI_USAGE_KEYS}, "broker": broker}, detail
     sessions = os.path.abspath(os.path.join(rdir, "pi-sessions"))
     os.makedirs(sessions, exist_ok=True)
     cmd = [binary, "-p", "--mode", "json", "--session-dir", sessions]
@@ -8020,6 +8336,11 @@ class LaneChild:
         self.events = queue.Queue()
         self.backlog = []
         self.write_lock = threading.Lock()
+        self.health_waiters = {}
+        self.health_lock = threading.Lock()
+        self.health_stop = threading.Event()
+        self.health_monitor = None
+        self.health_restart_reason = None
         backend = lane["backend"]
         if backend == "codex":
             binary = envvar("CODEX_APP_SERVER_BIN") or lane.get("binary") or find_codex(policy)[0]
@@ -8063,6 +8384,12 @@ class LaneChild:
             cmd = [binary, "--sandbox", "enabled", "acp"]
         child_env = dict(self.env) if getattr(self, "env", None) else os.environ.copy()
         self.secret = None
+        if backend == "pi" and pi_broker_lane_uses_socket(lane, policy):
+            broker = pi_broker_ensure_ready(lane, policy)
+            if not broker.get("ok"):
+                raise RuntimeError("pi broker unavailable: %s" %
+                                   (broker.get("detail") or broker.get("result"),))
+            child_env["OPENSWARM_PI_BROKER_SOCKET"] = pi_broker_socket_path(lane)
         if backend == "hermes":
             cfg = policy.get("hermes") or {}
             self.secret = minimax_key_from_pi()
@@ -8111,7 +8438,17 @@ class LaneChild:
         try:
             for line in self.proc.stdout:
                 try:
-                    self.events.put(json.loads(line.replace(self.secret, "[REDACTED]") if self.secret else line))
+                    event = json.loads(line.replace(self.secret, "[REDACTED]") if self.secret else line)
+                    req_id = event.get("id")
+                    if isinstance(req_id, str) and req_id.startswith("health-"):
+                        # Health RPCs have their own consumer, including during turn setup.
+                        # Discard late replies after a timed-out probe.
+                        with self.health_lock:
+                            waiter = self.health_waiters.get(req_id)
+                            if waiter is not None:
+                                waiter.put(event)
+                    else:
+                        self.events.put(event)
                 except ValueError:
                     continue
         finally:
@@ -8125,9 +8462,18 @@ class LaneChild:
         return self.proc.pid
 
     def send(self, obj):
-        with self.write_lock:
-            self.proc.stdin.write(json.dumps(obj, ensure_ascii=False) + "\n")
-            self.proc.stdin.flush()
+        req_id = obj.get("id")
+        if isinstance(req_id, str) and req_id.startswith("health-"):
+            with self.health_lock:
+                self.health_waiters[req_id] = queue.Queue()
+        try:
+            with self.write_lock:
+                self.proc.stdin.write(json.dumps(obj, ensure_ascii=False) + "\n")
+                self.proc.stdin.flush()
+        except (OSError, ValueError):
+            with self.health_lock:
+                self.health_waiters.pop(req_id, None)
+            raise
 
     def next_event(self, timeout=0):
         if self.backlog:
@@ -8138,6 +8484,20 @@ class LaneChild:
             return False
 
     def wait_response(self, req_id, timeout=30, event_file=None):
+        if isinstance(req_id, str) and req_id.startswith("health-"):
+            end = time.monotonic() + timeout
+            try:
+                while time.monotonic() < end:
+                    try:
+                        reply = self.health_waiters[req_id].get(timeout=max(0, min(0.2, end - time.monotonic())))
+                        return reply.get("result") or reply
+                    except queue.Empty:
+                        if not self.alive():
+                            raise RuntimeError("executor exited before health RPC response")
+                raise RuntimeError("executor health RPC response timed out")
+            finally:
+                with self.health_lock:
+                    self.health_waiters.pop(req_id, None)
         end = NOW() + timeout
         deferred = []
         try:
@@ -8170,12 +8530,15 @@ class LaneChild:
     def close(self):
         if self.proc is None:
             return
+        self.health_stop.set()
         if self.alive():
             kill_tree(self.proc.pid, grace=1)
         try:
             self.proc.wait(timeout=3)
         except subprocess.TimeoutExpired:
             pass
+        if self.health_monitor and self.health_monitor is not threading.current_thread():
+            self.health_monitor.join()
         for stream in (self.proc.stdin, self.proc.stdout):
             try:
                 stream.close()
@@ -8424,8 +8787,237 @@ def lane_refresh_codex_child_if_stale(lane, child, policy, event_file):
     except Exception:
         pass
     new_child = lane_child(configured, wt, policy)
-    lane_write_state(lane["name"], child_pid=new_child.pid, last_error=None)
+    lane_write_state(lane["name"], child_pid=new_child.pid, last_error=None,
+                     server_alive=None, server_started=NOW(), server_probe_at=0,
+                     server_probe_failures=0)
+    lane_start_codex_health_monitor(configured, new_child, policy)
     return new_child, True
+
+
+def lane_codex_health_alert(lane, policy, reason):
+    alert = {"type": "codex_app_server_health_alert", "lane": lane["name"],
+             "state": "paused", "error": reason, "time": NOW()}
+    with open(os.path.join(lane_root(lane["name"]), "brain.jsonl"), "a") as f:
+        f.write(json.dumps(alert, ensure_ascii=False) + "\n")
+    print(f"ALERT lane {lane['name']} paused: {reason}", file=sys.stderr, flush=True)
+
+
+def lane_start_codex_health_monitor(lane, child, policy):
+    """Monitor independently of task execution and its blocking RPC waits."""
+    if lane.get("backend") != "codex":
+        return
+    if (jload(lane_state_path(lane["name"]), {}) or {}).get("server_health_alert"):
+        child.health_restart_reason = "previous server validation failed"
+        lane_write_state(lane["name"], state="recovering")
+
+    def monitor():
+        while not child.health_stop.is_set() and child.alive():
+            lane_codex_health_probe(lane, child, policy, restart=False)
+            if child.health_restart_reason:
+                break
+            child.health_stop.wait(0.05)
+        if not child.alive():
+            lane_write_state(lane["name"], server_alive=False)
+
+    child.health_monitor = threading.Thread(target=monitor, daemon=True)
+    child.health_monitor.start()
+
+
+def lane_codex_health_probe(lane, child, policy, restart=True):
+    """Probe a Codex server; the supervisor owns restart and smoke validation."""
+    if lane.get("backend") != "codex" or not child:
+        return child
+    cfg = policy.get("lane_health_probe") or {}
+    try:
+        interval = max(0.05, float(cfg.get("interval_seconds", 30)))
+        timeout = max(0.05, float(cfg.get("timeout_seconds", 5)))
+        threshold = max(1, int(cfg.get("failure_threshold", 3)))
+        smoke_timeout = max(0.1, float(cfg.get("smoke_test_timeout_seconds", 30)))
+    except (TypeError, ValueError):
+        interval, timeout, threshold, smoke_timeout = 30, 5, 3, 30
+    state = jload(lane_state_path(lane["name"]), {}) or {}
+    now = NOW()
+    reason = getattr(child, "health_restart_reason", None)
+    reason = reason if isinstance(reason, str) else None
+    if not reason and not child.alive():
+        lane_write_state(lane["name"], server_alive=False)
+        return child
+    if not reason and now < state.get("server_probe_at", 0):
+        return child
+    try:
+        if reason:
+            raise RuntimeError(reason)
+        lane_write_state(lane["name"], server_probe_at=now + interval)
+        req_id = f"health-{time.time_ns()}"
+        child.send({"jsonrpc": "2.0", "id": req_id, "method": "model/list",
+                    "params": {"limit": 1}})
+        child.wait_response(req_id, timeout)
+        # Retry the same unreleased session before creating another one.
+        pending = getattr(child, "health_release_pending", None)
+        if not isinstance(pending, str):
+            pending = None
+        if pending:
+            try:
+                release_id = f"health-release-{time.time_ns()}"
+                child.send({"jsonrpc": "2.0", "id": release_id,
+                            "method": "thread/unsubscribe", "params": {"threadId": pending}})
+                released = child.wait_response(release_id, min(timeout, 1))
+                if released.get("error"):
+                    raise RuntimeError(short(released["error"], 300))
+            except Exception as error:
+                failures = int(state.get("server_release_failures", 0)) + 1
+                print(f"lane {lane['name']} health probe thread/unsubscribe failed: "
+                      f"{short(error, 300)}", file=sys.stderr, flush=True)
+                lane_write_state(lane["name"], server_alive=False,
+                                 server_probe_error="session release failing",
+                                 server_release_failures=failures)
+                return child
+            child.health_release_pending = None
+            lane_write_state(lane["name"], server_alive=True, server_last_success=NOW(),
+                             server_probe_failures=0, server_probe_error=None,
+                             server_release_failures=0)
+            return child
+        # A responsive model/list alone misses CX9: the live server could no
+        # longer create sessions. Require a fresh ephemeral thread as well.
+        thread_id = None
+        release_failed = False
+        try:
+            req_id = f"health-session-{time.time_ns()}"
+            child.send({"jsonrpc": "2.0", "id": req_id, "method": "thread/start",
+                        "params": {"cwd": child.cwd, "model": lane["model"],
+                                   "ephemeral": True, "approvalPolicy": "never",
+                                   "sandbox": "read-only"}})
+            thread = child.wait_response(req_id, timeout)
+            thread_id = (thread.get("thread") or {}).get("id")
+            if thread.get("error"):
+                raise RuntimeError(f"probe thread/start failed: {short(thread['error'], 300)}")
+            if not thread_id:
+                raise RuntimeError("probe thread/start did not create a thread")
+        finally:
+            if thread_id:
+                # Unsubscribe unloads this idle thread without requiring a rollout
+                # (ephemeral threads cannot reliably be archived).
+                try:
+                    release_id = f"health-release-{time.time_ns()}"
+                    child.send({"jsonrpc": "2.0", "id": release_id,
+                                "method": "thread/unsubscribe",
+                                "params": {"threadId": thread_id}})
+                    released = child.wait_response(release_id, min(timeout, 1))
+                    if released.get("error"):
+                        raise RuntimeError(short(released["error"], 300))
+                    child.health_release_pending = None
+                    lane_write_state(lane["name"], server_release_failures=0)
+                except Exception as error:
+                    child.health_release_pending = thread_id
+                    release_failed = True
+                    lane_write_state(lane["name"], server_alive=False,
+                                     server_probe_failures=0,
+                                     server_probe_error="session release failing",
+                                     server_release_failures=1)
+                    print(f"lane {lane['name']} health probe thread/unsubscribe failed: "
+                          f"{short(error, 300)}", file=sys.stderr, flush=True)
+        if not release_failed:
+            lane_write_state(lane["name"], server_alive=True, server_last_success=NOW(),
+                             server_probe_failures=0, server_probe_error=None)
+        return child
+    except Exception as error:
+        if not restart and child.health_stop.is_set():
+            return child
+        reason = short(error, 300)
+        failures = int(state.get("server_probe_failures", 0)) + (0 if child.health_restart_reason else 1)
+        lane_write_state(lane["name"], server_alive=False, server_probe_failures=failures,
+                         server_probe_error=reason)
+        if failures < threshold and not child.health_restart_reason:
+            return child
+    if not restart:
+        child.health_restart_reason = reason
+        lane_write_state(lane["name"], state="recovering")
+        # Terminate the process to unblock task waits. The supervisor owns
+        # stream cleanup, avoiding concurrent close() calls from two threads.
+        child.health_stop.set()
+        if child.alive():
+            kill_tree(child.pid, grace=1)
+        return child
+    started = state.get("server_started", state.get("started", now))
+    runtime = max(0, now - started) if isinstance(started, (int, float)) else None
+    try:
+        child.close()
+    except Exception:
+        pass
+    lane_write_state(lane["name"], state="recovering", server_alive=False,
+                     server_restart_count=int(state.get("server_restart_count", 0)) + 1)
+    try:
+        replacement = lane_child(lane, os.path.join(lane_root(lane["name"]), "wt"), policy)
+        validated = False
+        validation_error = None
+        try:
+            stamp = time.time_ns()
+            deadline = time.monotonic() + smoke_timeout
+            replacement.send({"jsonrpc": "2.0", "id": f"health-thread-{stamp}",
+                              "method": "thread/start", "params": {"cwd": replacement.cwd,
+                              "model": lane["model"], "ephemeral": True,
+                              "approvalPolicy": "never", "sandbox": "read-only"}})
+            thread = replacement.wait_response(f"health-thread-{stamp}", smoke_timeout)
+            if thread.get("error"):
+                raise RuntimeError(f"smoke thread/start failed: {short(thread['error'], 300)}")
+            thread_id = (thread.get("thread") or {}).get("id")
+            if not thread_id:
+                raise RuntimeError("smoke validation did not create a thread")
+            replacement.send({"jsonrpc": "2.0", "id": f"health-turn-{stamp}",
+                              "method": "turn/start", "params": {"threadId": thread_id,
+                              "input": [{"type": "text", "text": "Reply with OK."}]}})
+            turn = replacement.wait_response(f"health-turn-{stamp}", max(0, deadline - time.monotonic()))
+            if turn.get("error"):
+                raise RuntimeError(f"smoke turn/start failed: {short(turn['error'], 300)}")
+            turn_id = (turn.get("turn") or {}).get("id")
+            if not turn_id:
+                raise RuntimeError("smoke validation did not create a turn")
+            while time.monotonic() < deadline:
+                event = replacement.next_event(min(0.2, deadline - time.monotonic()))
+                if event and (event.get("params") or {}).get("threadId") != thread_id:
+                    continue
+                if event and ((event.get("params") or {}).get("turn") or {}).get("id") != turn_id:
+                    continue
+                if event is None:
+                    raise RuntimeError("smoke validation server closed")
+                if event and event.get("method") == "turn/completed":
+                    validated = (event.get("params", {}).get("turn", {}).get("status") == "completed")
+                    break
+                if event and event.get("method") == "turn/failed":
+                    raise RuntimeError(short(event.get("params", {}).get("error"), 300))
+            if not validated:
+                raise RuntimeError("smoke validation timed out or did not complete")
+        except Exception as e:
+            validation_error = short(e, 300)
+        restart_count = int(state.get("server_restart_count", 0)) + 1
+        lane_write_state(lane["name"], child_pid=replacement.pid, server_restart_count=restart_count,
+                         server_started=NOW(), server_alive=validated, server_last_success=NOW() if validated else state.get("server_last_success"),
+                         server_validation_passed=validated, server_health_alert=None if validated else validation_error,
+                         server_probe_failures=0 if validated else threshold,
+                         state="idle" if validated else "paused",
+                         last_error=None if validated else f"app-server smoke validation failed: {validation_error}")
+        brain = os.path.join(lane_root(lane["name"]), "brain.jsonl")
+        with open(brain, "a") as f:
+            f.write(json.dumps({"type": "codex_app_server_restarted", "lane": lane["name"],
+                                "runtime_seconds": runtime, "reason": reason,
+                                "validation_passed": validated, "validation_error": validation_error},
+                               ensure_ascii=False) + "\n")
+        if not validated:
+            replacement.close()
+            lane_codex_health_alert(lane, policy, validation_error)
+            return None
+        lane_start_codex_health_monitor(lane, replacement, policy)
+        return replacement
+    except Exception as e:
+        lane_write_state(lane["name"], state="paused", child_pid=None, server_alive=False,
+                         server_validation_passed=False, server_health_alert=short(e, 300),
+                         last_error=f"app-server restart failed: {short(e, 300)}")
+        with open(os.path.join(lane_root(lane["name"]), "brain.jsonl"), "a") as stream:
+            stream.write(json.dumps({"type": "codex_app_server_restart_failed", "lane": lane["name"],
+                                     "runtime_seconds": runtime, "reason": reason,
+                                     "error": short(e, 300)}, ensure_ascii=False) + "\n")
+        lane_codex_health_alert(lane, policy, short(e, 300))
+        return None
 
 
 def lane_record_event(path, event):
@@ -8470,7 +9062,8 @@ def lane_control_messages(server, lane, current, child, turn, pending):
                 answer["state"] = jload(lane_state_path(lane["name"]), {})
             elif op == "assign":
                 state = jload(lane_state_path(lane["name"]), {}) or {}
-                if state.get("state") != "idle" or current.get("run_id"):
+                if (state.get("state") != "idle" or current.get("run_id")
+                        or (child and isinstance(getattr(child, "health_restart_reason", None), str))):
                     answer = {"ok": False, "error": f"lane {lane['name']} is busy ({state.get('state')})"}
                 else:
                     rid = req.get("run_id")
@@ -8878,6 +9471,15 @@ def lane_run_turn(lane, child, spec, prompt, ws, rdir, server, turn, pending, at
                workspace=ws["path"], events=event_file, attempt=attempt, deadline=deadline,
                executor_pid=child.pid)
     lane_record_event(event_file, {"type": "lane_start", "lane": lane["name"]})
+    if lane["backend"] == "pi" and pi_broker_lane_uses_socket(lane):
+        # The Pi lane talks to the model through the broker socket: probe it before every
+        # dispatch and recover a dead broker.  A channel that stays broken ends the turn
+        # with its own error class instead of a vague exec_error (Refs #1714).
+        broker = pi_broker_ensure_ready(lane)
+        if not broker.get("ok"):
+            detail = "pi broker unavailable: %s" % (broker.get("detail") or broker.get("result"),)
+            lane_record_event(event_file, {"type": "error", "error": detail})
+            return None, {}, "broker_unavailable", 1, event_file, detail
     if continuation:
         lane_continue_turn(lane, child, prompt, event_file, turn)
     else:
@@ -9712,7 +10314,12 @@ def cmd_lane_serve(lane, policy):
     lane_write_state(name, name=name, backend=lane["backend"], model=lane["model"], effort=lane.get("effort"),
                      state="starting", supervisor_pid=os.getpid(), child_pid=None,
                      current_run=recovered["run_id"] if recovered else None,
-                     started=started, last_error=None, resolved_model=None)
+                     started=started, server_started=started, server_alive=None,
+                     server_last_success=previous_state.get("server_last_success"),
+                     server_restart_count=previous_state.get("server_restart_count", 0),
+                     server_probe_failures=0, server_probe_at=0,
+                     server_validation_passed=None, server_health_alert=previous_state.get("server_health_alert"),
+                     last_error=None, resolved_model=None)
     quota_state = jload(lane_state_path(name), {}) or {}
     if lane["backend"] == "agy" and quota_state.get("quota_model") == lane["model"]:
         due = quota_state.get("quota_until")
@@ -9759,12 +10366,20 @@ def cmd_lane_serve(lane, policy):
                 if os.path.isdir(os.path.dirname(event_file)):
                     lane_recovery_event(lane, {"run_id": rid}, event_file, recovery_error)
                     set_status(os.path.dirname(event_file), recovery_abandoned=recovery_error)
+        lane_start_codex_health_monitor(lane, child, policy)
     except Exception as e:
         traceback.print_exc()
         lane_write_state(name, state="crashed", last_error=short(e, 500), child_pid=None)
         next_start = NOW() + backoff
     shutdown = False
     while not shutdown:
+        if child and isinstance(getattr(child, "health_restart_reason", None), str):
+            # An active run has already unwound on child exit. A recovered queued
+            # assignment remains owned by main's recovery path until validation.
+            child = lane_codex_health_probe(lane, child, policy)
+            if child and current.get("run_id"):
+                lane_write_state(name, state="busy", current_run=current["run_id"], turn_state="queued")
+            continue
         if child and not child.alive():
             if current.get("run_id"):
                 spec = current
@@ -9790,15 +10405,19 @@ def cmd_lane_serve(lane, policy):
                              last_error="resident executor process exited")
             next_start = NOW() + backoff
             backoff = min(backoff * 2, 60)
-        if child is None and NOW() >= next_start:
+        if (child is None and NOW() >= next_start
+                and (jload(lane_state_path(name), {}) or {}).get("state") != "paused"):
             try:
                 wt = os.path.join(lane_root(name), "wt")
                 child = lane_child(lane, wt, policy)
                 backoff = 1
+                lane_write_state(name, server_alive=None, server_started=NOW(),
+                                 server_probe_at=0, server_probe_failures=0)
                 lane_write_state(name, state="busy" if current.get("run_id") else "idle",
                                  child_pid=child.pid, current_run=current.get("run_id"), last_error=None,
                                  turn_state="queued" if current.get("run_id") else None,
                                  **({} if current.get("run_id") else {"concurrency_keys": []}))
+                lane_start_codex_health_monitor(lane, child, policy)
             except Exception as e:
                 traceback.print_exc()
                 lane_write_state(name, state="crashed", child_pid=None, last_error=short(e, 500))
@@ -9832,7 +10451,7 @@ def cmd_lane_serve(lane, policy):
                 down_after = bool(spec.get("down_requested"))
                 if outcome.get("state") != "queued":
                     current.clear()
-            if child and child.alive():
+            if child and child.alive() and not getattr(child, "health_restart_reason", None):
                 lane_write_state(name, state="idle", child_pid=child.pid, current_run=None, last_error=None)
             else:
                 lane_write_state(name, state="crashed", child_pid=None, current_run=None,
@@ -9840,7 +10459,7 @@ def cmd_lane_serve(lane, policy):
             if down_after:
                 shutdown = True
             continue
-        if child:
+        if child and child.alive() and not getattr(child, "health_restart_reason", None):
                 lane_write_state(name, state="idle", child_pid=child.pid, current_run=None,
                                  turn_state=None, concurrency_keys=[])
         if child and lane["backend"] == "agy":
@@ -9850,7 +10469,8 @@ def cmd_lane_serve(lane, policy):
                 lane_write_state(name, quota_until=NOW() + 3600)
                 if agy_quota_available(lane, child):
                     lane_write_state(name, quota_model=None, quota_until=None)
-        timeout = max(0, min(0.5, next_start - NOW())) if child is None else 0.5
+        paused = (jload(lane_state_path(name), {}) or {}).get("state") == "paused"
+        timeout = max(0, min(0.5, next_start - NOW())) if child is None and not paused else 0.5
         try:
             ready, _, _ = select.select([server], [], [], timeout)
         except Exception:
@@ -9865,7 +10485,7 @@ def cmd_lane_serve(lane, policy):
         child.close()
     cleanup_executor_tmp(os.path.join(lane_root(name), "wt"))
     lane_write_state(name, state="idle", child_pid=None, supervisor_pid=None, current_run=None,
-                     turn_state=None, concurrency_keys=[], stopped=NOW(), last_error=None)
+                     turn_state=None, concurrency_keys=[], stopped=NOW(), last_error=None, server_alive=False)
     server.close()
     try:
         os.unlink(lane_socket_path(name))
@@ -10009,6 +10629,12 @@ def lane_status_rows():
                      "current_run": state.get("current_run"),
                      "last_activity": state.get("last_activity"),
                      "stale_since": state.get("stale_since"),
+                     "server_alive": (state.get("server_alive") if pid_alive(pid) and
+                                      pid_alive(state.get("child_pid")) else False),
+                     "server_last_success": state.get("server_last_success"),
+                     "server_restart_count": state.get("server_restart_count", 0),
+                     "server_validation_passed": state.get("server_validation_passed"),
+                     "health_alert": state.get("server_health_alert"),
                      "run_state": state.get("turn_state"),
                      "provider": execution_provider(lane["backend"], policy=load_policy(), lane=lane),
                      "uptime_seconds": round(NOW() - state["started"], 1) if state.get("started") else None,
@@ -10833,13 +11459,26 @@ def transfer_ref(source, source_repo, rev, target, target_repo, destination=""):
                                            timeout=300, input=bundle), "bundle import").decode().strip()
 
 
+def fleet_pi_channel_alert(pi_channel):
+    """The alert of a host whose Pi channel is interrupted (None when the channel is fine).
+
+    A broken Pi channel is a warning, not a pause: the other backends of the host
+    keep working (Refs #1714).
+    """
+    if not pi_channel or pi_channel.get("ok"):
+        return None
+    return "pi channel interrupted: %s" % (pi_channel.get("detail") or "the broker does not answer",)
+
+
 def fleet_snapshot():
     capacity_only = os.environ.get("OPENSWARM_FLEET_CAPACITY_ONLY") == "1"
     config_error = None
+    lanes_file = envvar("LANES_FILE", os.path.join(DATA, "lanes.json"))
     try:
-        lanes = lane_status_rows() if os.path.exists(envvar("LANES_FILE", os.path.join(DATA, "lanes.json"))) else []
+        lanes = lane_status_rows() if os.path.exists(lanes_file) else []
+        lane_config_rows = lane_config() if os.path.exists(lanes_file) else []
     except ValueError as error:
-        lanes, config_error = [], str(error)
+        lanes, lane_config_rows, config_error = [], [], str(error)
     runs = []
     for path in sorted(glob.glob(os.path.join(RUNS, "*", "status.json"))):
         if capacity_only and (jload(path, {}) or {}).get("state") in ("finished", "unroutable", "dry-run"):
@@ -10851,8 +11490,12 @@ def fleet_snapshot():
     providers = {backend: execution_provider(backend, policy=policy)
                  for backend in ("codex", "cursor", "agy", "pi", "ocgo", "deepseek")}
     backends = {} if capacity_only else {"agy": agy_status(policy)}
+    # The Pi broker channel of this host: the fleet status turns a broken channel
+    # into an alert for the host (Refs #1714).
+    pi_channel = None if capacity_only else pi_broker_channel_status(lane_config_rows)
     return {"lanes": lanes, "active_runs": runs, "providers": providers,
-            "backends": backends, "lane_config_valid": config_error is None,
+            "backends": backends, "pi_channel": pi_channel,
+            "lane_config_valid": config_error is None,
             "lane_config_error": config_error}
 
 
@@ -11435,6 +12078,10 @@ def cmd_fleet(args):
             row["status"] = "no lanes"
         else:
             row["status"] = "reachable"
+        pi_channel = row.get("pi_channel") or {}
+        alert = fleet_pi_channel_alert(pi_channel)
+        if alert:
+            row["alerts"] = [alert]
         rows.append(row)
     probe = lanes_health_probe()
     control_plane = lanes_health_report(probe)
@@ -11458,6 +12105,8 @@ def cmd_fleet(args):
                 print(f"  {lane['name']} {lane['state']} {lane.get('model') or '-'} run={lane.get('current_run') or '-'}")
             for run in row["active_runs"]:
                 print(f"  run {run['id']} {run['state']}")
+            for alert in row.get("alerts") or []:
+                print(f"  alert: {alert}")
 
 
 def safe_id(value):

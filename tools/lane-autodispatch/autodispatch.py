@@ -1396,7 +1396,142 @@ def save_state(s):
     with open(tmp, "w") as stream: json.dump(s, stream, indent=1, ensure_ascii=False)
     os.replace(tmp, f"{D}/state.json")
 def gh(args, timeout=60):
-    return sh(["gh"] + args + ["-R", REPO], timeout=timeout)
+    return sh(["gh"] + args + ([] if args[0] == "api" else ["-R", REPO]), timeout=timeout)
+
+# Refs #1772: port the old paginated lookup, without its stale map cache.
+def open_pr_for_issue(n, runner=None, repo=None):
+    """Return an OPEN PR number, or None; every failed, truncated or malformed read raises."""
+    runner = runner or gh; repo = repo or REPO
+    owner, name = repo.split("/")
+    cursor, seen = "", set()
+    def need(condition, what):
+        if not condition: raise RuntimeError(f"open PR lookup incomplete: {what}")
+    while True:
+        query = ('query{repository(owner:%s,name:%s){pullRequests(states:OPEN,first:100%s){'
+                 'nodes{number state body headRefName closingIssuesReferences(first:100){nodes{number} pageInfo{hasNextPage}}}'
+                 'pageInfo{hasNextPage endCursor}}}}' %
+                 (json.dumps(owner), json.dumps(name), ',after:' + json.dumps(cursor) if cursor else ''))
+        # api does not accept -R; the injected runner follows the normal gh contract.
+        rc, out, err = runner(["api", "graphql", "-f", "query=" + query])
+        if rc: raise RuntimeError("open PR lookup failed")
+        data = json.loads(out)
+        need(isinstance(data, dict), "response")
+        if data.get("errors"): raise RuntimeError("open PR GraphQL errors")
+        repository = (data.get("data") or {}).get("repository") if isinstance(data.get("data"), dict) else None
+        need(isinstance(repository, dict), "repository")
+        connection = repository.get("pullRequests")
+        need(isinstance(connection, dict), "pullRequests")
+        nodes, page = connection.get("nodes"), connection.get("pageInfo")
+        need(isinstance(nodes, list) and isinstance(page, dict) and isinstance(page.get("hasNextPage"), bool), "page")
+        for pr in nodes:
+            need(isinstance(pr, dict) and isinstance(pr.get("number"), int), "pull request")
+            need(isinstance(pr.get("state"), str) and pr["state"], "PR state")
+            if pr["state"] != "OPEN": continue
+            refs = pr.get("closingIssuesReferences")
+            need(isinstance(refs, dict) and isinstance(refs.get("nodes"), list)
+                 and isinstance(refs.get("pageInfo"), dict) and refs["pageInfo"].get("hasNextPage") is False,
+                 "closing references of PR #%s are missing or truncated" % pr["number"])
+            need(all(isinstance(row, dict) and isinstance(row.get("number"), int) for row in refs["nodes"]), "closing reference")
+            linked = {row["number"] for row in refs["nodes"]}
+            linked.update(int(m.group(1)) for m in CLOSING_RE.finditer(pr.get("body") or ""))
+            linked.update(int(x) for x in re.findall(r"(?:^|[/\-])issue([1-9]\d*)(?=[-/_]|$)", pr.get("headRefName") or ""))
+            if int(n) in linked: return pr["number"]
+        if not page["hasNextPage"]: return None
+        cursor = page.get("endCursor")
+        need(isinstance(cursor, str) and cursor and cursor not in seen, "pagination did not advance")
+        seen.add(cursor)
+
+def pr_allows_requeue(n):
+    pr = open_pr_for_issue(n)
+    if pr is None: return True
+    log(f"skip #{n}: open PR #{pr} already delivers it; not dispatched/requeued", brain=False)
+    if not ensure_delivery_state(n): raise RuntimeError("lane-pr repair unverified")
+    return False
+
+def clear_workflow_label(n, label):
+    rc, _, _ = gh(["issue", "edit", str(n), "--remove-label", label])
+    status, detail = read_issue(n)
+    if rc or status == "error" or label in label_names(detail):
+        raise RuntimeError(f"{label} removal unverified")
+
+def guarded_requeue(n):
+    """Fail closed before writes; undo and verify uncertain writes afterwards."""
+    try:
+        if not pr_allows_requeue(n): return True
+        rc, _, _ = gh(["issue", "edit", str(n), "--remove-label", "in-progress",
+                       "--remove-label", "lane-failed", "--add-label", "lane-ready"])
+        if rc: return False
+        try: pr_allows_requeue(n)
+        except Exception:
+            clear_workflow_label(n, "lane-ready")
+            raise
+        return True
+    except Exception as exc:
+        log(f"WARNING #{n} requeue unverified ({exc}); retry next tick", brain=True)
+        return False
+
+def run_stopped(probe, run):
+    """The run is verifiably over in the real REMOTE_STATUS protocol: a result exists, or the lane is idle
+    and the runner and executor are explicitly reported dead. An error, an unknown or a missing liveness field is not proof."""
+    if not isinstance(probe, dict) or "error" in probe: return False
+    if isinstance(probe.get("run"), dict): return True
+    return (probe.get("lane") == "idle" and probe.get("current_run") != run
+            and probe.get("runner_alive") is False and probe.get("executor_alive") is False)
+
+def cancel_guarded_dispatch(lane, cfg, st):
+    """Keep the lane claimed until abort and fresh remote state confirm it stopped."""
+    try:
+        probe = remote(lane, cfg, st["run"])
+        if run_stopped(probe, st["run"]):
+            if not pr_allows_requeue(st["issue"]): return True
+            clear_workflow_label(st["issue"], "in-progress")
+            return True
+        rc, out, _ = sh(ssh_argv(ssh_opts(cfg["host"]), cfg["host"],
+                              f"{cfg.get('fleet', '~/.local/bin/swrm-fleet')} stop {shlex.quote(st['run'])}"))
+        if rc or not json.loads(out).get("signalled"): raise RuntimeError("abort not acknowledged")
+        probe = remote(lane, cfg, st["run"])
+        if not run_stopped(probe, st["run"]):
+            raise RuntimeError("run termination unverified")
+        if not pr_allows_requeue(st["issue"]): return True
+        clear_workflow_label(st["issue"], "in-progress")
+        return True
+    except Exception as exc:
+        log(f"WARNING #{st['issue']} dispatch cancellation unverified ({exc}); retry next tick", brain=True)
+        try:
+            clear_workflow_label(st["issue"], "in-progress")
+            clear_workflow_label(st["issue"], "lane-ready")
+        except Exception as error: log(f"WARNING #{st['issue']} cleanup failed ({error})", brain=True)
+        return False
+
+# Ported from refs/old/1774; only workflow labels participate in delivery.
+DELIVERY_LABELS = {"lane-ready", "in-progress", "lane-pr"}
+DELIVERY_ATTEMPTS = 3
+
+def ensure_delivery_state(n):
+    """Verify delivery using fresh gh reads; never replace unrelated labels."""
+    def read():
+        rc, out, err = gh(["issue", "view", str(n), "--json", "labels"])
+        if rc: raise RuntimeError(f"label read rc={rc}")
+        payload = json.loads(out)
+        if not isinstance(payload.get("labels"), list):
+            raise ValueError("missing label list")
+        return label_names(payload)
+
+    for attempt in range(1, DELIVERY_ATTEMPTS + 1):
+        try:
+            labels = read()  # A failed pre-read must not authorize a write.
+            if labels & DELIVERY_LABELS == {"lane-pr"}: return True
+            rc, _, _ = gh(["issue", "edit", str(n), "--remove-label", "lane-ready",
+                           "--remove-label", "in-progress", "--add-label", "lane-pr"])
+            if rc: raise RuntimeError(f"label write rc={rc}")
+            if read() & DELIVERY_LABELS == {"lane-pr"}: return True
+            error = "workflow labels not terminal"
+        except Exception as exc:
+            error = type(exc).__name__
+        log(f"#{n} delivery label attempt {attempt}/{DELIVERY_ATTEMPTS} failed: {error}", brain=False)
+    log(f"WARNING #{n} delivery labels unverified after {DELIVERY_ATTEMPTS} attempts; "
+        "lane-ready must be cleared; manual repair required", brain=True)
+    return False
 
 def label_names(issue):
     return {
@@ -1423,13 +1558,123 @@ else:
     O = next((home for home in homes if os.path.isdir(home)), homes[0])
 '''
 
-REMOTE_STATUS = REMOTE_STATE_HOME + r'''
+REMOTE_LIVENESS = r'''
+import errno
+# The process table of the host. The default is the real /proc; the override only
+# exists so that the liveness probes can be exercised without a Linux host.
+PROC_ROOT = os.environ.get("OPEN_SWARM_PROC_ROOT", "/proc")
+def _valid_pid(pid):
+  return isinstance(pid, int) and not isinstance(pid, bool) and pid > 0
+def _pid_alive(pid):
+  if not _valid_pid(pid): return None
+  try: os.kill(pid, 0); return True
+  except ProcessLookupError: return False
+  except PermissionError: return True
+  except OSError as e:
+    if e.errno == errno.ESRCH: return False
+    if e.errno == errno.EPERM: return True
+    return None
+  except Exception: return None
+def _proc_table():
+  try: names = os.listdir(PROC_ROOT)
+  except Exception: return None
+  rows = {}
+  for name in names:
+    if not name.isdigit(): continue
+    try:
+      with open(f"{PROC_ROOT}/{name}/stat") as stream: raw = stream.read()
+      fields = raw[raw.rfind(")") + 2:].split()
+      rows[int(name)] = {"ppid": int(fields[1]), "pgrp": int(fields[2])}
+    except (FileNotFoundError, ProcessLookupError):
+      continue
+    except Exception:
+      return None
+  return rows
+def _output_holders(events):
+  if not isinstance(events, str) or not events or not os.path.isabs(events): return None
+  targets = {os.path.realpath(events), os.path.realpath(events + ".err")}
+  try: names = os.listdir(PROC_ROOT)
+  except Exception: return None
+  for name in names:
+    if not name.isdigit(): continue
+    fd_dir = f"{PROC_ROOT}/{name}/fd"
+    try: fds = os.listdir(fd_dir)
+    except (FileNotFoundError, ProcessLookupError): continue
+    except Exception: return None
+    for fd in fds:
+      try: target = os.readlink(f"{fd_dir}/{fd}")
+      except (FileNotFoundError, ProcessLookupError): continue
+      except Exception: return None
+      target = target[:-10] if target.endswith(" (deleted)") else target
+      if os.path.realpath(target) in targets: return True
+  return False
+def _group_empty(pgid):
+  # True when the process group `pgid` has no member left, None when the check
+  # itself failed. `kill -0 -pgid` fails with ESRCH only when the group is empty:
+  # a member (the call succeeds), a permission error (the group exists but cannot
+  # be signalled) and every other failure are not proof that the group is empty.
+  try:
+    os.killpg(pgid, 0)
+  except ProcessLookupError:
+    return True
+  except PermissionError:
+    return False
+  except (OSError, ValueError, TypeError):
+    return None
+  return False
+def _session_process_alive(pid, rows):
+  if pid in rows or any(row["pgrp"] == pid for row in rows.values()): return True
+  children = {pid}
+  changed = True
+  while changed:
+    changed = False
+    for child, row in rows.items():
+      if row["ppid"] in children and child not in children:
+        children.add(child); changed = True
+  return any(child != pid for child in children)
+def _executor_alive(status, trust_positive=True):
+  # The persisted executor_alive flag is only a snapshot; never use it as proof.
+  # Output holders and visible descendants can veto cleanup, but neither their
+  # absence nor a workspace scan can replace the recorded process group.
+  #
+  # The proof the dispatcher accepts is the process group of the executor: the
+  # remote state has to record it and the group has to have no member left.
+  # Every other outcome is unknown: a run that is released without that proof
+  # is dispatched a second time while its executor may still be running
+  # (Refs #1663).
+  if trust_positive and status.get("executor_alive") is True: return True
+  if trust_positive and "executor_alive" in status and status.get("executor_alive") is not False: return None
+  pid = status.get("executor_pid")
+  if not _valid_pid(pid): return None      # the executor pid was never recorded
+  pgid = status.get("executor_pgid")
+  if not _valid_pid(pgid): return None     # the process group was never recorded
+  empty = _group_empty(pgid)
+  if empty is None: return None            # the group check failed
+  if not empty: return None                # the group still has a member
+  holders = _output_holders(status.get("events"))
+  if holders is None: return None
+  if holders: return True                  # a process still writes the output of the run
+  rows = _proc_table()
+  if rows is None: return None
+  # A descendant may have left the process group of the executor and outlived it.
+  if _session_process_alive(pid, rows): return None
+  alive = _pid_alive(pid)
+  if alive is True: return True
+  if alive is None: return None
+  return False                             # the recorded group is confirmed empty
+'''
+
+REMOTE_STATUS = REMOTE_STATE_HOME + REMOTE_LIVENESS + r'''
 import json,sys
 L=sys.argv[1]; R=sys.argv[2] if len(sys.argv)>2 else ""
 out={"lane":None,"run":None}
 try:
-  ls=json.load(open(f"{O}/lanes/{L}/state.json")); out["lane"]=ls.get("state"); out["current_run"]=ls.get("current_run")
+  with open(f"{O}/lanes/{L}/state.json") as stream: ls=json.load(stream)
+  out["lane"]=ls.get("state"); out["current_run"]=ls.get("current_run")
   if R and ls.get("current_run")==R: out["last_activity"]=ls.get("last_activity")
+  out["server_alive"]=ls.get("server_alive")
+  out["server_last_success"]=ls.get("server_last_success")
+  out["server_restart_count"]=ls.get("server_restart_count",0)
 except Exception as e: out["lane"]="unknown"
 if R:
   p=f"{O}/runs/{R}/result.json"
@@ -1462,12 +1707,14 @@ if R:
   else:
     out["run"]="running"
     try:
-      s=json.load(open(f"{O}/runs/{R}/status.json")); pid=s.get("runner_pid"); out["run_state"]=s.get("state")
-      if pid:
-        try: os.kill(int(pid),0); out["runner_alive"]=True
-        except ProcessLookupError: out["runner_alive"]=False
-        except PermissionError: out["runner_alive"]=True
-    except Exception: out["run_state"]="missing"
+      with open(f"{O}/runs/{R}/status.json") as stream: s=json.load(stream)
+      runner_alive=_pid_alive(s.get("runner_pid"))
+      out["run_state"] = s.get("state") if runner_alive is not None else "missing"
+      out["runner_alive"] = runner_alive
+      out["executor_pgid"] = s.get("executor_pgid")
+      out["executor_alive"] = _executor_alive(s, trust_positive=False)
+    except Exception:
+      out["run_state"]="missing"; out["runner_alive"]=None; out["executor_alive"]=None
 print(json.dumps(out))
 '''
 def remote(lane, cfg, run=""):
@@ -1476,6 +1723,156 @@ def remote(lane, cfg, run=""):
     if rc: return {"error": (err or out).strip()[-200:]}
     try: return json.loads(out.strip().splitlines()[-1])
     except Exception: return {"error": out[-200:]}
+
+# Use the same stable sidecar lock as swrm's lane_write_state. Locking the
+# state.json inode is unsafe because normal writers replace it atomically.
+REMOTE_CLEAR_ORPHAN = REMOTE_STATE_HOME + REMOTE_LIVENESS + r'''
+import fcntl, json, sys, tempfile, time
+L, R = sys.argv[1:3]
+ok = False
+try:
+  if not all(x and x not in (".", "..") and os.path.basename(x) == x for x in (L, R)):
+    raise ValueError("invalid lane or run")
+  path = f"{O}/lanes/{L}/state.json"
+  with open(path + ".lock", "a") as lock:
+    fcntl.flock(lock, fcntl.LOCK_EX)
+    with open(path) as stream: state = json.load(stream)
+    if state.get("state") == "busy" and state.get("current_run") == R:
+      # Recheck the runner while holding the lane writer lock. A stale probe
+      # must not clear a resumed run, a completed result, or a newer dispatch.
+      with open(f"{O}/runs/{R}/status.json") as stream: status = json.load(stream)
+      if _pid_alive(status.get("runner_pid")) is not False:
+        raise ValueError("runner not confirmed dead")
+      if _executor_alive(status) is not False:
+        raise ValueError("executor session not confirmed dead")
+      if not os.path.exists(f"{O}/runs/{R}/result.json"):
+        state.update(state="idle", current_run=None, updated=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()))
+        for key in ("stale_since", "stale_run", "activity_observed_since"): state.pop(key, None)
+        temporary = None
+        try:
+          with tempfile.NamedTemporaryFile(mode="w", dir=os.path.dirname(path), delete=False) as stream:
+            temporary = stream.name
+            json.dump(state, stream)
+            stream.flush()
+            os.fsync(stream.fileno())
+          os.replace(temporary, path)
+          temporary = None
+          ok = True
+        finally:
+          if temporary is not None: os.unlink(temporary)
+except Exception:
+  pass  # Missing state, denied inspection, or failed writes preserve the claim.
+print(json.dumps(ok))
+'''
+
+
+def clear_orphan_lane(L, cfg, run):
+    try:
+        rc, out, _ = sh(ssh_argv(ssh_opts(cfg["host"]), cfg["host"], "python3", "-", L, run),
+                        timeout=60, inp=REMOTE_CLEAR_ORPHAN)
+        return rc == 0 and json.loads(out.strip().splitlines()[-1]) is True
+    except (OSError, subprocess.TimeoutExpired, ValueError, IndexError):
+        return False
+
+PRIVATE_HOST_RE = re.compile(
+    r'(?<![A-Za-z0-9_])(?:' + '|'.join('go' + n for n in ('vpn', 'res', 'cc', 'relay')) + r')[0-9]*(?![A-Za-z0-9_])', re.I)
+
+CREATE_VERBS = ("新建", "创建", "新增", "生成")
+ACCEPT_LINE_RE = re.compile(r"^\s*(?:验收|acceptance)\s*[:：]\s*(.*)$", re.I)
+NON_ACCEPT_FLAGS = re.compile(r"(?:^|\s)(?:--help|-h|--version|--collect-only|--co)(?:\s|$)")
+SCRIPT_WORD = r"[A-Za-z0-9_./-]*(?:test|check|lint|verify)[A-Za-z0-9_./-]*"
+COMMAND_RE = re.compile(r"(?:^|[;&]\s*)(?:\./" + SCRIPT_WORD + r"|(?:bash|sh|python\d*)\s+" + SCRIPT_WORD
+    + r"|(?:python\d*\s+-m\s+)?(?:pytest|unittest|ruff|mypy|tox)\b|(?:npm|pnpm|yarn|cargo|go|make)\s+(?:run\s+)?(?:test|check|lint|build)\b)(?:\s|$)", re.I)
+FILE_TOKEN_RE = re.compile(r"(?<![A-Za-z0-9_./-])(?:[A-Za-z0-9_.-]+/)+[A-Za-z0-9_.-]+|(?<![A-Za-z0-9_./-])[A-Za-z0-9_-]+\.[A-Za-z0-9]+")
+COMMAND_FILE_RE = re.compile(r"(?:[A-Za-z0-9_.-]+/)+[A-Za-z0-9_.-]+|[A-Za-z0-9_-]+\.(?:py|sh|ts|js|json|md|toml|yml|yaml)\b")
+
+VAGUE_ACCEPTANCE_RE = re.compile(r"功能正常|正常工作|人工|手工|手动|或|至少|酌情|视情况|大致|可能|\bor\b", re.I)
+
+def command_text(line):
+    return re.sub(r"^(?:验收|acceptance)\s*[:：]\s*", "", line.strip(), flags=re.I).strip("`").lstrip("$").strip()
+
+def is_command(line):
+    """A real verification command: a known runner/script, not a help/collect-only/version probe."""
+    text = command_text(line)
+    return bool(COMMAND_RE.search(text)) and not NON_ACCEPT_FLAGS.search(text)
+
+def main_path_missing(path):
+    """True/False when origin/main lacks/has the path; None when git could not answer (never a defect)."""
+    rc, out, _ = sh(["git", "-C", LOCAL, "ls-tree", "origin/main", "--", path])
+    if rc: return None
+    return not out.strip()
+
+def branch_missing(branch):
+    """True when neither the branch nor origin/<branch> resolves; None when git could not answer."""
+    results = []
+    for ref in (branch, f"origin/{branch}"):
+        rc, _, _ = sh(["git", "-C", LOCAL, "rev-parse", "--verify", "--quiet", f"{ref}^{{commit}}"])
+        if rc == 0: return False
+        results.append(rc)
+    return True if all(rc == 1 for rc in results) else None
+
+def card_quality(body):
+    """Check legacy dispatch cards against origin/main, without rewriting them."""
+    lines = body.splitlines()
+    for line in lines:
+        if PRIVATE_HOST_RE.search(line):
+            return "跨主机引用"
+        if re.search(r"(?<![A-Za-z0-9_.:/-])(?:/(?!/)[^\s`\"<>]*|~/[^\s`]*|\.\./[^\s`]*)", line):
+            return "仓外路径"
+    command_lines = []
+    fence = None
+    for index, line in enumerate(lines):
+        if line.strip().startswith("```"):
+            fence = None if fence is not None else line.strip()[3:].lower()
+            continue
+        if fence in (None, "", "sh", "bash", "shell", "console") and is_command(line):
+            command_lines.append(index)
+    if not command_lines:
+        if re.search(r"(?:验收|acceptance)[\s\S]*(?:或|至少|酌情)", body, re.I):
+            return "验收含糊且缺少可执行命令"
+        return "缺少可执行验证命令"
+    # An acceptance statement must itself be a command or be followed directly by one:
+    # a command elsewhere in the card cannot cover a vague criterion.
+    for index, line in enumerate(lines):
+        match = ACCEPT_LINE_RE.match(line)
+        if not match: continue
+        if VAGUE_ACCEPTANCE_RE.search(match.group(1)):
+            return "验收含糊: 验收条目含含糊表述"
+        if is_command(line): continue
+        following = next((l for l in lines[index + 1:] if l.strip()), "")
+        if following.strip().startswith("```"):
+            inner = next((l for l in lines[lines.index(following, index + 1) + 1:] if l.strip()), "")
+            if is_command(inner): continue
+        elif is_command(following): continue
+        return "验收含糊: 验收条目未紧跟可执行命令"
+    created = set()
+    for line in lines:
+        if is_command(line): continue
+        for m in FILE_TOKEN_RE.finditer(line):
+            if re.search("(?:" + "|".join(CREATE_VERBS) + r")[^，。,;；\n]*$", line[:m.start()]): created.add(m.group())
+    branches = []
+    for m in re.finditer(r"(?:分支|branch)\s*[:：]?\s*[`'\"]?([A-Za-z0-9_./-]+)", body, re.I):
+        if re.search(r"(?:新建|创建|新增|生成)\s*$", body[:m.start()]): continue
+        branches.append(m.group(1))
+    branches += [m.group(1) for m in re.finditer(r"基于\s*[`'\"]?([A-Za-z0-9_./-]+)[`'\"]?\s*分支", body)]
+    for branch in branches:
+        if branch_missing(branch): return f"分支不存在: {branch}"
+    for index, line in enumerate(lines):
+        if index in command_lines:
+            # the path arguments of a verification command must exist unless the card creates them
+            for m in COMMAND_FILE_RE.finditer(command_text(line)):
+                path = m.group()
+                if path in created or path.startswith("-"): continue
+                if main_path_missing(path): return f"main 文件不存在: {path}"
+            continue
+        if "://" in line: continue
+        for m in FILE_TOKEN_RE.finditer(line):
+            verbs = list(re.finditer(r"新建|创建|新增|生成|读取|修改|查看|引用|编辑|分支|branch", line[:m.start()], re.I))
+            if verbs and verbs[-1].group().lower() in ("新建", "创建", "新增", "生成", "分支", "branch"): continue
+            if m.group() in created: continue
+            if main_path_missing(m.group()): return f"main 文件不存在: {m.group()}"
+    return None
+
 
 def queue(state=None):
     """Track admission clocks in tick's persisted state, keyed by JSON issue numbers.
@@ -1511,6 +1908,12 @@ def queue(state=None):
             valid, missing = verify_requirements(body)
             if not valid:
                 log_verify_rejected(i["number"], missing); continue
+        if not verify:
+            defect = card_quality(body)
+            if defect:
+                rc, _, err = gh(["issue", "edit", str(i["number"]), "--remove-label", "lane-ready"])
+                log(f"卡 #{i['number']} 退回: {defect}" + (f"; 标签移除失败: {err.strip()}" if rc else ""))
+                continue
         match = re.search(r"(?im)(?:budget(?:[_ -]minutes)?|预算)\s*[:：]\s*(\d+(?:\.\d+)?)", body)
         budget = float(match.group(1)) if match else float(BUDGET)
         item = {"n": i["number"], "title": i["title"], "body": body, "labels": sorted(labels), "prio": pr, "backend": be, "strict": "strict-backend" in labels, "verify": verify,
@@ -1658,12 +2061,38 @@ def review_running(lanes, state):
 
     A lane runs one card at a time, so a lane runs at most one review (Refs #1701)."""
     state = state or {}
-    return {lane: 1 if (state.get(lane) or {}).get("class") == "verify" else 0 for lane in lanes}
+    return {lane: 1 if (state.get(lane) or {}).get("class") == "verify"
+            and not (state.get(lane) or {}).get("review_queued") else 0 for lane in lanes}
+
+def review_in_flight(lanes, state):
+    """Real admitted reviews: queued reservations plus reviews that have started."""
+    running = review_running(lanes, state)
+    queued = state.get("_review_queued") or {}
+    return {lane: running[lane] + int(lane in queued) + int(bool((state.get(lane) or {}).get("review_queued"))) for lane in lanes}
+
+def reconcile_review_queue(state, res):
+    """Release reservations on start, terminal result, or an idle interrupted dispatch."""
+    queued = state.get("_review_queued") or {}
+    assigned = {lane: card for lane, card in state.items()
+                if isinstance(card, dict) and card.get("review_queued")}
+    for lane, card in list(dict(assigned, **queued).items()):
+        remote = res.get(lane) or {}
+        if "error" in remote: continue
+        run = card.get("run")
+        if not run and lane in queued and remote.get("lane") == "idle" and not state.get(lane):
+            queued.pop(lane, None)
+            continue
+        if run and (isinstance(remote.get("run"), dict)
+                    or (remote.get("run") == "running"
+                        and remote.get("current_run") == run)):
+            queued.pop(lane, None)
+            if lane in assigned: assigned[lane].pop("review_queued", None)
+
 
 def review_backlog(lanes, state):
     """Running reviews plus the complete waiting queue from the latest tick."""
     state = state or {}
-    running = review_running(lanes, state)
+    running = review_in_flight(lanes, state)
     waiting = state.get("_review_waiting") or {}
     return {lane: running[lane] + int(waiting.get(lane, 0) or 0) for lane in lanes}
 
@@ -1869,20 +2298,23 @@ def requeue_lost_run(L, st, r, state, why="orphaned"):
     try: j = json.loads(out); labels = {l["name"] for l in j["labels"]}
     except Exception: return False
     if j["state"] == "OPEN" and "lane-pr" not in labels:
-        rc, _, _ = gh(["issue", "edit", str(n), "--remove-label", "in-progress", "--add-label", "lane-ready"])
-        if rc: return False
+        if not guarded_requeue(n): return False
         what = "requeued (lane-ready)"
     else: what = f"already {j['state'].lower()}/{'lane-pr' if 'lane-pr' in labels else '-'}; dropped"
     log(f"{L} #{n} run {st['run']} {why} (remote lane {r.get('lane')}, current_run={r.get('current_run')}, run_state={r.get('run_state')}, runner dead) → {what}")
     return True
 
 def reconcile(L, cfg, st, r, state):
-    """Local state says busy but the remote lane is idle on another/no run, the run has no result.json and its runner is dead:
-    the run was orphaned (lane restart / reassignment). Drop it; requeue the issue unless it already got a PR or closed."""
-    if r.get("run") != "running" or r.get("lane") != "idle" or r.get("current_run") == st["run"]: return False
+    """Release a confirmed-dead orphan only after its remote lane is usable."""
+    if r.get("run") != "running": return False
     # Missing status is not evidence that the runner exited. Keep the lane claimed
     # until the remote probe positively reports a dead runner (Refs #1673).
-    if r.get("runner_alive") is not False or age_s(st) < 180: return False
+    if r.get("runner_alive") is not False or runner_liveness(r) != "dead" or age_s(st) < 180: return False
+    if r.get("executor_alive") is not False: return False
+    if r.get("lane") == "busy" and r.get("current_run") == st["run"]:
+        if not clear_orphan_lane(L, cfg, st["run"]): return False
+    elif r.get("lane") != "idle" or r.get("current_run") == st["run"]:
+        return False
     return requeue_lost_run(L, st, r, state, "orphaned")
 
 def verify_recovered_run(L, cfg, st, r, state):
@@ -1905,7 +2337,17 @@ def verify_recovered_run(L, cfg, st, r, state):
     if liveness == "unknown":
         log(f"{L} run {st['run']}: the liveness of the runner is unknown, the lane keeps its card until the host can tell", brain=False)
         return False
+    # The session of the executor has to be proven dead before the lane is
+    # touched: an unknown session keeps the run in flight, and the remote lane
+    # must not be cleared for it (Refs #1663).
+    if r.get("runner_alive") is not False or r.get("executor_alive") is not False: return False
     if age_s(st) < 180: return False  # a young run: the host may still be starting it
+    # A busy lane still needs the same identity-checked remote cleanup before
+    # relabeling; a lane now owned by another run is never touched.
+    if r.get("lane") == "busy" and r.get("current_run") == st["run"]:
+        if not clear_orphan_lane(L, cfg, st["run"]): return False
+    elif r.get("lane") != "idle" or r.get("current_run") == st["run"]:
+        return False
     if not requeue_lost_run(L, st, r, state, "lost with the outage of the host"): return False
     pending.pop(L, None)
     return True
@@ -2280,6 +2722,12 @@ def status_snapshot(lanes, state, res, ready, blocked, records=None):
     """Build the observable lane status row, including this process's stale skips."""
     lanes = lanes or {}
     status = {L: (("stale #%s (review required)" if "stale_since" in state[L] else "busy #%s") % state[L]["issue"]) if state.get(L) else (res[L].get("error") or res[L].get("lane") or "?") for L in lanes}
+    # Preserve legacy string rows; carry Codex server health separately.
+    status["_server_health"] = {
+        L: {"server_alive": res.get(L, {}).get("server_alive"),
+            "server_last_success": res.get(L, {}).get("server_last_success"),
+            "server_restart_count": res.get(L, {}).get("server_restart_count", 0)}
+        for L, cfg in lanes.items() if cfg.get("backend") == "codex"}
     status["_busy"] = sum(1 for L in lanes if state.get(L) and "stale_since" not in state[L])
     status["_stale"] = sum(1 for L in lanes if state.get(L) and "stale_since" in state[L])
     status["_ready"] = ready
@@ -2878,7 +3326,8 @@ def release_recovered_budget_holds(state, lanes):
             holds.pop(issue, None); counts.pop(str(issue), None)
             mark_done(state, int(issue))
             continue
-        rc, _, err = gh(["issue", "edit", str(issue), "--remove-label", "in-progress"])
+        rc = not guarded_requeue(int(issue))
+        err = "PR guard unverified"
         if rc:
             log(f"budget hold #{issue}: window recovered but labels could not be updated ({err.strip()[-120:]})", brain=False)
             continue
@@ -3004,10 +3453,11 @@ def block_pr_validation(lane, cfg, st, info, state, title, body, missing, error_
               "at": time.strftime("%F %T")}
     record_pr_validation(cfg, run, record)
     state["_pr_validation"] = (state.get("_pr_validation", []) + [record])[-200:]
-    gh(["issue", "edit", str(n), "--remove-label", "in-progress", "--remove-label", "lane-failed", "--add-label", "lane-ready"])
+    requeued = guarded_requeue(n)
     gh(["issue", "comment", str(n), "--body", f"Lane {lane} (run `{run}`) 的 PR 未通过提交前校验，未创建 PR：\n\n"
         + "".join(f"- {item}\n" for item in missing)
-        + f"\n按可快速修复类（`{error_class}`）处理，不计评审轮次，不计入 lane-failed 统计；已重新标记 `lane-ready`。"])
+        + f"\n按可快速修复类（`{error_class}`）处理，不计评审轮次，不计入 lane-failed 统计；重排结果：{'已核验' if requeued else '待下周期重试'}。"])
+    if not requeued: return {"done": False, "status": "requeue-pending", "error": "PR guard unverified", "missing": list(missing)}
     mark_done(state, n)
     return {"done": True, "status": "delivery-map-failed" if error_class == DELIVERY_MAP_CLASS else "pr-validation-failed",
             "error": f"PR 提交前校验未通过（{PR_VALIDATION_STRICT}）：{'；'.join(missing)}",
@@ -3200,10 +3650,8 @@ def filter_harvest(ref, base):
 
 def requeue_executor_start_failure(lane, n, run):
     """Requeue an executor startup failure without counting a task attempt."""
-    rc, _, err = gh(["issue", "edit", str(n), "--remove-label", "in-progress",
-                     "--remove-label", "lane-failed", "--add-label", "lane-ready"])
-    if rc:
-        return {"done": False, "status": "requeue-failed", "error": err, "missing": []}
+    if not guarded_requeue(n):
+        return {"done": False, "status": "requeue-failed", "error": "PR guard unverified", "missing": []}
     log(f"{lane} executor failed to start #{n} (run {run}) → lane-ready, lane paused 600s")
     return {"done": True, "status": "lane-ready", "error": None, "missing": []}
 
@@ -3333,12 +3781,17 @@ def finish(lane, cfg, st, info, state):
         if missing:
             log(f"{lane} #{n} run {run} PR validation ({mode}): 缺 {'；'.join(missing)}", brain=False)
         rc, out, err = gh(["pr", "create", "--base", "main", "--head", b, "--title", title, "--body", body])
-        url = (out.strip().splitlines() or [""])[-1] if not rc else f"(pr create failed: {err.strip()[-160:]})"
-        gh(["issue", "edit", str(n), "--remove-label", "in-progress", "--remove-label", "lane-ready", "--add-label", "lane-pr"])
+        if rc:
+            # No PR exists: the issue is not delivered, so nothing is relabelled, recorded or marked done.
+            log(f"{lane} #{n} run {run} gh pr create failed: {err.strip()[-160:]}")
+            return {"done": False, "status": "pr-create-failed", "error": f"gh pr create failed: {err.strip()[-160:]}", "missing": []}
+        url = (out.strip().splitlines() or [""])[-1]
+        delivered = ensure_delivery_state(n)
         clear_budget_history(state, n)
         record_verify_time(state, n, "evidence_ready")
         log(f"{lane} finished #{n} (run {run}, {info.get('status')}) → {url}"); mark_done(state, n)
-        return {"done": True, "status": "pr-created", "error": None, "missing": []}
+        return {"done": True, "status": "pr-created",
+                "error": None if delivered else "PR delivery labels unverified", "missing": []}
     else:
         if budget_failure(info):
             return hold_budget_failure(lane, cfg, st, info, state)
@@ -3532,6 +3985,7 @@ def run_tick(lanes, state, last_warn, publisher):
         res = dict(zip(live, ex.map(lambda L: remote(L, lanes[L], (state.get(L) or {}).get("run", "")), live)))
     for L in lanes:
         if L not in res: res[L] = {"error": "host in backoff", "skip": True}
+    reconcile_review_queue(state, res)
     seen = set()
     recovered_hosts = []
     for L in live:
@@ -3671,6 +4125,12 @@ def run_tick(lanes, state, last_warn, publisher):
             if c not in eligible: continue
             status, detail = label_state(c["n"])
             if status == "fresh":
+                try:
+                    if not pr_allows_requeue(c["n"]):
+                        q.remove(c); continue
+                except Exception as exc:
+                    log(f"WARNING skip #{c['n']}: PR lookup/repair failed ({exc})", brain=True)
+                    continue
                 if hot_verdict(c.get("body", ""), hot_inflight(state))["blocked"]: continue
                 pick = c; break
             if status == "stale":
@@ -3684,7 +4144,7 @@ def run_tick(lanes, state, last_warn, publisher):
             # The review card goes to the review lane with the smallest review backlog:
             # equal backlogs rotate over the review lanes and a lane that is at its
             # in-flight cap is skipped - the review waits for a free lane (Refs #1701).
-            running = review_running(review_ids, state)
+            running = review_in_flight(review_ids, state)
             waiting = [i for i in q if i is not pick and i.get("deps_ok", True) and i.get("verify")]
             # Memory admission applies to the lane that finally takes the review, not only to the
             # lane that was asked: a balanced-away review must not land on a host short of memory.
@@ -3699,7 +4159,7 @@ def run_tick(lanes, state, last_warn, publisher):
                     continue
                 eligible.append(lane)
             queued = review_waiting_counts(review_ids, waiting, running, head_eligible=eligible)
-            # Rank and log the running + waiting forecast, but cap only admitted runs.
+            # Rank the shared forecast; cap real queued and running reviews.
             # Shared waiting demand must not prevent an idle lane from draining it.
             loads = {lane: running[lane] + queued.get(lane, 0) for lane in review_ids}
             chosen, snapshot = pick_reviewer(review_ids, loads, eligible=eligible,
@@ -3719,15 +4179,36 @@ def run_tick(lanes, state, last_warn, publisher):
         publisher.publish(res=res, ready=len(q) - blocked, blocked=blocked, phase="dispatch")
         commit = base_commit()
         gh(["issue", "edit", str(pick["n"]), "--add-label", "in-progress"])
-        try: run, ver = dispatch(L, cfg, pick, commit)
+        if pick.get("verify"):
+            state.setdefault("_review_queued", {})[L] = {"issue": pick["n"]}
+            save_state(state)
+        try:
+            if not pr_allows_requeue(pick["n"]): return "no-card"
+            run, ver = dispatch(L, cfg, pick, commit)
         except Exception as e:
+            if pick.get("verify"):
+                state["_review_queued"].pop(L, None)
+                save_state(state)
             dispatch_failed(L, cfg, pick, e, busy=bool(LANE_BUSY_RE.search(str(e))))
+            return "no-capacity"
+        try: allowed = pr_allows_requeue(pick["n"])
+        except Exception as exc:
+            log(f"WARNING #{pick['n']} post-dispatch PR lookup failed ({exc}); cancelling", brain=True)
+            allowed = False
+        if not allowed:
+            pending = {"issue": pick["n"], "run": run, "cancel_pending": True}
+            state[L] = pending; save_state(state)
+            if cancel_guarded_dispatch(L, cfg, pending): state.pop(L); save_state(state)
+            q.remove(pick)
             return "no-capacity"
         if L != asked: outcomes[L] = "dispatched"
         q.remove(pick)
         record = {"issue": pick["n"], "run": run, "host": cfg["host"], "base": commit, "at": time.strftime("%F %T"), "verify": ver, "class": "verify" if pick.get("verify") else "work", "hot": hot_files(pick.get("body", ""))}
         with publisher._lock:
             state[L] = record
+            if pick.get("verify"):
+                state["_review_queued"].pop(L, None)
+                record["review_queued"] = True
             state.setdefault("_pool_entered_at", {}).pop(str(pick["n"]), None)
             metrics = verify_metrics(state)
             # The snapshot and saved state must reflect the slot just occupied.
@@ -3765,6 +4246,10 @@ def run_tick(lanes, state, last_warn, publisher):
         st = state.get(L)
         if "error" in r: continue
         freed = False
+        if st and st.get("cancel_pending"):
+            if cancel_guarded_dispatch(L, lanes[L], st): state.pop(L); save_state(state)
+            outcomes[L] = "no-capacity"
+            continue
         if not st:
             recovery_runs(state).pop(L, None)  # the lane is free: nothing left to verify
         elif isinstance(r.get("run"), dict):
@@ -3777,13 +4262,13 @@ def run_tick(lanes, state, last_warn, publisher):
             scopes = paused_scopes()
             if result.get("done"):
                 recovery_runs(state).pop(L, None)
-                state.pop(L); save_state(state); freed = True
+                state.pop(L); state.get("_review_queued", {}).pop(L, None); save_state(state); freed = True
             if result.get("error"): log(f"{L} #{st['issue']} run {st['run']}: {result['error']}", brain=False)
         elif reconcile(L, lanes[L], st, r, state):
             recovery_runs(state).pop(L, None)
-            state.pop(L); save_state(state); freed = True
+            state.pop(L); state.get("_review_queued", {}).pop(L, None); save_state(state); freed = True
         elif verify_recovered_run(L, lanes[L], st, r, state):
-            state.pop(L); save_state(state); freed = True
+            state.pop(L); state.get("_review_queued", {}).pop(L, None); save_state(state); freed = True
         if freed:
             freed_lanes.add(L)
             outcomes[L] = give_card(L, lanes[L], remote_idle=False)
@@ -3822,7 +4307,7 @@ def run_tick(lanes, state, last_warn, publisher):
     state["_pool_entered_at"] = {str(item["n"]): item["pool_entered_at"] for item in q if item.get("deps_ok", True) and "pool_entered_at" in item}
     # Publish the complete remaining queue, including overflow beyond the admission cap.
     if review_ids:
-        running = review_running(review_ids, state)
+        running = review_in_flight(review_ids, state)
         waiting_reviews = [i for i in q if i.get("deps_ok", True) and i.get("verify")]
         state["_review_waiting"] = review_waiting_counts(review_ids, waiting_reviews, running, REVIEW_MAX_IN_FLIGHT)
         if waiting_reviews:

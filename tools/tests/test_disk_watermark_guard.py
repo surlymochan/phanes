@@ -19,6 +19,11 @@ probe and the control plane tree lives in a scratch directory inside the
 worktree. The suite stays red until the #1666 implementation lands.
 """
 
+try:
+    from tools.tests._test_tmp import short_tmp_root
+except ImportError:
+    from _test_tmp import short_tmp_root
+
 import contextlib
 import importlib.util
 import json
@@ -32,6 +37,8 @@ import time
 import unittest
 from unittest import mock
 from pathlib import Path
+sys.path.append(str(Path(__file__).resolve().parents[1] / "lane-autodispatch"))
+from pr_guard_fixtures import no_open_prs
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -67,7 +74,7 @@ def require(path, what):
 
 def scratch_root():
     """The scratch directory of this suite, inside the worktree."""
-    root = ROOT / ".tmp" / "disk-watermark-tests"
+    root = Path(short_tmp_root())
     root.mkdir(parents=True, exist_ok=True)
     return root
 
@@ -561,7 +568,7 @@ class DispatchTickTests(unittest.TestCase):
             dispatcher.label_state = lambda number, cache=None: ("fresh", "")
             dispatcher.prefetch_labels = lambda numbers, cache=None: {}
             dispatcher.replenish = lambda count, state: []
-            dispatcher.gh = lambda *args, **kwargs: (0, "", "")
+            dispatcher.gh = no_open_prs(lambda *args, **kwargs: (0, "", ""))
             dispatcher.sh = lambda *args, **kwargs: (0, "base-sha\n", "")
             dispatcher.dispatch = (lambda lane, cfg, item, base:
                                     (dispatched.append(lane) or "run-1", False))
@@ -608,7 +615,7 @@ class DispatchTickTests(unittest.TestCase):
             dispatcher.label_state = lambda number, cache=None: ("fresh", "")
             dispatcher.prefetch_labels = lambda numbers, cache=None: {}
             dispatcher.replenish = lambda count, state: []
-            dispatcher.gh = lambda *args, **kwargs: (0, "", "")
+            dispatcher.gh = no_open_prs(lambda *args, **kwargs: (0, "", ""))
             dispatcher.sh = lambda *args, **kwargs: (0, "base-sha\n", "")
             dispatcher.dispatch = (lambda lane, cfg, item, base:
                                     (dispatched.append(lane) or "run-1", False))

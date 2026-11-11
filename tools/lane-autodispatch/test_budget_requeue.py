@@ -41,9 +41,14 @@ Run it offline:
     cd tools/lane-autodispatch && python3 -m unittest test_budget_requeue -v
 """
 from __future__ import annotations
+import sys
+from pathlib import Path as _FixturePath
+sys.path.insert(0, str(_FixturePath(__file__).resolve().parent))
+from pr_guard_fixtures import no_open_prs
 
 import importlib.util
 import json
+from card_fixtures import fixture_json
 import os
 import re
 import shlex
@@ -159,6 +164,7 @@ class Fleet:
         path.write_text(json.dumps(self.window_answer()))
 
     # --- the AD's `gh` --------------------------------------------------------------------
+    @no_open_prs
     def gh(self, args, timeout=60):
         if args[:2] == ["issue", "list"]:
             rows = []
@@ -168,7 +174,7 @@ class Fleet:
                     continue
                 rows.append({"number": number, "title": issue["title"], "body": issue["body"],
                              "labels": labels, "state": "OPEN"})
-            return 0, json.dumps(rows), ""
+            return 0, fixture_json(rows), ""
         if args[:2] == ["issue", "view"]:
             number = int(args[2])
             issue = self.issues.get(number)
