@@ -1507,6 +1507,105 @@ def remote(lane, cfg, run=""):
     try: return json.loads(out.strip().splitlines()[-1])
     except Exception: return {"error": out[-200:]}
 
+PRIVATE_HOST_RE = re.compile(
+    r'(?<![A-Za-z0-9_])(?:' + '|'.join('go' + n for n in ('vpn', 'res', 'cc', 'relay')) + r')[0-9]*(?![A-Za-z0-9_])', re.I)
+
+CREATE_VERBS = ("新建", "创建", "新增", "生成")
+ACCEPT_LINE_RE = re.compile(r"^\s*(?:验收|acceptance)\s*[:：]\s*(.*)$", re.I)
+NON_ACCEPT_FLAGS = re.compile(r"(?:^|\s)(?:--help|-h|--version|--collect-only|--co)(?:\s|$)")
+SCRIPT_WORD = r"[A-Za-z0-9_./-]*(?:test|check|lint|verify)[A-Za-z0-9_./-]*"
+COMMAND_RE = re.compile(r"(?:^|[;&]\s*)(?:\./" + SCRIPT_WORD + r"|(?:bash|sh|python\d*)\s+" + SCRIPT_WORD
+    + r"|(?:python\d*\s+-m\s+)?(?:pytest|unittest|ruff|mypy|tox)\b|(?:npm|pnpm|yarn|cargo|go|make)\s+(?:run\s+)?(?:test|check|lint|build)\b)(?:\s|$)", re.I)
+FILE_TOKEN_RE = re.compile(r"(?<![A-Za-z0-9_./-])(?:[A-Za-z0-9_.-]+/)+[A-Za-z0-9_.-]+|(?<![A-Za-z0-9_./-])[A-Za-z0-9_-]+\.[A-Za-z0-9]+")
+COMMAND_FILE_RE = re.compile(r"(?:[A-Za-z0-9_.-]+/)+[A-Za-z0-9_.-]+|[A-Za-z0-9_-]+\.(?:py|sh|ts|js|json|md|toml|yml|yaml)\b")
+
+VAGUE_ACCEPTANCE_RE = re.compile(r"功能正常|正常工作|人工|手工|手动|或|至少|酌情|视情况|大致|可能|\bor\b", re.I)
+
+def command_text(line):
+    return re.sub(r"^(?:验收|acceptance)\s*[:：]\s*", "", line.strip(), flags=re.I).strip("`").lstrip("$").strip()
+
+def is_command(line):
+    """A real verification command: a known runner/script, not a help/collect-only/version probe."""
+    text = command_text(line)
+    return bool(COMMAND_RE.search(text)) and not NON_ACCEPT_FLAGS.search(text)
+
+def main_path_missing(path):
+    """True/False when origin/main lacks/has the path; None when git could not answer (never a defect)."""
+    rc, out, _ = sh(["git", "-C", LOCAL, "ls-tree", "origin/main", "--", path])
+    if rc: return None
+    return not out.strip()
+
+def branch_missing(branch):
+    """True when neither the branch nor origin/<branch> resolves; None when git could not answer."""
+    results = []
+    for ref in (branch, f"origin/{branch}"):
+        rc, _, _ = sh(["git", "-C", LOCAL, "rev-parse", "--verify", "--quiet", f"{ref}^{{commit}}"])
+        if rc == 0: return False
+        results.append(rc)
+    return True if all(rc == 1 for rc in results) else None
+
+def card_quality(body):
+    """Check legacy dispatch cards against origin/main, without rewriting them."""
+    lines = body.splitlines()
+    for line in lines:
+        if PRIVATE_HOST_RE.search(line):
+            return "跨主机引用"
+        if re.search(r"(?<![A-Za-z0-9_.:/-])(?:/(?!/)[^\s`\"<>]*|~/[^\s`]*|\.\./[^\s`]*)", line):
+            return "仓外路径"
+    command_lines = []
+    fence = None
+    for index, line in enumerate(lines):
+        if line.strip().startswith("```"):
+            fence = None if fence is not None else line.strip()[3:].lower()
+            continue
+        if fence in (None, "", "sh", "bash", "shell", "console") and is_command(line):
+            command_lines.append(index)
+    if not command_lines:
+        if re.search(r"(?:验收|acceptance)[\s\S]*(?:或|至少|酌情)", body, re.I):
+            return "验收含糊且缺少可执行命令"
+        return "缺少可执行验证命令"
+    # An acceptance statement must itself be a command or be followed directly by one:
+    # a command elsewhere in the card cannot cover a vague criterion.
+    for index, line in enumerate(lines):
+        match = ACCEPT_LINE_RE.match(line)
+        if not match: continue
+        if VAGUE_ACCEPTANCE_RE.search(match.group(1)):
+            return "验收含糊: 验收条目含含糊表述"
+        if is_command(line): continue
+        following = next((l for l in lines[index + 1:] if l.strip()), "")
+        if following.strip().startswith("```"):
+            inner = next((l for l in lines[lines.index(following, index + 1) + 1:] if l.strip()), "")
+            if is_command(inner): continue
+        elif is_command(following): continue
+        return "验收含糊: 验收条目未紧跟可执行命令"
+    created = set()
+    for line in lines:
+        if is_command(line): continue
+        for m in FILE_TOKEN_RE.finditer(line):
+            if re.search("(?:" + "|".join(CREATE_VERBS) + r")[^，。,;；\n]*$", line[:m.start()]): created.add(m.group())
+    branches = []
+    for m in re.finditer(r"(?:分支|branch)\s*[:：]?\s*[`'\"]?([A-Za-z0-9_./-]+)", body, re.I):
+        if re.search(r"(?:新建|创建|新增|生成)\s*$", body[:m.start()]): continue
+        branches.append(m.group(1))
+    branches += [m.group(1) for m in re.finditer(r"基于\s*[`'\"]?([A-Za-z0-9_./-]+)[`'\"]?\s*分支", body)]
+    for branch in branches:
+        if branch_missing(branch): return f"分支不存在: {branch}"
+    for index, line in enumerate(lines):
+        if index in command_lines:
+            # the path arguments of a verification command must exist unless the card creates them
+            for m in COMMAND_FILE_RE.finditer(command_text(line)):
+                path = m.group()
+                if path in created or path.startswith("-"): continue
+                if main_path_missing(path): return f"main 文件不存在: {path}"
+            continue
+        if "://" in line: continue
+        for m in FILE_TOKEN_RE.finditer(line):
+            verbs = list(re.finditer(r"新建|创建|新增|生成|读取|修改|查看|引用|编辑|分支|branch", line[:m.start()], re.I))
+            if verbs and verbs[-1].group().lower() in ("新建", "创建", "新增", "生成", "分支", "branch"): continue
+            if m.group() in created: continue
+            if main_path_missing(m.group()): return f"main 文件不存在: {m.group()}"
+    return None
+
 def queue(state=None):
     """Track admission clocks in tick's persisted state, keyed by JSON issue numbers.
 
@@ -1541,6 +1640,12 @@ def queue(state=None):
             valid, missing = verify_requirements(body)
             if not valid:
                 log_verify_rejected(i["number"], missing); continue
+        if not verify:
+            defect = card_quality(body)
+            if defect:
+                rc, _, err = gh(["issue", "edit", str(i["number"]), "--remove-label", "lane-ready"])
+                log(f"卡 #{i['number']} 退回: {defect}" + (f"; 标签移除失败: {err.strip()}" if rc else ""))
+                continue
         match = re.search(r"(?im)(?:budget(?:[_ -]minutes)?|预算)\s*[:：]\s*(\d+(?:\.\d+)?)", body)
         budget = float(match.group(1)) if match else float(BUDGET)
         item = {"n": i["number"], "title": i["title"], "body": body, "labels": sorted(labels), "prio": pr, "backend": be, "strict": "strict-backend" in labels, "verify": verify,
@@ -1688,12 +1793,38 @@ def review_running(lanes, state):
 
     A lane runs one card at a time, so a lane runs at most one review (Refs #1701)."""
     state = state or {}
-    return {lane: 1 if (state.get(lane) or {}).get("class") == "verify" else 0 for lane in lanes}
+    return {lane: 1 if (state.get(lane) or {}).get("class") == "verify"
+            and not (state.get(lane) or {}).get("review_queued") else 0 for lane in lanes}
+
+def review_in_flight(lanes, state):
+    """Real admitted reviews: queued reservations plus reviews that have started."""
+    running = review_running(lanes, state)
+    queued = state.get("_review_queued") or {}
+    return {lane: running[lane] + int(lane in queued) + int(bool((state.get(lane) or {}).get("review_queued"))) for lane in lanes}
+
+def reconcile_review_queue(state, res):
+    """Release reservations on start, terminal result, or an idle interrupted dispatch."""
+    queued = state.get("_review_queued") or {}
+    assigned = {lane: card for lane, card in state.items()
+                if isinstance(card, dict) and card.get("review_queued")}
+    for lane, card in list(dict(assigned, **queued).items()):
+        remote = res.get(lane) or {}
+        if "error" in remote: continue
+        run = card.get("run")
+        if not run and lane in queued and remote.get("lane") == "idle" and not state.get(lane):
+            queued.pop(lane, None)
+            continue
+        if run and (isinstance(remote.get("run"), dict)
+                    or (remote.get("run") == "running"
+                        and remote.get("current_run") == run)):
+            queued.pop(lane, None)
+            if lane in assigned: assigned[lane].pop("review_queued", None)
+
 
 def review_backlog(lanes, state):
     """Running reviews plus the complete waiting queue from the latest tick."""
     state = state or {}
-    running = review_running(lanes, state)
+    running = review_in_flight(lanes, state)
     waiting = state.get("_review_waiting") or {}
     return {lane: running[lane] + int(waiting.get(lane, 0) or 0) for lane in lanes}
 
@@ -3567,6 +3698,7 @@ def run_tick(lanes, state, last_warn, publisher):
         res = dict(zip(live, ex.map(lambda L: remote(L, lanes[L], (state.get(L) or {}).get("run", "")), live)))
     for L in lanes:
         if L not in res: res[L] = {"error": "host in backoff", "skip": True}
+    reconcile_review_queue(state, res)
     seen = set()
     recovered_hosts = []
     for L in live:
@@ -3719,7 +3851,7 @@ def run_tick(lanes, state, last_warn, publisher):
             # The review card goes to the review lane with the smallest review backlog:
             # equal backlogs rotate over the review lanes and a lane that is at its
             # in-flight cap is skipped - the review waits for a free lane (Refs #1701).
-            running = review_running(review_ids, state)
+            running = review_in_flight(review_ids, state)
             waiting = [i for i in q if i is not pick and i.get("deps_ok", True) and i.get("verify")]
             # Memory admission applies to the lane that finally takes the review, not only to the
             # lane that was asked: a balanced-away review must not land on a host short of memory.
@@ -3734,7 +3866,7 @@ def run_tick(lanes, state, last_warn, publisher):
                     continue
                 eligible.append(lane)
             queued = review_waiting_counts(review_ids, waiting, running, head_eligible=eligible)
-            # Rank and log the running + waiting forecast, but cap only admitted runs.
+            # Rank the shared forecast; cap real queued and running reviews.
             # Shared waiting demand must not prevent an idle lane from draining it.
             loads = {lane: running[lane] + queued.get(lane, 0) for lane in review_ids}
             chosen, snapshot = pick_reviewer(review_ids, loads, eligible=eligible,
@@ -3754,8 +3886,14 @@ def run_tick(lanes, state, last_warn, publisher):
         publisher.publish(res=res, ready=len(q) - blocked, blocked=blocked, phase="dispatch")
         commit = base_commit()
         gh(["issue", "edit", str(pick["n"]), "--add-label", "in-progress"])
+        if pick.get("verify"):
+            state.setdefault("_review_queued", {})[L] = {"issue": pick["n"]}
+            save_state(state)
         try: run, ver = dispatch(L, cfg, pick, commit)
         except Exception as e:
+            if pick.get("verify"):
+                state["_review_queued"].pop(L, None)
+                save_state(state)
             dispatch_failed(L, cfg, pick, e, busy=bool(LANE_BUSY_RE.search(str(e))))
             return "no-capacity"
         if L != asked: outcomes[L] = "dispatched"
@@ -3763,6 +3901,9 @@ def run_tick(lanes, state, last_warn, publisher):
         record = {"issue": pick["n"], "run": run, "host": cfg["host"], "base": commit, "at": time.strftime("%F %T"), "verify": ver, "class": "verify" if pick.get("verify") else "work", "hot": hot_files(pick.get("body", ""))}
         with publisher._lock:
             state[L] = record
+            if pick.get("verify"):
+                state["_review_queued"].pop(L, None)
+                record["review_queued"] = True
             state.setdefault("_pool_entered_at", {}).pop(str(pick["n"]), None)
             metrics = verify_metrics(state)
             # The snapshot and saved state must reflect the slot just occupied.
@@ -3812,13 +3953,13 @@ def run_tick(lanes, state, last_warn, publisher):
             scopes = paused_scopes()
             if result.get("done"):
                 recovery_runs(state).pop(L, None)
-                state.pop(L); save_state(state); freed = True
+                state.pop(L); state.get("_review_queued", {}).pop(L, None); save_state(state); freed = True
             if result.get("error"): log(f"{L} #{st['issue']} run {st['run']}: {result['error']}", brain=False)
         elif reconcile(L, lanes[L], st, r, state):
             recovery_runs(state).pop(L, None)
-            state.pop(L); save_state(state); freed = True
+            state.pop(L); state.get("_review_queued", {}).pop(L, None); save_state(state); freed = True
         elif verify_recovered_run(L, lanes[L], st, r, state):
-            state.pop(L); save_state(state); freed = True
+            state.pop(L); state.get("_review_queued", {}).pop(L, None); save_state(state); freed = True
         if freed:
             freed_lanes.add(L)
             outcomes[L] = give_card(L, lanes[L], remote_idle=False)
@@ -3857,7 +3998,7 @@ def run_tick(lanes, state, last_warn, publisher):
     state["_pool_entered_at"] = {str(item["n"]): item["pool_entered_at"] for item in q if item.get("deps_ok", True) and "pool_entered_at" in item}
     # Publish the complete remaining queue, including overflow beyond the admission cap.
     if review_ids:
-        running = review_running(review_ids, state)
+        running = review_in_flight(review_ids, state)
         waiting_reviews = [i for i in q if i.get("deps_ok", True) and i.get("verify")]
         state["_review_waiting"] = review_waiting_counts(review_ids, waiting_reviews, running, REVIEW_MAX_IN_FLIGHT)
         if waiting_reviews:
