@@ -5,6 +5,20 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
 FIXTURE_STATE = os.path.join(HERE, "fixtures", "state.json")
 
+# Unversioned fixtures below this checkout must not discover its .git and
+# consequently clean the real executor scratch directory.
+_original_environment = dict(os.environ)
+_ceiling = os.path.dirname(ROOT)
+os.environ["GIT_CEILING_DIRECTORIES"] = os.pathsep.join(
+    filter(None, (os.environ.get("GIT_CEILING_DIRECTORIES"), _ceiling)))
+
+
+def _restore_environment():
+    os.environ.clear()
+    os.environ.update(_original_environment)
+
+
+atexit.register(_restore_environment)
 _home = tempfile.mkdtemp(prefix="swrm-test-home-")
 atexit.register(shutil.rmtree, _home, ignore_errors=True)
 os.environ["OPENSWARM_HOME"] = _home
@@ -25,5 +39,14 @@ def load():
     spec = importlib.util.spec_from_loader("swrm", loader)
     mod = importlib.util.module_from_spec(spec)
     loader.exec_module(mod)
+    cleanup = mod.cleanup_executor_tmp
+
+    def cleanup_owned_fixture(worktree):
+        target = mod.executor_worktree_root(worktree)
+        if os.path.realpath(target) == os.path.realpath(_ceiling):
+            raise AssertionError("test attempted to clean the real checkout scratch root")
+        return cleanup(worktree)
+
+    mod.cleanup_executor_tmp = cleanup_owned_fixture
     mod.DEFAULT_KNOWLEDGE_REPO = os.path.join(_home, "agent-knowledge")
     return mod

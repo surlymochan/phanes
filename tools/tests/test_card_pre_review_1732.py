@@ -1,3 +1,5 @@
+from _test_tmp import short_tmp_root
+
 #!/usr/bin/env python3
 """Reproduction of #1732: the card pre-review standard of the casting reform.
 
@@ -143,8 +145,8 @@ AUDIT_FINDINGS = (
 
 
 def scratch_root():
-    """The gitignored scratch root of the repo: no temporary file leaves it."""
-    base = ROOT / ".swrm-tmp"
+    """An owned scratch root inside the worktree."""
+    base = Path(short_tmp_root())
     base.mkdir(exist_ok=True)
     return base
 

@@ -41,6 +41,8 @@ Run it offline:
 """
 from __future__ import annotations
 
+from _test_tmp import short_tmp_root
+
 import ast
 import hashlib
 import importlib.util
@@ -56,7 +58,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 AD_PATH = ROOT / "tools" / "lane-autodispatch" / "autodispatch.py"
 SAMPLE_PATH = ROOT / "tools" / "tests" / "fixtures" / "hotfiles_ad_sample_1721.json"
-SCRATCH = ROOT / ".swrm-tmp"
+SCRATCH = Path(short_tmp_root())
 
 LANE = "GH2"
 OTHER_LANE = "GH3"

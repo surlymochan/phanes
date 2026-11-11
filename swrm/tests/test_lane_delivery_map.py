@@ -6,6 +6,7 @@ import os
 from pathlib import Path
 import tempfile
 import unittest
+from unittest import mock
 
 AD = Path(__file__).resolve().parents[2] / "tools" / "lane-autodispatch" / "autodispatch.py"
 SPEC = importlib.util.spec_from_file_location("autodispatch_delivery_map", AD)
@@ -58,6 +59,9 @@ class DeliveryMapPrecheckTests(unittest.TestCase):
     """The harvest path: what the AD really does with a delivery."""
 
     def setUp(self):
+        environment = mock.patch.dict(os.environ)
+        environment.start()
+        self.addCleanup(environment.stop)
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         for name, value in (("filter_harvest", lambda *a: ("refs/fleet/codex", [], False)), ("harvest_collapse_guard", lambda *a: (True, "ok")), ("D", self.tmp.name), ("sh", MODULE.sh), ("gh", MODULE.gh), ("log", MODULE.log)):

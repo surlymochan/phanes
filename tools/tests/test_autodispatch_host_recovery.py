@@ -45,6 +45,8 @@ Run them offline:
 """
 from __future__ import annotations
 
+from _test_tmp import short_tmp_root
+
 import importlib.util
 import json
 import os
@@ -58,7 +60,7 @@ from unittest.mock import patch
 ROOT = Path(__file__).resolve().parents[2]
 AUTODISPATCH_PATH = ROOT / "tools" / "lane-autodispatch" / "autodispatch.py"
 HEALTH_PAUSE_PATH = ROOT / "tools" / "check-health-pause.py"
-SCRATCH = ROOT / ".swrm-tmp"
+SCRATCH = Path(short_tmp_root())
 
 LANE = "GH2"
 HOST = "lane-host"

@@ -1,3 +1,5 @@
+from _test_tmp import short_tmp_root
+
 import contextlib
 import importlib.util
 import io
@@ -123,8 +125,7 @@ class MiniMaxBurnRateTests(unittest.TestCase):
 
 class CollectorIntegrityTests(unittest.TestCase):
     def setUp(self):
-        (SCRIPT.parent.parent / ".swrm-tmp").mkdir(exist_ok=True)
-        self.tmp = tempfile.TemporaryDirectory(dir=SCRIPT.parent.parent / ".swrm-tmp")
+        self.tmp = tempfile.TemporaryDirectory(dir=short_tmp_root())
         self.addCleanup(self.tmp.cleanup)
         self.log = Path(self.tmp.name) / "broker.requests.jsonl"
         self.now = mmbr.datetime.now(mmbr.timezone.utc)

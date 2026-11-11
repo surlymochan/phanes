@@ -19,6 +19,8 @@ probe and the control plane tree lives in a scratch directory inside the
 worktree. The suite stays red until the #1666 implementation lands.
 """
 
+from _test_tmp import short_tmp_root
+
 import contextlib
 import importlib.util
 import json
@@ -67,7 +69,7 @@ def require(path, what):
 
 def scratch_root():
     """The scratch directory of this suite, inside the worktree."""
-    root = ROOT / ".tmp" / "disk-watermark-tests"
+    root = Path(short_tmp_root())
     root.mkdir(parents=True, exist_ok=True)
     return root
 

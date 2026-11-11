@@ -7,6 +7,8 @@ The tests run the real gate script and the real diff command of phanes.yml again
 scratch repository that contains such a rename.
 """
 
+from _test_tmp import short_tmp_root
+
 import os
 from pathlib import Path
 import shutil
@@ -17,7 +19,7 @@ import unittest
 ROOT = Path(__file__).resolve().parents[2]
 SCRIPT = ROOT / "tools" / "ci-swrm.sh"
 WORKFLOW = ROOT / ".github" / "workflows" / "phanes.yml"
-SCRATCH = ROOT / ".swrm-tmp"  # gitignored scratch root
+SCRATCH = Path(short_tmp_root())
 
 
 def git(repo, *args):
