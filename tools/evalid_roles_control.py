@@ -257,6 +257,32 @@ class RoleController:
         ] = {}
         for event in self._events:
             self._reduce(event)
+        self._scan_receipts()
+
+    def _scan_receipts(self) -> None:
+        """Check the run receipts on disk; called at start and by every refresh.
+
+        A receipt changed after start (for example a finished run rewritten to
+        running) must stop later decisions, so decisions never rely on a scan
+        made only once.  A runs directory that vanished after it was seen is not
+        trusted either.  (A log without any runs directory is legitimate: the
+        controller itself writes events for stages that have no run.)
+        """
+        runs = self.control_dir / "runs"
+        if runs.exists() or runs.is_symlink():
+            from tools.evalid_run_state import scan_runs
+
+            self._runs_seen = True
+            if self._log.exists():
+                self._changes = scan_runs(runs, events_path=self._log)
+            else:
+                # Standalone receipts lack the private controller evidence needed
+                # to authorize a transition, but must still be checked for conflicts.
+                scan_runs(runs)
+        elif getattr(self, "_runs_seen", False):
+            from tools.evalid_run_state import ReceiptError
+
+            raise ReceiptError("runs directory vanished after it was scanned")
 
     def _read_log(self) -> list[dict[str, Any]]:
         if not self._log.exists():
@@ -354,6 +380,7 @@ class RoleController:
         for item in events:
             self._events.append(item)
             self._reduce(item)
+        self._scan_receipts()
 
     @staticmethod
     def _expected_stage(attempts: list[dict[str, Any]]) -> str | None:
