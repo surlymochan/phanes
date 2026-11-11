@@ -1,10 +1,16 @@
 #!/usr/bin/env python3
 """Requeue issues incorrectly failed after backend quota/rate-limit errors (Refs #1541)."""
 import argparse
+import importlib.util
 import json
 import re
 import subprocess
 from pathlib import Path
+
+
+_spec = importlib.util.spec_from_file_location("quota_guard", Path(__file__).resolve().parent / "lane-autodispatch/autodispatch.py")
+guard = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(guard)
 
 
 ENDED = re.compile(r"ended #(?P<n>\d+) without a commit \(run (?P<run>[^,]+), (?P<status>[^/]+)/(?P<class>[^)]+)\) → labelled lane-failed")
@@ -40,6 +46,11 @@ def gh_runner(args):
 
 def execute(repo, rows, apply=False, runner=gh_runner, output=print):
     changed = []
+    def call(args):
+        result = runner(args if args[0] == "api" else [*args, "--repo", repo])
+        return result.returncode, result.stdout, getattr(result, "stderr", "")
+    guard.gh, guard.REPO = call, repo
+    guard.log = lambda message, brain=True: output(message)
     for row in rows:
         n = row["number"]
         output(f"#{n}: quota/rate-limit ({row['status']}/{row['class']}) → lane-ready")
@@ -53,10 +64,8 @@ def execute(repo, rows, apply=False, runner=gh_runner, output=print):
             output(f"  skip: state/labels changed ({issue['state']}, {sorted(labels)})")
             continue
         if apply:
-            edit = runner(["issue", "edit", str(n), "--repo", repo, "--remove-label", "lane-failed", "--add-label", "lane-ready"])
-            if edit.returncode:
-                output(f"  error: failed to relabel #{n}")
-                continue
+            if not guard.guarded_requeue(n): continue
+            if guard.read_issue(n)[0] != "fresh": continue
             comment = f"Requeued after backend {row['class']} error (run {row['run']}); the lane failure was caused by quota/rate limiting."
             runner(["issue", "comment", str(n), "--repo", repo, "--body", comment])
             changed.append(n)

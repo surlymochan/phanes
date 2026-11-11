@@ -40,6 +40,10 @@ Run it offline:
     python3 -m unittest discover -s tools/tests -p 'test_hot_preflight_1721.py' -v
 """
 from __future__ import annotations
+import sys
+from pathlib import Path as _FixturePath
+sys.path.append(str(_FixturePath(__file__).resolve().parents[1] / "lane-autodispatch"))
+from pr_guard_fixtures import no_open_prs
 
 import ast
 import hashlib
@@ -161,6 +165,8 @@ class Fleet:
 
     def labels_of(self, number):
         return list(self.issues[number]["labels"])
+
+    @no_open_prs
 
     def gh(self, args, timeout=60):
         if args[:2] == ["issue", "list"]:

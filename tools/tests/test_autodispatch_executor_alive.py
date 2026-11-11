@@ -34,6 +34,8 @@ import tempfile
 import time
 import unittest
 from unittest.mock import patch
+sys.path.append(str(Path(__file__).resolve().parents[1] / "lane-autodispatch"))
+from pr_guard_fixtures import no_open_prs
 
 ROOT = Path(__file__).resolve().parents[2]
 AUTODISPATCH = ROOT / "tools" / "lane-autodispatch" / "autodispatch.py"
@@ -462,7 +464,7 @@ class ReconcileTests(unittest.TestCase):
         self.module = load_module("autodispatch_executor_alive_reconcile")
         self.module.log = lambda *args, **kwargs: None
         self.edits = []
-        self.module.gh = self.github
+        self.module.gh = no_open_prs(self.github)
         self.module.sh = self.remote
         self.st = {"run": RUN, "issue": ISSUE, "at": "2000-01-01 00:00:00"}
 

@@ -1,3 +1,7 @@
+import sys
+from pathlib import Path as _FixturePath
+sys.path.insert(0, str(_FixturePath(__file__).resolve().parent))
+from pr_guard_fixtures import no_open_prs
 #!/usr/bin/env python3
 """Regression coverage for dispatch-priority starvation (Refs #1705)."""
 
@@ -113,6 +117,8 @@ class DispatchPriorityTest(unittest.TestCase):
         issues = [small]
         dispatched, logs, states = [], [], []
 
+        @no_open_prs
+
         def gh(args, timeout=60):
             if args[:2] == ["issue", "list"]:
                 return 0, fixture_json(issues), ""
@@ -207,6 +213,8 @@ class DispatchPriorityTest(unittest.TestCase):
                          "labels": ["lane-ready", "in-progress"]}
                         for n in range(1, count)] + [large]
 
+                @no_open_prs
+
                 def gh(args, timeout=60):
                     limit = int(args[args.index("--limit") + 1])
                     return 0, fixture_json(rows[:limit]), ""
@@ -232,6 +240,8 @@ class DispatchPriorityTest(unittest.TestCase):
         large = {"number": 1705, "title": "waiting large", "body": "预算：90",
                  "labels": ["lane-ready"]}
         rows, dispatched, reads = [large], [], []
+
+        @no_open_prs
 
         def gh(args, timeout=60):
             if args[:2] == ["issue", "list"]:

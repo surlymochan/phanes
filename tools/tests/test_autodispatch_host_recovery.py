@@ -44,6 +44,10 @@ Run them offline:
     python3 -m unittest discover -s tools/tests -p 'test_autodispatch_host_recovery.py' -v
 """
 from __future__ import annotations
+import sys
+from pathlib import Path as _FixturePath
+sys.path.append(str(_FixturePath(__file__).resolve().parents[1] / "lane-autodispatch"))
+from pr_guard_fixtures import no_open_prs
 
 import importlib.util
 import json
@@ -106,6 +110,8 @@ class FakeGitHub:
         self.calls = []               # every call, in order
         self.edits = []               # the `gh issue edit` calls only
         self.fail_edits = False
+
+    @no_open_prs
 
     def __call__(self, args, timeout=60):
         args = list(args)

@@ -41,6 +41,10 @@ Run it offline:
     cd tools/lane-autodispatch && python3 -m unittest test_budget_requeue -v
 """
 from __future__ import annotations
+import sys
+from pathlib import Path as _FixturePath
+sys.path.insert(0, str(_FixturePath(__file__).resolve().parent))
+from pr_guard_fixtures import no_open_prs
 
 import importlib.util
 import json
@@ -160,6 +164,7 @@ class Fleet:
         path.write_text(json.dumps(self.window_answer()))
 
     # --- the AD's `gh` --------------------------------------------------------------------
+    @no_open_prs
     def gh(self, args, timeout=60):
         if args[:2] == ["issue", "list"]:
             rows = []
