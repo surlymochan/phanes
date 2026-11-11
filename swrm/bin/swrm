@@ -4430,7 +4430,7 @@ def renew_fleet_slot(command, payload, interval, stop):
             continue
 
 
-def fleet_fence_verdict(rdir):
+def fleet_fence_verdict(rdir, reservation=None):
     """Ask the coordinator whether this run still holds its fencing token.
 
     The check is read-only on the coordinator side. It must happen while the
@@ -4440,7 +4440,7 @@ def fleet_fence_verdict(rdir):
     and otherwise a verdict with "ok" plus the refusal reason.
     """
     key = os.path.realpath(rdir)
-    item = _FLEET_RESERVATIONS.get(key)
+    item = reservation or _FLEET_RESERVATIONS.get(key)
     saved = jload(os.path.join(rdir, "fleet-reservation.json"), None)
     if not item and saved:
         item = saved["command"], saved["payload"]
@@ -4714,7 +4714,7 @@ def wait_run_rate_limit(seconds, rdir, deadline):
 
 
 def run_executor_with_rate_limit(backend, decision, state, prompt, wd, rdir, budget_deadline,
-                                 policy, first_attempt=1):
+                                 policy, first_attempt=1, defer_fleet_release=False):
     attempts = []
     retries, continuation = 0, False
     current_prompt, resume_session = prompt, None
@@ -4778,18 +4778,14 @@ def run_executor_with_rate_limit(backend, decision, state, prompt, wd, rdir, bud
         error_class = executor_error_class(rc, final, err_text, backend)
         reservation_active = os.path.realpath(rdir) in _FLEET_RESERVATIONS
         boundary_safe = executor_boundary_empty(rdir, boundary)
+        # cmd_run keeps the lease (and renewal) through finalization and verify.
+        # Preserve the descendant proof requirement when releasing after writeback.
+        release_ready = boundary_safe and (error_class in (None, "rate_limit", "risk_blocked") or (
+            backend == "agy" and rc == 1 and (error_class == "upstream_forbidden"
+                                               or (meta or {}).get("finished_reason"))))
         if reservation_active:
-            # Prove the fence before the lease is released: afterwards the
-            # reservation is gone and the coordinator can no longer confirm
-            # that this run is still the holder.
-            verdict = fleet_fence_verdict(rdir)
-            if verdict is not None:
-                set_status(rdir, fence_valid=verdict["ok"],
-                           fence_rejected=None if verdict["ok"] else verdict["reason"])
-        # run_proc has reaped a normal 403 or reported early-result exit.
-        if boundary_safe and (error_class in (None, "rate_limit", "risk_blocked") or (
-                backend == "agy" and rc == 1 and (error_class == "upstream_forbidden"
-                                                   or (meta or {}).get("finished_reason")))):
+            set_status(rdir, fleet_release_ready=release_ready)
+        if release_ready and not defer_fleet_release:
             release_fleet_slot(rdir)
         set_status(rdir, state="routing", concurrency_keys=[])
         attempt = {"backend": backend, "model": decision.get("model"), "effort": decision.get("effort"),
@@ -4825,6 +4821,8 @@ def run_executor_with_rate_limit(backend, decision, state, prompt, wd, rdir, bud
             attempts[-1]["error_class"] = "stopped" if stopped else "budget_exceeded"
             attempts[-1]["rc"] = 130 if stopped else 124
             return attempts, None, attempts[-1]["error_class"]
+        if defer_fleet_release and release_ready:
+            release_fleet_slot(rdir)
         retries += 1
         continuation = True
         current_prompt = RATE_LIMIT_CONTINUE_PROMPT
@@ -6333,7 +6331,8 @@ def cmd_run(args, policy):
         b = decision["backend"]
         tried.append(b)
         current_attempts, final, err_class = run_executor_with_rate_limit(
-            b, decision, st, prompt, ws["path"], rdir, deadline, policy, first_attempt=len(attempts) + 1)
+            b, decision, st, prompt, ws["path"], rdir, deadline, policy, first_attempt=len(attempts) + 1,
+            defer_fleet_release=True)
         deadline = (jload(f"{rdir}/status.json", {}) or {}).get("deadline", deadline)
         attempts.extend(current_attempts)
         if err_class == "capacity-unreachable":
@@ -6375,6 +6374,11 @@ def cmd_run(args, policy):
             git(["reset", "-q", "--hard"], ws["root"])
             git(["clean", "-qfd"], ws["root"])
         decision = nxt
+    # Keep the executed run's identity even if a concurrent release removes the
+    # local reservation record during finalization. Missing ownership must fail.
+    saved_reservation = jload(f"{rdir}/fleet-reservation.json", None)
+    writeback_reservation = ((saved_reservation["command"], saved_reservation["payload"])
+                             if saved_reservation else None)
     set_status(rdir, state="finalizing")
     st_after = probe(policy) if decision["backend"] == "codex" else st
     attempts[-1]["quota_after"] = quota_used(st_after, decision)
@@ -6472,11 +6476,6 @@ def cmd_run(args, policy):
         read_only=read_only, verify=verify)
     if evidence_error:
         status, verify_note = "failed", evidence_error
-    fence_rejected = (jload(f"{rdir}/status.json", {}) or {}).get("fence_rejected")
-    if fence_rejected:
-        # The coordinator refused this run's fence: a run that lost the
-        # reservation must never be written back as a success.
-        status = "fenced"
     usage = (attempts[-1].get("meta") or {}).get("usage")
     wall_seconds = round(sum(a["seconds"] for a in attempts), 3)
     out = {
@@ -6496,11 +6495,23 @@ def cmd_run(args, policy):
             "evalid_receipt": {"status": "INFRA" if evidence_error else "COLLECTED",
                                "reason": evidence_error}} if role_info else {}),
     }
+    # This is the result publication boundary: all workspace/verify work is
+    # complete, and our lease has not yet been voluntarily released.
+    verdict = fleet_fence_verdict(rdir, writeback_reservation)
+    fence_rejected = verdict["reason"] if verdict is not None and not verdict["ok"] else None
+    if verdict is not None:
+        set_status(rdir, fence_valid=verdict["ok"], fence_rejected=fence_rejected)
     if fence_rejected:
+        status = out["status"] = "fenced"
+        if "exec_pass" in out:
+            out.update(exec_pass=False, exec_pass_reason="fenced")
+        pass_fields.update(exec_pass=False, exec_pass_reason="fenced")
         out["error_class"] = "fenced"
         out["fence_rejected"] = fence_rejected
         record_fence_rejection(rdir, attempts, fence_rejected)
     jsave(f"{rdir}/result.json", out)
+    if (jload(f"{rdir}/status.json", {}) or {}).get("fleet_release_ready"):
+        release_fleet_slot(rdir)
     append_ledger({"id": rid, "ts": NOW(), "title": title, "profile": prof, "status": status, "scope": scope,
                    "backend": decision["backend"], "model": decision["model"], "effort": decision.get("effort"),
                    "tier": decision.get("tier"), "attempts": [{k: a[k] for k in a if k != "error_tail"} for a in attempts],

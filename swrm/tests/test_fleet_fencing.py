@@ -11,6 +11,7 @@ import io
 import json
 import os
 import pathlib
+import sqlite3
 import subprocess
 import sys
 import tempfile
@@ -106,7 +107,19 @@ class FleetFencingTests(unittest.TestCase):
                                          input=json.dumps(payload), capture_output=True,
                                          env=env, timeout=15).stdout)
 
-    def dispatch(self, executor=plain_executor):
+    def dispatch(self, executor=plain_executor, finalize_hook=None, verify_hook=None):
+        finalize = xs.finalize_workspace
+
+        def finish(ws, title, backend, rdir, keep):
+            if finalize_hook:
+                finalize_hook(pathlib.Path(rdir))
+            return finalize(ws, title, backend, rdir, keep)
+
+        def verify(*args):
+            run_dir = next(pathlib.Path(xs.RUNS).iterdir())
+            verify_hook(run_dir)
+            return {"rc": 0, "output": "passed", "failing": []}
+
         env = {"OPENSWARM_FLEET_GUARD_CONFIG": str(self.guard),
                "OPENSWARM_FLEET_CAPACITY_DIR": str(self.capacity),
                "OPENSWARM_STATE_FILE": _load.FIXTURE_STATE,
@@ -115,9 +128,11 @@ class FleetFencingTests(unittest.TestCase):
                 mock.patch.dict(xs.EXECUTORS, {"agy": executor}), \
                 mock.patch.object(xs.procboundary.CgroupBoundary, "create", return_value=SafeBoundary()), \
                 mock.patch.object(xs, "start_fleet_release_worker"), \
+                mock.patch.object(xs, "finalize_workspace", side_effect=finish), \
+                mock.patch.object(xs, "run_verify", side_effect=verify), \
                 contextlib.redirect_stdout(io.StringIO()):
             try:
-                xs.cmd_run(ns(cwd=str(self.cwd)), xs.load_policy())
+                xs.cmd_run(ns(cwd=str(self.cwd), verify="check" if verify_hook else None), xs.load_policy())
             except SystemExit:
                 pass
         with open(xs.LEDGER) as stream:
@@ -160,6 +175,68 @@ class FleetFencingTests(unittest.TestCase):
                          if path.is_file() and path.name not in
                          ("result.json", "status.json", "fleet-reservation.json"))
         self.assertIn("fence", traces.lower(), "the refusal left no trace in the run event log")
+
+    def release_at_writeback(self, run_dir):
+        saved = self.reservation_of(run_dir)
+        self.assertTrue(self.coordinator(op="release", run_id=saved["run_id"],
+                                         token=saved["token"])["released"])
+        refused = self.coordinator(op="validate", run_id=saved["run_id"],
+                                   token=saved["token"], fence=saved["fence"])
+        self.assertFalse(refused["ok"])
+
+    def assert_fenced_writeback(self, run_dir, result, status, reason="missing"):
+        self.assertEqual(result["status"], "fenced")
+        self.assertEqual(result["error_class"], "fenced")
+        self.assertEqual(result["fence_rejected"], reason)
+        self.assertEqual(status["status"], "fenced")
+        self.assertEqual(status["fence_rejected"], reason)
+        events = [json.loads(line) for path in run_dir.glob("*.jsonl")
+                  for line in path.read_text().splitlines()]
+        self.assertTrue(any(event.get("type") == "FENCE_REJECTED" for event in events))
+        entry = json.loads(pathlib.Path(xs.LEDGER).read_text().splitlines()[-1])
+        self.assertEqual(entry["status"], "fenced")
+        self.assertFalse(entry["exec_pass"])
+
+    def test_release_during_finalize_is_rejected_at_result_writeback(self):
+        self.assert_fenced_writeback(*self.dispatch(finalize_hook=self.release_at_writeback))
+
+    def test_release_during_verify_is_rejected_at_result_writeback(self):
+        self.assert_fenced_writeback(*self.dispatch(verify_hook=self.release_at_writeback))
+
+    def test_local_release_during_finalize_cannot_erase_writeback_identity(self):
+        def release(run_dir):
+            xs.release_fleet_slot(str(run_dir))
+            self.assertTrue(xs.retry_fleet_release(str(run_dir)))
+            self.assertFalse((run_dir / "fleet-reservation.json").exists())
+
+        self.assert_fenced_writeback(*self.dispatch(finalize_hook=release))
+
+    def test_expiry_during_verify_is_rejected_at_result_writeback(self):
+        def expire(run_dir):
+            saved = self.reservation_of(run_dir)
+            with sqlite3.connect(self.capacity / "capacity.sqlite") as db:
+                db.execute("UPDATE reservations SET lease_expires=0 WHERE token=?", (saved["token"],))
+
+        self.assert_fenced_writeback(*self.dispatch(verify_hook=expire), reason="expired")
+
+    def test_normal_release_follows_result_publication(self):
+        release = xs.release_fleet_slot
+        published = []
+
+        def checked_release(rdir):
+            result = json.loads((pathlib.Path(rdir) / "result.json").read_text())
+            published.append(result["status"])
+            saved = self.reservation_of(pathlib.Path(rdir))
+            held = self.coordinator(op="validate", run_id=saved["run_id"],
+                                    token=saved["token"], fence=saved["fence"])
+            self.assertTrue(held["ok"])
+            return release(rdir)
+
+        with mock.patch.object(xs, "release_fleet_slot", side_effect=checked_release):
+            run_dir, result, _status = self.dispatch()
+        self.assertEqual(result["status"], "done")
+        self.assertEqual(published, ["done"])
+        self.assertTrue((run_dir / "fleet-release-pending.json").exists())
 
     def test_the_fence_is_monotonic_and_never_reused_across_runs(self):
         first_dir, _first, _first_status = self.dispatch()
