@@ -10,7 +10,7 @@ import type { RouteOutcome, TeamApiRequestContext } from "./request-context";
 import { JSON_LIMIT, requireAgentLevel } from "./request-helpers";
 
 export async function routeNibiruInbound(
-  context: Pick<TeamApiRequestContext, "request" | "method" | "url" | "agentLevel" | "json">,
+  context: Pick<TeamApiRequestContext, "request" | "method" | "url" | "agentLevel" | "json" | "member">,
   { agents, mailbox }: { agents: Pick<TeamApiAgents, "listAgents">; mailbox: TeamApiMailbox },
   hidden: ReadonlySet<string>,
 ): Promise<RouteOutcome> {
@@ -34,6 +34,7 @@ export async function routeNibiruInbound(
   const receipt = await runCauseEffect(
     Effect.mapError(
       inbound.accept({
+        principalId: context.member.id,
         idempotencyKey: envelope.idempotencyKey,
         taskId: envelope.taskId,
         recipientAgentId: envelope.recipient,
