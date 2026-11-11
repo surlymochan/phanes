@@ -146,6 +146,7 @@ class OrphanRunTests(unittest.TestCase):
 
     def setUp(self):
         self.module = load_module("autodispatch_host_recovery", AUTODISPATCH_PATH)
+        self.module.card_quality = lambda text: None  # these scenarios judge the lane recovery, not the card quality
         self.fleet = FakeGitHub({ISSUE: {"state": "OPEN", "labels": ["lane-ready", "in-progress"]}})
         self.module.gh = self.fleet
         self.module.log = lambda *args, **kwargs: None
@@ -252,6 +253,7 @@ class RecoveryTickTests(unittest.TestCase):
         self.state_dir = self.root / "state"
         self.state_dir.mkdir()
         self.module = load_module("autodispatch_host_recovery_tick", AUTODISPATCH_PATH)
+        self.module.card_quality = lambda text: None  # these scenarios judge the lane recovery, not the card quality
         self.fleet = FakeGitHub({ISSUE: {"state": "OPEN", "labels": ["lane-ready", "in-progress"]}})
         self.status = remote_status()
         # the dispatcher runs against the sandbox: no real state dir, no real fleet
@@ -376,6 +378,7 @@ class HostPauseAttributionTests(unittest.TestCase):
 
     def setUp(self):
         self.module = load_module("autodispatch_host_pause", AUTODISPATCH_PATH)
+        self.module.card_quality = lambda text: None  # these scenarios judge the lane recovery, not the card quality
         self.module.log = lambda *args, **kwargs: None
 
     def test_the_marker_of_the_dispatcher_is_attributed(self):
@@ -399,6 +402,7 @@ class RunnerLivenessTests(unittest.TestCase):
 
     def setUp(self):
         self.module = load_module("autodispatch_runner_liveness", AUTODISPATCH_PATH)
+        self.module.card_quality = lambda text: None  # these scenarios judge the lane recovery, not the card quality
 
     def test_a_live_runner(self):
         self.assertEqual(self.module.runner_liveness({"runner_alive": True}), "alive")
@@ -424,6 +428,7 @@ class HostRecoveryPauseTests(unittest.TestCase):
         self.root = Path(tempfile.mkdtemp(prefix="ad-host-pause-", dir=str(SCRATCH)))
         self.addCleanup(shutil.rmtree, self.root, ignore_errors=True)
         self.module = load_module("autodispatch_host_recovery_pause", AUTODISPATCH_PATH)
+        self.module.card_quality = lambda text: None  # these scenarios judge the lane recovery, not the card quality
         self.module.D = str(self.root)
         self.module.log = lambda *args, **kwargs: None
 

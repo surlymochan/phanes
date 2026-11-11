@@ -3,6 +3,7 @@
 (Refs #1811) and for the review lane load balancing (Refs #1701)."""
 import copy
 import json
+from card_fixtures import fixture_json
 import math
 import os
 import re
@@ -163,7 +164,7 @@ class VerifyCardTest(unittest.TestCase):
         old_gh, old_log = AUTODISPATCH.gh, AUTODISPATCH.log
         try:
             AUTODISPATCH.VERIFY_REJECT_LOGGED.clear()
-            AUTODISPATCH.gh = lambda *a, **k: (0, json.dumps([valid, invalid, heading_only]), "")
+            AUTODISPATCH.gh = lambda *a, **k: (0, fixture_json([valid, invalid, heading_only]), "")
             AUTODISPATCH.log = lambda msg, brain=True: logs.append(msg)
             q = AUTODISPATCH.queue()
         finally:
@@ -191,7 +192,7 @@ class TickHarness:
 
         def fake_gh(args, timeout=60):
             if args[:2] == ["issue", "list"]:
-                return 0, json.dumps(issues), ""
+                return 0, fixture_json(issues), ""
             if args[:2] == ["issue", "view"]:
                 n = int(args[2])
                 for row in issues:

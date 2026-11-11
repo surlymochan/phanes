@@ -44,6 +44,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+from card_fixtures import fixture_json
 import os
 import re
 import shlex
@@ -168,7 +169,7 @@ class Fleet:
                     continue
                 rows.append({"number": number, "title": issue["title"], "body": issue["body"],
                              "labels": labels, "state": "OPEN"})
-            return 0, json.dumps(rows), ""
+            return 0, fixture_json(rows), ""
         if args[:2] == ["issue", "view"]:
             number = int(args[2])
             issue = self.issues.get(number)
