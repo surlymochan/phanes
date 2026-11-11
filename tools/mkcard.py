@@ -25,6 +25,7 @@ if not started or not ended:
 findings = "\n".join(body)
 
 card = f"""# {title}
+labels: p1
 
 Repository: Volto desktop (Electron, Bun, TypeScript, SolidJS). Read AGENTS.md and the AGENTS.md of every
 directory you change, and follow them.
@@ -32,6 +33,17 @@ directory you change, and follow them.
 ## Scope
 
 {scope}
+
+验收：{checks}
+
+## Plan
+
+工具类交付：列出「复刻的引擎数据形状清单」及其来源，并在验收中列出真实形状 fixture 门槛；无真实形状 fixture 不算关账。不适用时说明理由。
+
+## Design
+
+派发/暂停/终态类交付：逐项填写状态机边例矩阵的预期行为：单后端 / drain / 暂停 / 已派发后变化 / 合并后清理 / dry-run 无副作用。不适用时说明理由。
+涉及派发行为的验收必须列出 tick/集成级测试，仅函数级单测不算关账。
 
 ## Findings (from an audit written before the upstream sync; file and line references may have moved)
 
@@ -53,6 +65,10 @@ directory you change, and follow them.
   commits) and do not push.
 - Run only narrow checks, one at a time: {checks}, and `bunx biome check <changed files>`.
 - Add a release note `changelog.d/<short-name>.md` (format: see existing files in changelog.d/).
+
+## 失败模式清单
+
+实施与验收时对照缺陷模式库：`docs/defect-patterns.md`。这是新卡要求，存量卡不追溯重铸。
 
 ## Report
 

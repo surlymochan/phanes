@@ -1,0 +1,11 @@
+{
+  "hot_default": 1,
+  "hot_union": [],
+  "hot_shared": {
+    "swrm/policy.json": 1,
+    "tools/lane-autodispatch/autodispatch.py": 1
+  },
+  "hot_bare": [
+    "swrm/bin/swrm"
+  ]
+}

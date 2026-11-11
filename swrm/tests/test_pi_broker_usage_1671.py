@@ -36,9 +36,10 @@ import tempfile
 import time
 import unittest
 
+from _broker_wait import short_tmp_root, wait_for_unix_socket
+
 BROKER = pathlib.Path(__file__).resolve().parents[1] / 'bin' / 'pi-minimax-broker.mjs'
 WATCHDOG = pathlib.Path(__file__).resolve().parents[2] / 'tools' / 'mm-burn-rate.py'
-SCRATCH = pathlib.Path(__file__).resolve().parents[2] / '.swrm-tmp'
 
 # The provider answer of a normal tool call: the content carries numbers that
 # look like usage, the usage object carries the real ones.
@@ -168,8 +169,11 @@ for (const answer of JSON.parse(readFileSync(0, 'utf8'))) {
                  "pi broker binds a '/'-rooted unix-domain socket by design; no Windows transport")
 class PiBrokerUsageTests(unittest.TestCase):
     def setUp(self):
-        SCRATCH.mkdir(exist_ok=True)
-        self.tmp = tempfile.TemporaryDirectory(dir=SCRATCH)
+        # One private workspace per test, outside the shared repo-local .swrm-tmp: other tests (run in
+        # parallel workers) share and clean that directory, which removed this test's logs, stderr and
+        # sockets mid-run (FileNotFoundError / "wrote no request log").  /tmp keeps the socket path short
+        # (sun_path limit) whatever TMPDIR is.
+        self.tmp = tempfile.TemporaryDirectory(prefix='pb', dir=short_tmp_root())
         self.addCleanup(self.tmp.cleanup)
         self.root = pathlib.Path(self.tmp.name)
         self.module = self.root / 'auth.mjs'
@@ -195,14 +199,19 @@ class PiBrokerUsageTests(unittest.TestCase):
         env = self._env(PI_BROKER_LOG=str(log),
                         FAKE_UPSTREAM_CHUNK_SIZE=str(chunk_size),
                         FAKE_UPSTREAM_BODY=base64.b64encode(answer).decode('ascii'))
-        proc = subprocess.Popen(['node', str(BROKER), str(path), str(self.module), 'allowed-model'],
-                                env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        # unix-domain socket paths are limited (104 bytes on macOS, 108 on Linux)
+        self.assertLess(len(str(path).encode()), 100, 'socket path too long: %s' % path)
+        errors = log.with_suffix('.stderr')
+        with open(errors, 'wb') as stderr:
+            proc = subprocess.Popen(['node', str(BROKER), str(path), str(self.module), 'allowed-model'],
+                                    env=env, stdout=subprocess.DEVNULL, stderr=stderr)
         self.addCleanup(self._stop, proc)
-        deadline = time.monotonic() + 10
-        while not path.exists() and proc.poll() is None and time.monotonic() < deadline:
-            time.sleep(0.02)
-        self.assertTrue(path.exists(), 'the broker did not create its socket')
+        self._wait_listening(path, proc, errors)
         return path, log
+
+    @staticmethod
+    def _wait_listening(path, proc, errors, timeout=45):
+        wait_for_unix_socket(path, timeout=timeout, proc=proc, errors=errors)
 
     @staticmethod
     def _stop(proc):

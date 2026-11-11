@@ -10,7 +10,6 @@ That script starts (if not already running):
 
 | Loop | Script | Role | Heartbeat / status |
 |------|--------|------|--------------------|
-| ib-refresh-loop (`ib-refresh`) | `ctl-loop` → `ib-refresh` | renew instabox SSH certs before expiry | `~/phanes-ctl/ctl-loop.heartbeat`, `ib-refresh.status` |
 | lane-autodispatch | `lane-autodispatch` | SSH fleet dispatch + backlog refill | `~/phanes-ctl/autodispatch/heartbeat` |
 | lane-merge | `lane-merge` → `merge-loop.sh` | merge Linux-green `fleet/*` PRs | `~/phanes-ctl/autodispatch/merge-heartbeat` |
 | bus-worker-loop (`bus-worker`) | `bus-worker-loop` | GitHub issue bus mode 2 | `~/phanes-ctl/bus-worker/heartbeat`, `bus-worker/` |
@@ -19,13 +18,7 @@ That script starts (if not already running):
 
 ## Key loops: startup commands & heartbeats
 
-The `start-control-plane` suite manages the five core resident loops (五件套: `ib-refresh-loop`, `lane-autodispatch`, `lane-merge`, `bus-worker-loop`, `health-loop`) plus the `disk-watermark` guard loop (Refs #1666), with their startup commands and heartbeat/status files:
-
-1. **`ib-refresh-loop`** / **`ib-refresh`** (instabox SSH certificate preflight & renewal loop):
-   - **Startup command**: `~/phanes-ctl/bin/ctl-loop` (supervises `ib-refresh`) or manual preflight `~/phanes-ctl/bin/ib-refresh`  
-     (or background one-shot: `setsid nohup ~/phanes-ctl/bin/ctl-loop >/dev/null 2>&1 &`; repo CLI: `python3 tools/ib-refresh.py --fleet-config ~/phanes-ctl/fleet.json --renew-command ~/phanes-ctl/bin/renew-cert --pause-dir ~/phanes-ctl/autodispatch --status-file ~/phanes-ctl/ib-refresh.status`)
-   - **Heartbeat path**: `~/phanes-ctl/ctl-loop.heartbeat`
-   - **Status path**: `~/phanes-ctl/ib-refresh.status` (stable row: `ok=... hosts_ok=... skipped_cooldown=... min_ttl=... min_exp=...`; field order is fixed)
+The `start-control-plane` suite manages four core resident loops (`lane-autodispatch`, `lane-merge`, `bus-worker-loop`, `health-loop`) plus the `disk-watermark` guard loop (Refs #1666), with their startup commands and heartbeat/status files:
 
 2. **`lane-autodispatch`** (fleet SSH dispatch + backlog refill):
    - **Startup command**: `~/phanes-ctl/bin/lane-autodispatch`  
@@ -55,7 +48,7 @@ The `start-control-plane` suite manages the five core resident loops (五件套:
    - **Task upload contract (Refs #920)**: dispatch uploads the generated task
      over the existing SSH connection with stdin (`ssh ... 'cat > /tmp/task-*.md'`).
      A standalone `scp` upload is forbidden because it is unreliable through
-     the instabox ProxyJump path. Check with `python3 tools/check-ad-task-upload.py`.
+     some SSH jump paths. Check with `python3 tools/check-ad-task-upload.py`.
    - **SSH option quoting contract (Refs #972)**: status probes and harvest both
      build their SSH command from the same `git_ssh_command`/`shlex` path, so a
      `ProxyCommand` or `ProxyJump` value containing spaces remains one argv item.
@@ -128,43 +121,6 @@ variables, so setting them while invoking `~/phanes-ctl/bin/start-control-plane`
 does not enable this behavior. Unit tests invoke the helpers directly with fake
 worker commands.
 
-For production supervision, the authoritative contract remains `ctl-loop`'s
-plain-text positive PID files at `~/phanes-ctl/autodispatch/autodispatch.pid`,
-`autodispatch/health.pid`, and `ib-refresh.pid` (see below and
-`tools/check-ctl-loop-reap.py`). It terminates and reaps a live old child before
-restarting it. The JSON helper state is isolated fixture/library state; do not
-run it as a second supervisor for a ctl-loop child or treat it as authoritative
-production state. The offline ctl-loop contract checker is unchanged.
-
-`ib-refresh` must run its renewal preflight before starting `lane-autodispatch`.
-The repository implementation is `tools/ib-refresh.py`; it reads a temporary
-fleet JSON (`--fleet-config`), classifies each certificate as `valid`,
-`expiring`, `expired`, or `missing`, and prints one JSON result.  Only a result
-with `start_lane_autodispatch: true` may start the dispatch loop.  Renewals are
-staged in a temporary directory and atomically installed only after every
-renewal returns a valid X.509 certificate; a partial failure leaves the old
-certificates and fleet config untouched. The status file contains a stable,
-machine-readable row with those five fields; `hosts_ok` counts only valid
-certificates in the written fleet config, and cooldown skips contribute to
-`skipped_cooldown`. When the SSH BatchMode probe is enabled (`ssh_probe` in the fleet
-config, or `--ssh-probe`), a host whose probe exits non-zero is marked
-`probe_status: failed` and stays outside `hosts_ok` (Refs #954).
-When `need_ok` is configured, the gate stays healthy when
-`hosts_ok >= need_ok`; cooldown hosts are omitted from an alternate fleet
-config, so three reachable hosts can keep `ok=1` while two hosts cool down
-(for example, `ok=1 hosts_ok=3 skipped_cooldown=2`).
-Hosts absent from the configured topology are errors and are excluded from
-`hosts_ok` (Refs #1164); exercise this invariant with
-`python3 tools/check-fleet-unknown-host.py`.
-For the node-1.example.invalid/node-2.example.invalid cooldown case, exercise this accounting with the fake-input check
-`python3 tools/check-ib-cooldown-status.py` (Refs #1262).
-An active `PAUSE-HOST-<host>` body with `auto:cooldown:until=<ISO-Z>` is read
-without modification; `ib-refresh` skips resume/wake/renew for that host and
-counts it in `skipped_cooldown`. Exercise this boundary with
-`python3 tools/check-ib-cooldown-skip.py` (Refs #904).
-Check the parser contract offline with
-`python3 tools/check-ib-status-line.py`.
-
 ### SSH ControlMaster stale-socket sweep (Refs #921)
 
 At the beginning of every `lane-autodispatch` tick, sweep
@@ -174,53 +130,11 @@ regular files are never removed.  This is the cleanup boundary for the
 `ControlMaster` mux used by fleet SSH; it is intentionally before dispatch so
 the next connection can recreate a usable mux.
 
-The sweep matters after `ib-refresh` renews a fleet SSH certificate: an old
-mux can stay wedged with the pre-renewal session and make fresh certificate
-authentication appear broken.  Removing only stale sockets lets the next SSH
-operation establish a new control connection without touching certificates or
-keys.  The offline contract check creates fake sockets with old and fresh mtimes:
+Removing stale sockets lets the next SSH operation establish a new control connection.
 
 ```bash
 python3 tools/check-cm-ad-sweep.py
 ```
-
-### SSH fleet BatchMode probe & hosts_ok rollup (Refs #954)
-
-`ib-refresh` can probe every fleet host with `ssh -o BatchMode=yes` before it rolls the
-fleet up into the control-plane status row. Any non-zero probe exit code (including
-`Permission denied`, `Connection closed`, or timeout) marks the host as failed: the row
-carries `probe_status: failed` and the host is excluded from `hosts_ok`, so a broken host
-never adds capacity. Only a zero exit code may add one `hosts_ok`.
-
-Enable the probe in the fleet config (`~/phanes-ctl/fleet.json`) or on the command line:
-
-```json
-{
-  "need_ok": 3,
-  "ssh_probe": {"enabled": true, "ssh_config": "~/.ssh/swrm-hub/config"},
-  "hosts": [{"name": "node-1.example.invalid", "cert": "certs/node-1.example.invalid.crt"}]
-}
-```
-
-```bash
-python3 tools/ib-refresh.py --fleet-config ~/phanes-ctl/fleet.json \
-  --renew-command ~/phanes-ctl/bin/renew-cert --ssh-probe \
-  --ssh-config ~/.ssh/swrm-hub/config
-```
-
-The offline contract check drives the same production refresh path with a fake probe
-runner, so it never opens an SSH connection and never touches live instabox nodes:
-
-```bash
-python3 tools/check-fleet-batchmode-probe.py
-```
-
-Certificate reuse is controlled by `IB_CERT_REUSE_TTL` (default `1500` seconds):
-`need_renew` is true only below that remaining TTL.  Set a higher value to force
-earlier renewal; `--threshold-seconds` is the one-run override.  The offline
-contract check `python3 tools/check-ib-cert-reuse.py` uses fake TTLs and the
-environment variable to cover both branches, and never invokes a real renewal
-command or touches a machine certificate.
 
 ### Merge loop idle heartbeat (Refs #955)
 
@@ -249,12 +163,10 @@ python3 tools/check-merge-idle-heartbeat.py
 ```bash
 ~/phanes-ctl/bin/start-control-plane          # idempotent; prints already/start
 ~/phanes-ctl/bin/lane-autodispatch-status     # busy lanes + queue
-test -f ~/phanes-ctl/bin/ctl-loop \
-  -a -f ~/phanes-ctl/bin/lane-autodispatch \
+test -f ~/phanes-ctl/bin/lane-autodispatch \
   -a -f ~/phanes-ctl/bin/lane-merge \
   -a -f ~/phanes-ctl/bin/bus-worker-loop \
   -a -f ~/phanes-ctl/bin/health-loop \
-  -a -f ~/phanes-ctl/bin/ib-refresh \
   -a -f ~/phanes-ctl/bin/start-control-plane
 python3 ~/phanes-ctl/bin/health-check.py >/dev/null
 ```
@@ -268,13 +180,11 @@ test -f ~/phanes-ctl/bin/lane-autodispatch \
   -a -f ~/phanes-ctl/bin/bus-worker-loop \
   -a -f ~/phanes-ctl/bin/lane-merge \
   -a -f ~/phanes-ctl/bin/health-loop \
-  -a \( -f ~/phanes-ctl/bin/ib-refresh -o -f ~/phanes-ctl/bin/ctl-loop \) \
   -a -f ~/phanes-ctl/bin/start-control-plane \
   -a -f ~/phanes-ctl/autodispatch/heartbeat \
   -a -f ~/phanes-ctl/autodispatch/merge-heartbeat \
   -a -f ~/phanes-ctl/autodispatch/health.heartbeat \
-  -a \( -f ~/phanes-ctl/bus-worker/heartbeat -o -d ~/phanes-ctl/bus-worker \) \
-  -a \( -f ~/phanes-ctl/ctl-loop.heartbeat -o -f ~/phanes-ctl/ib-refresh.status \)
+  -a \( -f ~/phanes-ctl/bus-worker/heartbeat -o -d ~/phanes-ctl/bus-worker \)
 ```
 
 Check scripts (no SSH):
@@ -292,22 +202,16 @@ Check scripts (no SSH):
   matches the fresh count, a failed authoritative read keeps the row instead of
   shrinking `_ready`, and every issue is read at most once per tick;
   it never calls `gh`.
-- `python3 tools/check-soak-summary.py` — offline dual-mode soak summary
-  contract. It reads fake `lanes-status` and `ib-refresh.status` rows and
-  prints the `busy`, `ready`, `hosts_ok`, and `min_exp` values for polling.
 - `bash docs/check-ctl-boot.sh` — offline path and heartbeat existence verification under `~/phanes-ctl` (or `bash docs/check-ctl-boot.sh --self-test` to test in an offline fixture)
-- `bash tools/check-ctl-boot.sh` — offline control-plane smoke check asserting start-control-plane 五件套 (`ib-refresh-loop`, `lane-autodispatch`, `lane-merge`, `bus-worker-loop`, `health-loop`), four heartbeat paths (`autodispatch/heartbeat`, `merge-heartbeat`, `ctl-loop.heartbeat`, `health.heartbeat`), `PAUSE-BACKEND-*` naming conventions, and replaying backend gate offline (`bash tools/check-ctl-boot.sh --gate-only`).
+- `bash tools/check-ctl-boot.sh` — offline control-plane smoke check asserting start-control-plane loops (`lane-autodispatch`, `lane-merge`, `bus-worker-loop`, `health-loop`) and their heartbeat paths, `PAUSE-BACKEND-*` naming conventions, and replaying backend gate offline (`bash tools/check-ctl-boot.sh --gate-only`).
 - `python3 tools/check-ad-heartbeat-stall.py` — read-only autodispatch heartbeat stall check. The default threshold is **20 minutes**; a missing, unreadable, or older heartbeat emits a clear `WARNING` and exits non-zero. It never kills or restarts the real AD.
 - `python3 tools/check-ad-heartbeat-chunk.py` — offline #906 contract check asserting that lane-autodispatch's main loop sleeps in chunks of ≤ 5s (`sleep(5)`) between ticks and updates `autodispatch/heartbeat` on each step, preventing host suspend / nanosleep freeze false stalls.
 - `python3 tools/check-ad-ssh-command.py` — offline #907 contract check. The fleet host list is parsed from `docs/fleet-topology-expected.md` and the jump-host table from the AD runtime configuration (`$AD_JUMP_HOSTS` / `~/phanes-ctl/autodispatch/jump-hosts.json`), so the script keeps no second copy of the topology; it asserts that a `ProxyCommand` containing spaces stays one `shlex.quote`d argv item and that the `core.sshCommand` of the harvest fetch has no unquoted space breakage. It also fails if the AD source hardcodes a fleet host name.
 - `python3 tools/check-ad-queue-filter.py` — offline #903 contract check using fake issue JSON; issues carrying `lane-ready` together with `lane-failed` or `lane-pr` are not dispatchable.
 - `python3 tools/check-codex-queue-heartbeat.py` — offline #988 contract check for a Codex status that stays `queued` with a provider rate-limit `queue_reason`. If both `queued_at` and `heartbeat_at` are older than **30 minutes**, the item must be reclaimed; a fresh heartbeat or another queue reason is preserved.
-- `python3 tools/check-ctl-loop-reap.py` — offline #951 contract check for ctl-loop heartbeat expiry, pid disappearance, child restart, and duplicate-instance prevention.
-- `python3 tools/check-ctl-hb-refresh.py` — offline #1263 contract check: static scan of ctl-loop ensuring the ib-refresh wall-clock wait loop writes ctl-loop.heartbeat using date and enforces REFRESH_CAP.
 - `python3 tools/check-ready-refill-contract.py` — offline dual-mode refill contract (Refs #869). It creates a fake backlog and status snapshot with `_ready < 10`, then asserts the next tick's `filed N issue(s) from backlog` log. The check imports the shared `is_thin_card` predicate: a thin card is skipped and a thick card is accepted. It uses no live `~/phanes-ctl`, GitHub, git, SSH, or `gh issue create`; it also asserts `WARNING queue low` when local and repo backlog sources are exhausted.
 - `python3 tools/check-ad-ready-target.py` — offline #1242 AD ready-queue contract. With fake `ready`, `LOW`, and `TARGET` values, when `ready < LOW` the refill `need` is `max(TARGET - ready, ...)` (and reaches `TARGET`); `is_thin_card` rejects thin cards. It uses only a local fixture and never calls `gh`.
 - `python3 tools/check-ad-task-upload.py` — offline #920 contract check. It captures fake task content, asserts SSH stdin upload via `cat > /tmp/task-*.md`, and rejects a bare `scp` upload.
-- `python3 tools/check-fleet-batchmode-probe.py` — offline #954 contract check. It drives the production `ib-refresh` refresh path with a fake BatchMode probe runner: fake probe outputs with non-zero exit codes (such as `Permission denied` and `Connection closed`) never increment `hosts_ok`, while a zero exit code still does. It opens no SSH connection and touches no live instabox node.
 - `python3 tools/check-lane-failed-requeue.py` — offline #960 contract check. Before restoring `lane-ready` to a `lane-failed` issue, fake labels must have no `in-progress`/`lane-pr`, `state.json` must have no occupied lane entry, and the issue must still contain an inline acceptance command. It never touches the real issue or state.
 - `python3 tools/check-ad-fetch-transient-class.py` — offline #986 contract check. It asserts `bad pack header` and `fetch-pack: unexpected disconnect` stderr samples remain transient and retryable within the harvest bound.
 - `python3 tools/check-orphan-runner-window.py` — offline #961 contract check for an assignment whose remote `runner_alive` remains false. After the window expires while `run_state=running`, the assignment is recycled as `orphaned` and the task is relabelled `lane-ready`; the exact window boundary is not expired.
@@ -316,7 +220,6 @@ Check scripts (no SSH):
 - `python3 tools/check-ghost-in-progress.py` — offline ghost in-progress check (Refs #922). Fake fixtures only: an open issue carrying `in-progress` with no lane entry in `state.json` counts as a ghost only when the label is older than **10 minutes** (a dispatch in flight still has no lane record), `lane-pr` issues are protected, and a `lane-failed` ghost is only re-labelled `lane-ready` when `state.json` has no lane occupancy and the issue body keeps its acceptance command (#960). It prints the recommended `gh issue edit` commands and never touches GitHub.
 - `python3 tools/check-ad-stale-label-skip.py` — offline #985 contract check. A stale search hit whose authoritative labels still contain both `lane-failed` and `lane-ready` is skipped once; the operator should remove the residual `lane-ready` label before retrying.
 - `python3 tools/check-health-hosts-ok-pause.py` — offline #948 contract check. It asserts that a host held by a `PAUSE-HOST-<host>` file is never counted in the `hosts_ok` summary, that it is reported in `skipped_cooldown`, that an expired automatic pause is released, and that a pause that has not expired yet — or a manual one — is never cleared.
-- `python3 tools/check-dual-hosts-ok.py` — offline #1637 dual-mode contract check. It drives the production `ib-refresh` refresh path with a fake BatchMode probe runner and a fake `lanes.json`: the reachable lanes are exactly the lanes whose host is in the `ib-refresh.status` `hosts_ok` set and which are not drained, while lanes on probe-failed, cooldown, or topology-unknown hosts (and lanes with no host) are never reachable; with `hosts_ok=0` no lane is reachable and the boot gate is closed. It opens no SSH connection and touches no live `~/phanes-ctl` state.
 - `python3 tools/check-ad-review-pause-uncounted.py` — offline #1607 contract check. It drives the hotfixed AD's `box_pause_during(cfg, st, path)` and its `finish_review` no-verdict branch: a review failure that happened while the box VM was paused is not counted, a failure outside the pause window is counted. It reads and writes only a temporary tree, never the live `~/phanes-ctl/autodispatch` state.
 - `python3 tools/check-review-evidence-pack.py <pack.md>` — offline #1788 evidence-pack reader. It parses the raw evidence pack of a lane review (`swrm/lib/review/evidence.py`) into structured fields (CI conclusions, test logs, diff statistics, acceptance checks, preliminary opinion) and exits 1 when a required section is missing or the format is broken — the same verdict the dispatcher records in `reviews.json` (`evidence.complete`). It reads one file and never touches GitHub.
 - `python3 tools/check-ad-harvest-backoff.py` — offline #947 contract check. It replays a fake harvest fetch failure sequence and asserts the transient/fatal classification, the exponential backoff ladder, and that the first N transient failures only log and back off — the (N+1)-th failure is the one labelled `lane-failed`. It never touches the live lane state.
@@ -420,6 +323,74 @@ lane state):
 
 ```bash
 python3 tools/check-ad-harvest-backoff.py
+```
+
+### Budget-window failures (Refs #1668)
+
+An executor run that ends without a commit with `error_class` set to
+`budget_exceeded` is held with `in-progress`, which frees its lane without treating
+the card as failed. An explicit non-budget `error_class` keeps the ordinary failure
+flow even if the status or summary mentions budget exhaustion. Only when the error
+class is absent does AD fall back to budget status or summary hints.
+The AD only removes that hold after it positively confirms that
+the backend window is open. By default AD reads the health-loop's `health.json`
+in its state directory (at most 900 seconds old and strictly newer than the held
+card's `at` timestamp). A snapshot taken before or at the budget failure cannot
+prove recovery; a missing or invalid hold timestamp also keeps the card held.
+For the MiniMax-consuming `pi`
+backend, `minimax.interval_pct` and `minimax.weekly_pct` are percentages remaining;
+both must be positive. An explicit `minimax.exhausted`/`remaining_pct` observation
+is also supported. Missing or unknown short-window data cannot be inferred from
+weekly headroom alone.
+The `minimax` entry must carry its own `observed_at` (epoch seconds, set by the
+health loop only when it actually queried MiniMax); the file's modification time is
+not used, so a refresh of other sources cannot revive an old quota reading. Without
+a fresh `observed_at` newer than the hold, the card stays held. Holds without
+confirmed recovery expire into `lane-failed` after `AD_BUDGET_HOLD_MAX_HOURS`
+(default 6 hours, minimum 1), requiring manual attention.
+
+`AD_BUDGET_PROBE_CMD` can override this source with a command that prints JSON
+quota state, for example `{"exhausted": false}` or
+`{"five_hour": {"used_percentage": 0}}`. A shared probe can return
+`{"backends": {"pi": {...}, "codex": {...}}}` or `{"lanes": {"M17": {...}}}`;
+AD selects the held card's lane/backend before inspecting windows. Flat output
+must describe the target; explicit `lane`/`backend` fields must match. Every
+advertised window must be known and open. Missing,
+invalid, failed, stale, or still-exhausted results keep the card held for a later tick;
+there is no fixed-delay requeue. The per-card consecutive failure count survives a
+requeue and the second budget death (`AD_BUDGET_REQUEUE_MAX`, default `2`) closes the
+card through the ordinary `lane-failed` flow. A later tick clears its terminal
+bookkeeping after the label update succeeds.
+
+**B1:** `result.json` has no required top-level reset timestamp, so AD checks the
+health snapshot or configured window probe before releasing a hold and keeps it held
+on unknown state. `test_default_health_source_releases_only_after_both_windows_recover`,
+`test_default_health_source_rejects_stale_or_unknown_windows`, and
+`test_probe_selects_the_target_lane_and_backend` cover default recovery and isolation.
+`test_default_health_source_requires_a_snapshot_after_the_hold` covers persisted
+holds across ticks: snapshots from 300 seconds before or at the hold retain the
+card, and a newer recovered snapshot permits re-dispatch.
+`test_the_card_stays_held_while_the_window_is_exhausted` and
+`test_the_card_returns_to_the_queue_when_the_window_recovered` exercise the real
+harvest-to-requeue ticks. **B2:** `_budget_failures` persists by issue across requeue;
+the terminal label update is retried if it fails, and the next tick removes the hold
+and count only after it succeeds. `test_the_budget_failure_count_survives_a_requeue`
+and `test_the_bookkeeping_of_a_card_is_cleaned_up_when_it_leaves_the_hold` cover that
+flow. `test_terminal_label_failure_is_retried_after_state_reload` covers two failed
+terminal writes, persisted holds/counts across ticks, and cleanup after recovery.
+`test_a_budget_failure_is_not_a_card_failure` also checks that the harvest
+returns the result structure expected by `tick()` and releases the lane; the real
+failure guard is `test_a_real_failure_keeps_the_lane_failed_flow`.
+`test_exec_error_overrides_budget_words_in_the_summary` checks that an explicit
+execution error remains failed across state reload and window recovery;
+`test_non_budget_class_overrides_conflicting_budget_status` covers quota errors
+with conflicting budget hints.
+
+The offline end-to-end regression drives real `tick()` harvesting, hold, window
+recovery, re-dispatch, and terminal cleanup against a fake fleet:
+
+```bash
+cd tools/lane-autodispatch && python3 -m unittest test_budget_requeue -v
 ```
 
 ### AD queue share for verify cards (Refs #1794)
@@ -578,9 +549,6 @@ same.
 | `hosts_ok` | healthy probed hosts **minus** every host that has a `PAUSE-HOST-<host>` file |
 | `skipped_cooldown` | healthy hosts skipped from `hosts_ok` because a `PAUSE-HOST-<host>` file exists (automatic cooldown **or** manual hold) |
 | `hosts_degraded` | probed hosts whose probe failed (disk/mem/ssh) |
-
-These are host lists; the `ib-refresh.status` row of the same names carries
-counts instead.
 
 `hosts_ok` and `skipped_cooldown` partition the healthy probes: a held host is
 never reported in `hosts_ok`, and a host without a `PAUSE-HOST-<host>` file is
@@ -840,7 +808,7 @@ health loop is not rewritten by the probe:
 The matching alert line (appended to `health.alert`, one line per alerting service):
 
 ```
-2026-11-03 19:15:00 level=hard source=executor-tasks host=lane-host-a service=openswarm-executor-M19.service zombies=844 tasks=869/1552 ratio=0.56 parents=1210977 snapshot=/path/to/state/executor-tasks-snapshot.ps
+2026-11-03 19:15:00 level=hard source=executor-tasks host=<host>.example.invalid service=openswarm-executor-M19.service zombies=844 tasks=869/1552 ratio=0.56 parents=<pid> snapshot=<state-dir>/executor-task-snapshots/executor-tasks-<host>.example.invalid-20261103-191500-000000.ps
 ```
 
 Offline proof (a fake fleet host answers the ssh commands of the probe; no network, no
@@ -895,49 +863,6 @@ Fifth implementation review (baseline `32cf3ae6d`), regression in `ExecutorRevie
 |---|---|---|
 | B1 - normal process exits abort the bulk cgroup sample and suppress all host alerts | skip failed or empty reads only after confirming that the process directory disappeared; continue to fail sampling for unreadable surviving processes or malformed records | `test_bulk_cgroup_command_skips_exited_processes_and_keeps_alerts` forces an exit during the actual shell command, covering both failed and empty reads, then verifies 51 descendant zombies, their parent PID, soft and hard service alerts, persisted health payload and the full ps snapshot; existing read-failure and incomplete-record regressions remain in place |
 
-
-## ctl-loop child reaping and restart (Refs #951)
-
-`~/phanes-ctl/bin/ctl-loop` is the supervisor for the resident `ad` (`lane-autodispatch`),
-`health` (`health-loop`), and `ib-refresh` children. Each child has one pid file and one
-heartbeat file. The canonical heartbeat paths are `autodispatch/heartbeat`,
-`autodispatch/health.heartbeat`, and `ctl-loop.heartbeat`; the corresponding pid files are
-`autodispatch/autodispatch.pid`, `autodispatch/health.pid`, and `ib-refresh.pid` under
-`~/phanes-ctl`.
-
-On every supervisor tick, ctl-loop must:
-
-1. read and validate each pid, and treat a missing, malformed, or exited pid as unhealthy;
-2. treat a missing heartbeat or one older than 120 seconds as unhealthy;
-3. restart each unhealthy child exactly once; if its old pid is still alive, terminate and
-   reap that process before spawning its replacement;
-4. write the replacement pid and wait for a fresh heartbeat before considering the child
-   healthy again.
-
-The pid check is the duplicate-instance guard: a stale heartbeat never authorizes a second
-copy to run alongside a live old pid. The offline fixture contract covers fresh/stale
-heartbeats, missing/exited pids, and the one-decision-per-child rule:
-
-```bash
-python3 tools/check-ctl-loop-reap.py
-```
-
-### ctl-loop ib-refresh heartbeat maintenance (Refs #1263)
-
-During `ib-refresh` (instabox certificate renewal), `ctl-loop` enters a wall-clock wait
-loop bounded by `REFRESH_CAP` (default 420s). In accordance with the 37-minute silence
-lesson (`brain/lessons-37min-silence.md`), long child waits must never pause supervisor
-heartbeats: `ctl-loop` must refresh `ctl-loop.heartbeat` with the current `date` timestamp
-inside every iteration of the wait loop.
-
-The offline static scanner verifies that `bin/ctl-loop` enforces `REFRESH_CAP`, references
-`ctl-loop.heartbeat`, and updates it via `date` within the wait loop:
-
-```bash
-python3 tools/check-ctl-hb-refresh.py
-```
-
-Autodispatch skips paused host/backend/lane and keeps other backends busy.
 
 ## Lane memory ceiling on low-memory hosts (Refs #867)
 
@@ -1126,10 +1051,8 @@ box-pauses.jsonl / 日志路径都落在该目录内，因此不会读写真实�
 setsid nohup ~/phanes-ctl/bin/lane-autodispatch >/dev/null 2>&1 &
 setsid nohup ~/phanes-ctl/bin/bus-worker-loop >/dev/null 2>&1 &
 setsid nohup ~/phanes-ctl/bin/lane-merge >/dev/null 2>&1 &
-setsid nohup ~/phanes-ctl/bin/ctl-loop >/dev/null 2>&1 &
 setsid nohup ~/phanes-ctl/bin/health-loop >/dev/null 2>&1 &
 setsid nohup ~/phanes-ctl/bin/disk-watermark-guard.py --loop --pause-dir ~/phanes-ctl/autodispatch --brain-log /workspace/phanes/brain/log.md --host lane-host-a >/dev/null 2>&1 &
-~/phanes-ctl/bin/ib-refresh                  # manual certificate refresh preflight
 ```
 
 Do not invent systemd units here; a documented start script is enough.

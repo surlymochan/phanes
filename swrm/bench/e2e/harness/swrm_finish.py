@@ -19,6 +19,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from harness.metrics import iter_json_events, looks_like_usage, normalize_usage  # noqa: E402
 
 
+TERMINAL_STATUSES = ("done", "partial", "failed", "stopped", "budget_exceeded", "unroutable")
+
+
 def session_from_events(path: str | None) -> str | None:
     if not path:
         return None
@@ -63,13 +66,19 @@ def extract_result_object(text: str) -> dict | None:
     return found
 
 
+def _is_event_record(obj: dict) -> bool:
+    """Telemetry events carry an "event" field; a run receipt never does."""
+    return "event" in obj
+
+
 def _is_result_receipt(obj: object) -> bool:
     if not isinstance(obj, dict):
         return False
     if not isinstance(obj.get("id"), str) or not obj["id"].strip():
         return False
-    terminal_statuses = ("done", "partial", "failed", "stopped", "budget_exceeded", "unroutable")
-    if "status" in obj and obj["status"] not in terminal_statuses:
+    if _is_event_record(obj):
+        return False
+    if "status" in obj and obj["status"] not in TERMINAL_STATUSES:
         return False
     run_dir = obj.get("run_dir")
     workspace = obj.get("workspace")
@@ -77,7 +86,7 @@ def _is_result_receipt(obj: object) -> bool:
         (isinstance(run_dir, str) and bool(run_dir.strip()))
         or (isinstance(workspace, dict) and workspace.get("mode") in ("worktree", "in-place", "github-issue"))
     )
-    if obj.get("status") in terminal_statuses and has_run_context:
+    if obj.get("status") in TERMINAL_STATUSES and has_run_context:
         return True
     decision = obj.get("decision")
     if (obj.get("status") == "unroutable" and isinstance(decision, dict)
@@ -98,7 +107,7 @@ def _is_result_receipt(obj: object) -> bool:
     )
     if not has_executor_attempts:
         return False
-    return obj.get("status") in terminal_statuses or looks_like_usage(obj.get("usage"))
+    return obj.get("status") in TERMINAL_STATUSES or looks_like_usage(obj.get("usage"))
 
 
 def executor_calls(result: dict) -> list[dict]:

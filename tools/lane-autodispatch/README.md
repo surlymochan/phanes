@@ -10,7 +10,9 @@ only live on the box after that sync.
 
 **旧 dispatcher 已退役**：上游已删除 `lib/dispatch/engine.py`；本轮一并移除无生产调用方的
 phanes_only dispatch 扩展及其测试。当前自动派发使用 swrm 原生 batch/fleet。
-本目录仍保留独立的旧控制面镜像和离线测试，不包含旧 engine 的审查派发实现。
+本目录仍保留独立的旧控制面镜像和离线测试；审查车道按积压分配（Refs #1701，见下文）落在
+本镜像里，旧 engine 的其余实现不再保留。**注意**：#1701 的按积压分配目前只接在这份旧控制面镜像上，
+尚未接入当前 swrm 原生 batch/fleet 派发路径，离线 tick 回放不能证明生产派发已按积压分配。
 `tools/check-ad-review-pause-uncounted.py` 的运行副本契约不适用于本镜像。
 
 Base-commit validation: the base commit must exist in the target repo before a lane is assigned
@@ -76,7 +78,7 @@ work_slots   = total - reserve - work_busy # 工作类还剩的车道
 
 ```bash
 # 1) 同步仓库镜像到 box 运行时
-cp /workspace/phanes-repo/tools/lane-autodispatch/autodispatch.py ~/phanes-ctl/bin/autodispatch.py
+cp tools/lane-autodispatch/{autodispatch.py,hotfiles.py,hot_policy.json} "$AD_BIN_DIR"/
 # 2) 在 AD 的启动环境里导出开关（start-control-plane 启动的 lane-autodispatch 也要拿到它）
 export AD_VERIFY_SHARE_ENABLED=1        # 可选：export AD_VERIFY_SHARE=0.2 AD_VERIFY_MIN=1
 # 3) 重启 AD 循环后生效
@@ -90,6 +92,80 @@ export AD_VERIFY_SHARE_ENABLED=1        # 可选：export AD_VERIFY_SHARE=0.2 AD
 - `queue share: dispatched <class> #<n> on <lane>` —— 本次派发的类别。
 
 离线验证：`python3 tools/lane-autodispatch/test_can_take.py`（含工作洪峰 / 验证洪峰 / 工作类上限三个场景）。
+
+## 证据审查风险分级（Refs #1988）
+
+验证类卡派发前，AD 用纯函数分类器（`tester_risk.py`）判定这张卡的证据要读多深，输出
+`full_read`（全读）或 `sampled`（按固定种子抽检），并把决策与理由写进卡状态：
+
+- 输入：目标 PR 的 diff 统计（改动文件数、增删行数）、历史 `needs-human` 标记（含已摘掉的
+  标签）、可配置的抽检散列（seed + 抽检率）；
+- 规则：大 diff（≥ 20 个文件或 ≥ 1000 行变更）或任一 `needs-human` 前科 → 恒为 `full_read`；
+  常规卡按 `SHA-256(seed, PR 号)` 稳定抽检（同一 PR 每次结果相同），被抽中的那部分按全读处理；
+  数据缺失或畸形 → 保守 `full_read`；
+- 写入：决策与理由进派发卡正文（车道读到的卡）、车道状态 `state[lane]["tester_risk"]`，以及
+  按卡保留的 `state["_tester_risk_cards"][<issue>]`（车道释放后仍可查）。
+
+### 配置项
+
+| 环境变量 | 默认 | 含义 |
+| --- | --- | --- |
+| `AD_TESTER_RISK_SAMPLE_RATE` | `1` | 常规卡中被稳定抽中（按全读处理）的比例（0 = 常规卡一律抽检，1 = 常规卡一律全读）。默认 1：所有卡默认全量审查，抽检需显式调低才启用，不放松默认门禁 |
+| `AD_TESTER_RISK_SEED` | `risk-v1` | 抽检散列种子，同一 seed 下同一 PR 的结果稳定 |
+
+### 部署
+
+分类器与调度器同目录，部署时一起复制；缺少分类器不会中断派单，只是所有卡都按全读处理：
+
+```bash
+cp /workspace/phanes-repo/tools/lane-autodispatch/autodispatch.py ~/phanes-ctl/bin/autodispatch.py
+cp /workspace/phanes-repo/tools/lane-autodispatch/tester_risk.py ~/phanes-ctl/bin/tester_risk.py
+```
+
+离线验证：`python3 -m pytest -q tools/lane-autodispatch/test_tester_risk.py`。
+
+## 审查车道按积压分配（Refs #1701）
+
+审查只认 CX2/CX4/CX5 三条 review 车道。以前 AD 按车道顺序派审查卡：一条车道先空出来就
+先拿下一张，快的车道反复连审，另一条车道空着。现在审查卡**按在途积压分配**：
+
+- **积压** = 该车道正在审的审查数 + 当前等待队列按积压均衡分摊的审查卡数（review 队列 + 在途）；
+- **选车道**：积压最少的那条车道先拿；积压相同时**轮询**（轮到最久的那条车道先拿，轮转记在三条
+  review 车道上，某条车道临时忙一下不会打断轮转）；
+- **上限**：单车道实际已接纳的在途审查达到 `AD_REVIEW_MAX_IN_FLIGHT`（默认 1）时**跳过**
+  该车道，审查卡留在共享队列里等空闲车道；共享等待队列的预测分摊不占用准入容量；
+- **留痕**：每次分配写一行审查日志（PR、所选车道、当时各车道积压快照），供事后复核。
+
+审查队列在每次实际派发时重新统计，包含全部等待卡（包括超过执行容量的等待卡）。
+统计使用当前轮询记录的副本，不改变实际派发的轮询顺序；先预留队列头的轮次，再分摊其余等待卡，
+队列头本身不计入本次选择的积压。上一轮 `_review_waiting` 快照不作为新一轮的输入。
+排序和日志使用完整积压快照，上限检查使用实际已接纳的在途数，避免队列预测将空闲车道判为满载。
+例如默认上限 1 下，四张待审卡的首张决策快照为 `CX2=1, CX4=1, CX5=1`，三条空闲车道各接纳
+一张审查卡，第四张等待；任一车道释放后继续派发，无需减少输入或调高上限。
+每次选择都记录轮次（包括唯一最小积压的选择），下一次积压并列时按最近选择时间轮询。
+
+分配决策在工作优先级和队列份额规则选出卡之后执行：工作卡占用 CX2 时，审查卡立即在剩余
+空闲车道中重新选择。只有成功派发的审查进入运行数，未执行的计划不会污染后续日志。
+日志中的 PR 号取自验证卡正文的 `目标 PR`（支持 `#1785` 和 PR URL），不使用验证 issue 号。
+
+日志（`~/phanes-ctl/autodispatch/autodispatch.log`）：
+
+- `review plan: PR #<n> → lane <CX2|CX4|CX5> (backlog: CX2=1, CX4=0, CX5=0)` —— 分配决策与积压快照；
+- `review plan: PR #<n> → lane none (backlog: ...); every free review lane is at its cap (1), the review
+  waits for a free lane` —— 空闲的 review 车道都到上限，审查等空闲车道；
+- `review assignment: PR #<n> → lane <CX2|CX4|CX5> (backlog: ...)` —— 该决策真正落到的那条车道。
+
+`lanes-status.json` 里多一个 `_review_backlog` 字段（三条 review 车道的当前积压：正在审的数 +
+当前完整等待队列分摊数），便于事后复核。
+
+| 环境变量 | 默认 | 含义 |
+| --- | --- | --- |
+| `AD_REVIEW_MAX_IN_FLIGHT` | `1` | 单条 review 车道实际已接纳的在途审查上限；共享等待队列的预测分摊不计入 |
+
+离线验证：`python3 tools/lane-autodispatch/test_can_take.py`（含积压最少者被选中、同积压轮询、
+上限跳过、日志含积压快照、默认上限 1 下突发队列跨 tick 排空，以及通过真实 tick 驱动的
+2026-11-02 晚审查序列回放（使用默认上限 1）：回放里三条车道的审查数之差 ≤1、
+最忙的车道不超过应得份额、且没有一条车道连审两轮）。
 
 ## PR 提交前校验（Refs #1704）
 
@@ -274,3 +350,39 @@ python3 tools/lane-autodispatch/test_idle_redispatch.py   # 9 个复现用例（
 | 第 4 轮 B2 | 容量不足仍调用 `host_fail()`：记成主机故障并退避，挡住同主机的其他车道 | `dispatch_failed()` 识别容量耗尽，移除 claim 后静默返回；真实主机故障仍退避 | `test_a_capacity_failure_is_the_reason_of_the_gap`、`test_a_capacity_failure_does_not_block_another_lane_on_the_same_host`、`test_a_transport_failure_still_backs_the_host_off` |
 | 第 4 轮 B3 | 所有车道派发结束后统一关闭窗口，后续车道的耗时虚增前一车道的指标与长空闲日志 | `give_card()` 在本车道派发成功后立即关闭窗口并记录日志 | `test_each_lane_gap_ends_at_its_own_dispatch` |
 | 第 4 轮 B4 | 本轮失败原因被用于上一观察区间（600 秒无卡后才出现的无容量覆盖了已知原因） | `idle_account()` 与 `idle_close()` 一致：按窗口保存的上次结果累计已过时间，再保存本轮结果供下一区间使用 | `test_a_new_capacity_failure_does_not_replace_the_previous_no_card_wait`、`test_an_empty_pool_does_not_replace_the_previous_capacity_wait` |
+
+
+## 交付映射预检（#1849）
+首轮与 fix 轮在推送前检查提交正文的「验收条目→改动文件→测试」表。
+每条验收（含编号列表）须在验收列完整重复，允许 Markdown 标记差异；文件列和测试列必须非空。
+缺表或缺行按 quick_fix/delivery_map 退回 lane-ready，写明原因，不计评审轮次。
+issue 读取或解析失败保留 run 重试，不推送、不换标。strict 为默认，warn 记录缺项。
+映射写进提交信息；PR 评论可供人工复核，但当前自动预检仅读取提交正文。
+REPORT: dropped — 旧 .lane-review 文件载体已由 main 过滤，按 issue 裁定移除；旧 PR 无 dispatch 引擎改动需移植。
+验证：python3 -m pytest -q swrm/tests/test_lane_delivery_map.py tools/tests/test_lane_pr_validation.py
+
+## 热文件预检（#1721）
+
+`hot_policy.json` 是 backlog 铸卡和 AD 派发共用的上限配置；变更配置后须与脚本及 `hotfiles.py` 一同部署。卡片用 `热文件：path/to/file` 声明修改文件。导入时冲突卡保留待重试，`mint-log.json` 记录预检；同批已铸卡计入占用。`lanes-status.json` 的 `_blocked_details` 给出原因、文件及自首次观测以来的等待秒数；这些卡不计入 `_ready` 和补给水位。旧在途状态缺少 `hot` 字段时，声明了热文件的卡保守等待，直到旧任务结束。文档文件按既有规则豁免。
+
+## PR 交付换标（#1772 A/2）
+
+成功创建 PR 后，移除 `lane-ready`、`in-progress` 并添加 `lane-pr`。
+终态采用**流转标签子集**口径：完整标签与
+`{lane-ready, in-progress, lane-pr}` 的交集恰为 `{lane-pr}`；保留 p1、backend、planner 等其它标签。
+每次尝试均先 gh 实读，读取失败不写；写后再次 gh 实读核验，最多尝试三次。
+耗尽后返回 False、写 brain WARNING，提交路径在 `error` 报告交付标签未核验（`status` 仍记录 PR 已创建），不能当作换标成功。
+远端持续不可用时无法保证摘除 lane-ready；告警要求人工修复，不会主动加回 lane-ready。
+开放 PR、已合并未关闭 issue、重排及派发并发守卫属于 B 卡。
+旧 `openswarm/lib/dispatch` 已退役：REPORT: dropped；仅移植旧 PR 的交付换标结构到当前工具。
+
+| BLOCKER / 验收或失败模式 → 修复 | 文件 | 对应测试（tools/tests/） |
+| --- | --- | --- |
+| B4 完整标签口径冲突 → 流转子集判定，增删仅三个流转标签 | autodispatch.py | test_lane_pr_relabel.RelabelTests.test_metadata_preserved |
+| B5 缺写后核验 → gh 新读取，残留 in-progress 则重试 | autodispatch.py | test_lane_pr_relabel.RelabelTests.test_stale_readback_retries |
+| R3 三次不收敛静默 → False + brain WARNING | autodispatch.py | test_lane_pr_relabel.RelabelTests.test_nonconvergence_warns_and_fails |
+| R2 实读失败 → 本轮不写，下轮重新实读 | autodispatch.py | test_lane_pr_relabel.RelabelTests.test_read_and_write_exceptions_retry |
+| API 读/写及写后读取持续失败 → 三轮后告警 | autodispatch.py | test_lane_pr_relabel.RelabelTests.test_persistent_exceptions_warn_and_fail |
+
+验证：`python3 -m unittest discover -s tools/tests -p 'test_lane_pr*.py'`；
+`python3 -m unittest discover -s tools/lane-autodispatch -p 'test_*.py'`。

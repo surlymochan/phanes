@@ -4,8 +4,8 @@ on:
     branches: [main, codex/phanes-unification]
   pull_request:
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+  group: phanes-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 permissions:
   contents: read
 jobs:
@@ -115,9 +115,7 @@ jobs:
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
-      matrix:
-        os: [ubuntu-24.04, macos-latest]
-        python: ["3.9", "3.11", "3.13"]
+      matrix: ${{ github.event_name == 'pull_request' && fromJSON('{"include":[{"os":"macos-latest","python":"3.9"},{"os":"ubuntu-24.04","python":"3.12"}]}') || fromJSON('{"os":["ubuntu-24.04","macos-latest"],"python":["3.9","3.12","3.14"]}') }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -175,3 +173,33 @@ jobs:
             done
       - name: Validate scenario data
         run: python examples/org-health-local/validate.py
+  ci-gate:
+    name: ci-gate
+    needs:
+      - forbidden-paths
+      - changes
+      - example-json
+      - upstream-drift
+      - swrm
+      - volto
+      - volto-scenario-tests
+    if: always()
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions: {}
+    steps:
+      - name: Require all checks to pass
+        env:
+          NEEDS_JSON: ${{ toJSON(needs) }}
+        run: |
+          python3 - <<'PY'
+          import json
+          import os
+          import sys
+
+          results = json.loads(os.environ["NEEDS_JSON"])
+          failed = [name for name, job in results.items() if job["result"] in {"failure", "cancelled"}]
+          if failed:
+              print("Failed or cancelled checks: " + ", ".join(sorted(failed)), file=sys.stderr)
+              sys.exit(1)
+          PY

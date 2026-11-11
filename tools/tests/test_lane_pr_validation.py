@@ -29,6 +29,8 @@ CFG = {"host": "host1", "backend": "codex", "model": "gpt", "repo": "~/work/phan
 MESSAGE_WITH_ALL = "Rewrote the parser.\n\nCloses #1704\n\n验收：python3 -m unittest tools/tests (passed)"
 
 
+DELIVERY_MAP = "\n| 验收 | 改动文件 | 测试 |\n| --- | --- | --- |\n| check | code.py | unittest |\n"
+
 def run_remote_status(home, payload, run=RUN, lane="codex"):
     """Run the AD's remote status snippet against a fake lane home.
 
@@ -104,7 +106,7 @@ class FakeLaneHost:
     def sh(self, cmd, timeout=120, inp=None):
         argv = cmd if isinstance(cmd, list) else [cmd]
         if isinstance(cmd, list) and "--format=%s" in cmd: return 0, self.subject, ""
-        if isinstance(cmd, list) and "--format=%B" in cmd: return 0, self.message, ""
+        if isinstance(cmd, list) and "--format=%B" in cmd: return 0, self.message + DELIVERY_MAP, ""
         if inp and "pr-validation.json" in inp:  # the run record write on the lane host
             self.run_records.append(json.loads(base64.b64decode(argv[-1]).decode("utf-8")))
             return 0, "ok", ""
@@ -114,7 +116,7 @@ class FakeLaneHost:
         if args[:2] == ["pr", "create"]:
             self.prs.append(dict(zip(args[2::2], args[3::2])))
             return 0, "https://github.com/surlymochan/phanes/pull/1", ""
-        if args[:2] == ["issue", "view"]: return 0, json.dumps({"labels": [], "body": "# card"}), ""
+        if args[:2] == ["issue", "view"]: return 0, json.dumps({"labels": [{"name": "lane-pr"}] if any("lane-pr" in edit for edit in self.label_edits) else [], "body": "# card"}), ""
         if args[:2] == ["issue", "edit"]:
             self.label_edits.append(list(args)); return 0, "", ""
         if args[:2] == ["issue", "comment"]:

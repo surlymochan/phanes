@@ -4,23 +4,24 @@ import importlib.util
 import json
 import os
 from pathlib import Path
+import shutil
 import tempfile
 import unittest
 from unittest import mock
+
+from _broker_wait import short_tmp_root
 
 MODULE = Path(__file__).resolve().parents[1] / "lib" / "dispatch" / "pause.py"
 spec = importlib.util.spec_from_file_location("dispatch_pause", MODULE)
 pause = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(pause)
-SCRATCH = Path(__file__).resolve().parents[2] / ".swrm-tmp"
 
 
 class PauseStoreTests(unittest.TestCase):
     def setUp(self):
-        SCRATCH.mkdir(exist_ok=True)
-        self.tmp = tempfile.TemporaryDirectory(prefix="pause-store-", dir=SCRATCH)
-        self.addCleanup(self.tmp.cleanup)
-        self.home = Path(self.tmp.name)
+        # Keep each test outside repository scratch roots cleaned by other workers.
+        self.home = Path(tempfile.mkdtemp(prefix="pause-", dir=short_tmp_root()))
+        self.addCleanup(shutil.rmtree, self.home, ignore_errors=True)
         self.env = mock.patch.dict(os.environ, {}, clear=True)
         self.env.start()
         self.addCleanup(self.env.stop)

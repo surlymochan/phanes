@@ -23,20 +23,38 @@ model = None
 overload_model = os.environ.get("FAKE_APP_SERVER_OVERLOAD_MODEL")
 overload_used = False
 thread_start_error = os.environ.get("FAKE_APP_SERVER_THREAD_START_ERROR")
+hung = False
+marker = os.environ.get("FAKE_APP_SERVER_IGNORE_PROBE_ONCE_FILE")
+ignore_probe = os.environ.get("FAKE_APP_SERVER_IGNORE_PROBE") == "1"
+if marker and not os.path.exists(marker):
+    with open(marker, "w") as stream:
+        stream.write("first server ignores probes")
+    ignore_probe = True
+
+
+def probe_response(req):
+    if not hung and not ignore_probe:
+        response(req, {"data": []})
+
 
 for line in sys.stdin:
     try:
         req = json.loads(line)
     except ValueError:
         continue
+    if os.environ.get("FAKE_APP_SERVER_LOG"):
+        with open(os.environ["FAKE_APP_SERVER_LOG"], "a") as stream:
+            stream.write(json.dumps(req) + "\n")
     method = req.get("method")
     params = req.get("params") or {}
-    if method == "initialize":
+    if method == "model/list":
+        probe_response(req)
+    elif method == "initialize":
         send({"jsonrpc": "2.0", "method": "fixture/unrelated", "params": {"before": method}})
         response(req, {"serverInfo": {"name": "fake-app-server", "version": "1"}})
     elif method == "initialized":
         continue
-    elif method == "thread/start":
+    elif method in ("thread/start", "thread/resume"):
         cwd = params.get("cwd", cwd)
         model = params.get("model")
         send({"jsonrpc": "2.0", "method": "fixture/unrelated", "params": {"before": method}})
@@ -50,6 +68,14 @@ for line in sys.stdin:
             os._exit(17)
         send({"jsonrpc": "2.0", "method": "fixture/unrelated", "params": {"before": method}})
         response(req, {"turn": {"id": turn_id, "status": "inProgress"}})
+        if "LANE_TEST_HANG" in prompt:
+            hung = True
+            continue
+        if os.environ.get("FAKE_APP_SERVER_FAIL_TURNS") == "1":
+            send({"jsonrpc": "2.0", "method": "turn/failed", "params": {
+                "threadId": thread_id, "turn": {"id": turn_id},
+                "error": {"message": "fixture rejected validation turn"}}})
+            continue
         if "LANE_TEST_IO_LOST" in prompt:
             for seq in range(3):
                 send({"jsonrpc": "2.0", "method": "item/completed", "params": {
@@ -58,7 +84,7 @@ for line in sys.stdin:
                              "exitCode": 0, "aggregatedOutput": None, "durationMs": 0}}})
             time.sleep(1.0)
             continue
-        if overload_model == model and not overload_used:
+        if overload_model and overload_model == model and not overload_used:
             overload_used = True
             with open(os.path.join(cwd, "lane_partial.txt"), "w") as f:
                 f.write("kept after overload")
@@ -82,6 +108,9 @@ for line in sys.stdin:
             if not control_line:
                 os._exit(0)
             control = json.loads(control_line)
+            if control.get("method") == "model/list":
+                probe_response(control)
+                continue
             if control.get("method") == "turn/steer":
                 steered = (control.get("params", {}).get("input") or [{}])[0].get("text", "")
                 response(control)
