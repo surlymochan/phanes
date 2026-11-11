@@ -1,10 +1,13 @@
 """Offline issue-bus coverage using fake gh and local bare target repositories."""
 import argparse
 import contextlib
+import datetime
+import inspect
 import io
 import json
 import os
 from pathlib import Path
+import re
 import stat
 import subprocess
 import tempfile
@@ -516,6 +519,225 @@ print(json.dumps({'type':'message_end','message':message}), flush=True)
             with self.assertRaises(xs.BusError) as error:
                 xs.gh_transport("repos/org/bus/issues")
         self.assertNotIn("github_pat_", str(error.exception))
+
+    # ------------------------------------------------------------------
+    # #2159: reservation receipt, visible card state, withdrawal guard
+    # ------------------------------------------------------------------
+
+    RESERVE_MARKER = "swrm-bus:reserve"
+
+    @staticmethod
+    def stamp(seconds_ago=0, base=None):
+        """An ISO-8601 UTC timestamp, optionally in the past."""
+        moment = (base or datetime.datetime.now(datetime.timezone.utc)) - datetime.timedelta(seconds=seconds_ago)
+        return moment.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    def reserve_body(self, worker="external-agent", moment=None):
+        """The machine-marked receipt a worker writes before it claims a card."""
+        return f"<!-- {self.RESERVE_MARKER} worker={worker} at={moment or self.stamp()} -->"
+
+    def create_bus_card(self, run_id, title="reservation card"):
+        """Create a queued bus card and return its issue number."""
+        created = xs.bus_create_issue("org/bus", self.cfg, title, "write worker.txt", {
+            "run_id": run_id, "repo": "org/target", "base": self.base,
+            "budget_minutes": 1, "report_schema": xs.RESULT_SCHEMA})
+        return created["number"]
+
+    def backdate_comment(self, number, comment_id, seconds_ago):
+        """Move a posted comment (and the timestamp inside its receipt) into the past."""
+        state = self.state()
+        issue = next(row for row in state["repos"]["org/bus"]["issues"] if row["number"] == number)
+        comment = next(row for row in issue["comments"] if row["id"] == comment_id)
+        stamp = self.stamp(seconds_ago)
+        comment["created_at"] = stamp
+        comment["body"] = re.sub(r"at=\S+", f"at={stamp}", comment["body"])
+        self.state_path.write_text(json.dumps(state))
+
+    @staticmethod
+    def call_cancel(number, reason, force, cfg):
+        """Call the cancellation path; --force is the documented override."""
+        parameters = inspect.signature(xs.bus_cancel_issue).parameters
+        for name in ("force", "force_cancel", "forced", "override"):
+            if name in parameters:
+                return xs.bus_cancel_issue("org/bus", number, cfg, reason, **{name: True} if force else {})
+        return xs.bus_cancel_issue("org/bus", number, cfg, reason)
+
+    def cancel(self, number, reason="planner stop", force=False, cfg=None):
+        """Cancel a bus card; return (cancelled, refusal-or-trace text)."""
+        cfg = cfg or self.cfg
+        before = len(self.issue(number)["comments"])
+        failure = ""
+        try:
+            self.call_cancel(number, reason, force, cfg)
+        except Exception as error:  # noqa: BLE001 - a refused withdrawal is reported as an error
+            failure = str(error)
+        issue = self.issue(number)
+        cancelled = "swrm:cancelled" in xs.issue_label_names(issue)
+        posted = " ".join(comment.get("body") or "" for comment in issue["comments"][before:])
+        return cancelled, f"{failure} {posted}"
+
+    @staticmethod
+    def state_of(row):
+        """The progress state a bus status row reports."""
+        for key in ("bus_state", "state"):
+            value = row.get(key)
+            if isinstance(value, str):
+                return value
+        return None
+
+    def test_worker_writes_a_reservation_receipt_before_it_claims(self):
+        """#2159: the worker reserves the card before the claim, so the dispatcher can see it."""
+        number = self.create_bus_card("reserve-order")
+        worker_args = argparse.Namespace(bus="org/bus", name="external-agent", backend="pi", model=None,
+                                         budget_minutes=1, once=True, repos="org/target", verify=None)
+        os.environ["OPENSWARM_FAKE_GH_LOGIN"] = "executor"
+        at_clone = {}
+
+        def watched_clone(task, workdir, allowed_repos=None):
+            at_clone["comments"] = list(self.issue(number)["comments"])
+            raise xs.BusError("clone stopped by the test")
+
+        with mock.patch.object(xs, "bus_worker_clone", side_effect=watched_clone):
+            xs.bus_worker_run(self.issue(number), self.cfg, worker_args, self.policy)
+
+        comments = self.issue(number)["comments"]
+        receipts = [index for index, comment in enumerate(comments)
+                    if self.RESERVE_MARKER in (comment.get("body") or "")]
+        claims = [index for index, comment in enumerate(comments) if xs.bus_claim(comment) == "external-agent"]
+        self.assertTrue(receipts, "the worker must leave a reservation receipt comment")
+        self.assertTrue(claims, "the worker must still claim the card")
+        self.assertLess(receipts[0], claims[0], "the receipt must be written before the claim")
+        self.assertTrue(any(self.RESERVE_MARKER in (comment.get("body") or "") for comment in at_clone["comments"]),
+                        "the receipt must be written before the clone starts")
+        body = comments[receipts[0]]["body"]
+        self.assertIn("worker=external-agent", body)
+        self.assertRegex(body, r"at=\d{4}-\d{2}-\d{2}T\d{2}:\d{2}")
+        self.assertEqual(comments[receipts[0]]["user"]["login"], "executor")
+
+    def test_bus_status_reports_the_reservation_state_and_latency(self):
+        """#2159: bus status exposes reserved_at, reserve_latency_seconds and the card state."""
+        base = datetime.datetime.now(datetime.timezone.utc)
+        created = self.stamp(9, base)
+        reserved_at = self.stamp(0, base)
+        issues = [{"number": number, "title": f"[swrm] card {number}", "created_at": created,
+                   "labels": [{"name": "swrm:queued"}]} for number in (1, 2, 3, 4, 5)]
+        issues[3]["labels"] = [{"name": "swrm:done"}]
+        receipt = {"id": 1, "body": self.reserve_body("external-agent", reserved_at),
+                   "user": {"login": "executor"}, "created_at": reserved_at}
+        claim = {"id": 2, "body": "/claim external-agent", "user": {"login": "executor"},
+                 "created_at": reserved_at}
+        result = {"id": 3, "body": "```swrm-result\n" + json.dumps(self.report("done")) + "\n```",
+                  "user": {"login": "executor"}, "created_at": reserved_at}
+        outsider = {"id": 4, "body": self.reserve_body("intruder", reserved_at),
+                    "user": {"login": "not-allowed"}, "created_at": reserved_at}
+        comments = {1: [receipt], 2: [], 3: [claim], 4: [result], 5: [outsider]}
+
+        def fake_pages(endpoint, *args, **kwargs):
+            if endpoint.endswith("/comments"):
+                return comments[int(endpoint.split("/issues/")[1].split("/")[0])]
+            return issues
+
+        with mock.patch.object(xs, "gh_pages", side_effect=fake_pages), \
+             mock.patch.object(xs, "bus_comments", side_effect=lambda repo, number: comments[number]):
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                xs.cmd_bus_status(argparse.Namespace(repo=None, json=True), self.policy)
+
+        rows = {row["number"]: row for row in json.loads(output.getvalue())}
+        reserved = rows[1]
+        self.assertIn("reserved_at", reserved, "bus status must report the reservation timestamp")
+        self.assertIn("reserve_latency_seconds", reserved, "bus status must report the reservation latency")
+        self.assertIsNotNone(reserved["reserved_at"])
+        self.assertAlmostEqual(xs.to_epoch(reserved["reserved_at"]), xs.to_epoch(reserved_at), delta=1)
+        self.assertEqual(reserved["reserve_latency_seconds"], 9)
+        self.assertEqual(self.state_of(reserved), "reserved")
+        self.assertIsNone(rows[2]["reserved_at"])
+        self.assertIsNone(rows[2]["reserve_latency_seconds"])
+        self.assertEqual(self.state_of(rows[2]), "queued")
+        self.assertIn(self.state_of(rows[3]), ("claimed", "running"))
+        self.assertEqual(self.state_of(rows[4]), "done")
+        self.assertIsNone(rows[5]["reserved_at"], "a receipt from an unlisted worker is not trusted")
+        self.assertEqual(self.state_of(rows[5]), "queued")
+        for row in rows.values():
+            self.assertIn(self.state_of(row), ("queued", "reserved", "claimed", "running", "done"))
+
+    def test_fresh_reservation_blocks_the_withdrawal(self):
+        """#2159: a dispatcher must not withdraw a card a worker has just reserved."""
+        number = self.create_bus_card("fresh-reserve")
+        self.add_comment(number, self.reserve_body(), login="executor")
+        cancelled, message = self.cancel(number, "planner stop")
+        self.assertFalse(cancelled, "a fresh reservation must block the withdrawal")
+        self.assertIn("--force", message)
+
+    def test_claim_blocks_the_withdrawal(self):
+        """#2159: a claimed card must not be withdrawn silently either."""
+        number = self.create_bus_card("claimed-card")
+        self.add_comment(number, "/claim external-agent", login="executor")
+        self.set_labels(number, ["claimed"], ["queued"])
+        cancelled, message = self.cancel(number, "planner stop")
+        self.assertFalse(cancelled, "a claimed card must block the withdrawal")
+        self.assertIn("--force", message)
+
+    def test_forced_withdrawal_cancels_the_card_and_leaves_a_trace(self):
+        """#2159: --force withdraws the card anyway, but the comment records it."""
+        number = self.create_bus_card("forced-withdrawal")
+        self.add_comment(number, self.reserve_body(), login="executor")
+        cancelled, message = self.cancel(number, "planner stop", force=True)
+        self.assertTrue(cancelled, "--force must cancel the card anyway")
+        self.assertTrue(any(hint in message.lower() for hint in ("forc", "override")),
+                        f"the forced withdrawal must leave a trace, got: {message!r}")
+
+    def test_expired_reservation_does_not_block_the_withdrawal(self):
+        """#2159: a reservation older than the freshness window no longer holds the card."""
+        number = self.create_bus_card("expired-reserve")
+        receipt = self.add_comment(number, self.reserve_body(), login="executor")
+        self.backdate_comment(number, receipt["id"], 600)
+        cancelled, _ = self.cancel(number, "planner stop")
+        self.assertTrue(cancelled, "a reservation older than the freshness window must not block")
+
+    def test_reservation_from_an_unlisted_worker_is_ignored(self):
+        """#2159: only allowlisted workers can hold a reservation, like the claim rule."""
+        number = self.create_bus_card("unlisted-reserve")
+        self.add_comment(number, self.reserve_body(), login="not-allowed")
+        self.add_comment(number, "/claim external-agent", login="not-allowed")
+        cancelled, _ = self.cancel(number, "planner stop")
+        self.assertTrue(cancelled, "a receipt or claim from an unlisted worker must not block")
+
+    def test_reservation_window_is_configurable(self):
+        """#2159: the freshness window is a bus policy knob.
+
+        The issue does not name the key, so the test looks for a spelling that
+        shortens the window and skips when the policy exposes none of them.
+        """
+        candidates = ("reserve_ttl_seconds", "reserve_window_seconds", "reserve_fresh_seconds",
+                      "reserve_freshness_seconds", "reserve_max_age_seconds", "reserve_seconds")
+        try:
+            source = Path(xs.__file__).read_text(encoding="utf-8")
+            mined = re.findall(r"[\"']([a-z_]*reserve[a-z_]*(?:second|ttl|window|fresh|age|timeout)[a-z_]*)[\"']",
+                               source)
+            candidates = tuple(dict.fromkeys(mined + list(candidates)))
+        except OSError:
+            pass
+        shortened = False
+        for key in candidates:
+            number = self.create_bus_card("window-" + key.replace("_", "-"))
+            receipt = self.add_comment(number, self.reserve_body(), login="executor")
+            self.backdate_comment(number, receipt["id"], 5)
+            cfg = xs.bus_config(xs.deep_merge(self.policy, {"bus": {key: 1}}))
+            cancelled, _ = self.cancel(number, "planner stop", cfg=cfg)
+            if cancelled:
+                shortened = True
+                break
+        if not shortened:
+            self.skipTest("no recognized bus policy key shortened the reservation freshness window")
+
+    def test_bus_docs_document_the_reservation_protocol(self):
+        """#2159: the bus protocol documentation must describe the receipt and the override."""
+        text = (Path(xs.SKILL_DIR) / "docs" / "BUS.md").read_text(encoding="utf-8")
+        self.assertTrue(self.RESERVE_MARKER in text,
+                        "swrm/docs/BUS.md must document the reservation marker of the bus protocol")
+        self.assertTrue("--force" in text,
+                        "swrm/docs/BUS.md must document the --force override of the withdrawal guard")
 
 
 class FakeGhReplaceRetryTests(unittest.TestCase):
