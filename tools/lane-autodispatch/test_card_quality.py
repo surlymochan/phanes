@@ -8,6 +8,10 @@ from pathlib import Path
 from unittest import mock
 
 
+import sys
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from pr_guard_fixtures import no_open_prs
+
 SCRIPT = Path(__file__).with_name("autodispatch.py")
 SPEC = importlib.util.spec_from_file_location("autodispatch_card_quality", SCRIPT)
 AD = importlib.util.module_from_spec(SPEC)
@@ -66,7 +70,7 @@ class CardQualityTickTests(unittest.TestCase):
             mock.patch.object(AD, "remote", return_value={"lane": "idle"}),
             mock.patch.object(AD, "host_good"),
             mock.patch.object(AD, "update_busy_stale"),
-            mock.patch.object(AD, "gh", side_effect=gh),
+            mock.patch.object(AD, "gh", side_effect=no_open_prs(gh)),
             mock.patch.object(AD, "label_cache_reset"),
             mock.patch.object(AD, "prefetch_labels"),
             mock.patch.object(AD, "label_state", return_value=("fresh", issue)),
