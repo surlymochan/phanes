@@ -384,15 +384,27 @@ class BrokerRecovery:
         return self._save(record)
 
     def ensure_ready(self):
+        deadline = self.clock() + RECOVERY_TIMEOUT_S
         # Serialize the whole probe/restart/validation transaction across dispatches.
         if not self.state_path:
-            return self._ensure_ready()
+            return self._ensure_ready(deadline)
         os.makedirs(os.path.dirname(os.path.abspath(self.state_path)), exist_ok=True)
         with open(str(self.state_path) + ".lock", "a") as lock:
-            fcntl.flock(lock, fcntl.LOCK_EX)
-            return self._ensure_ready()
+            while True:
+                remaining = deadline - self.clock()
+                if remaining <= 0:
+                    # Do not write shared state without owning the recovery lock.
+                    return {"host": self.host, "socket": self.socket_path, "ok": False,
+                            "interrupted": True, "result": "lock_timeout",
+                            "detail": "broker recovery lock timeout", "attempts": 0}
+                try:
+                    fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    break
+                except BlockingIOError:
+                    self.wait_sleep(min(0.05, remaining))
+            return self._ensure_ready(deadline)
 
-    def _ensure_ready(self):
+    def _ensure_ready(self, deadline):
         """Probe the broker socket and recover it when it is gone.
 
         The probe is light: a dead socket is restarted with a capped exponential
@@ -402,7 +414,6 @@ class BrokerRecovery:
         interrupted is only released by a session that answers: a socket that
         accepts a connection again is not enough.
         """
-        deadline = self.clock() + RECOVERY_TIMEOUT_S
         previous = self.previous_record()
         need_validation = bool(previous.get("interrupted")) and previous.get("socket") == self.socket_path
         restart_first = False

@@ -1158,6 +1158,48 @@ class SandboxRecoveryTests(unittest.TestCase):
 
 
 class RecoveryBudgetTests(unittest.TestCase):
+    def test_lock_wait_exhausts_total_budget_without_session_or_state_write(self):
+        now = [100.0]
+        def sleep(seconds):
+            self.assertLessEqual(seconds, 0.05)
+            now[0] += seconds
+        with tempfile.TemporaryDirectory() as directory:
+            state = pathlib.Path(directory) / "state.json"
+            state.write_text('{"unchanged": true}')
+            session = mock.Mock()
+            broker = recovery.BrokerRecovery(
+                "/fake", state_path=state, clock=lambda: now[0],
+                wait_sleep=sleep, validate=session, probe=mock.Mock())
+            with mock.patch.object(recovery.fcntl, "flock", side_effect=BlockingIOError()) as flock:
+                result = broker.ensure_ready()
+            self.assertFalse(result["ok"])
+            self.assertEqual(result["result"], "lock_timeout")
+            self.assertIn("lock timeout", result["detail"])
+            self.assertEqual(now[0], 100 + recovery.RECOVERY_TIMEOUT_S)
+            self.assertEqual(state.read_text(), '{"unchanged": true}')
+            session.assert_not_called()
+            broker.probe.assert_not_called()
+            self.assertTrue(all(call.args[1] == recovery.fcntl.LOCK_EX | recovery.fcntl.LOCK_NB
+                                for call in flock.call_args_list))
+
+    def test_lock_wait_leaves_only_remaining_budget_for_one_session(self):
+        for ok in (True, False):
+            with self.subTest(ok=ok), tempfile.TemporaryDirectory() as directory:
+                now = [100.0]
+                def sleep(seconds):
+                    now[0] += seconds
+                session = mock.Mock(return_value=(ok, "answer"))
+                broker = recovery.BrokerRecovery(
+                    "/fake", state_path=pathlib.Path(directory) / "state.json",
+                    clock=lambda: now[0], wait_sleep=sleep,
+                    probe=mock.Mock(side_effect=[False, True]),
+                    restart=mock.Mock(), validate=session)
+                with mock.patch.object(recovery.fcntl, "flock", side_effect=[BlockingIOError(), None]):
+                    self.assertEqual(broker.ensure_ready()["ok"], ok)
+                session.assert_called_once()
+                self.assertAlmostEqual(session.call_args.kwargs["timeout"], 29.95)
+                self.assertAlmostEqual(broker.restart.call_args.kwargs["timeout"], 29.95)
+
     def test_dispatch_uses_no_minimal_session(self):
         module = xs.broker_recovery_module()
         with tempfile.TemporaryDirectory() as directory, \
@@ -1281,7 +1323,7 @@ class StaleSocketRaceTests(unittest.TestCase):
             config.parent.mkdir(parents=True)
             config.touch()
             parent = home / "socket-dir"
-            parent.mkdir()
+            parent.mkdir(mode=0o700)
             path = parent / "broker.sock"
             path.write_text("original")
             other = home / "other"
@@ -1325,6 +1367,103 @@ class StaleSocketRaceTests(unittest.TestCase):
             self.assertEqual(path.read_text(), "replacement")
             if replacement != "inode":
                 self.assertEqual((home / "saved" / path.name).read_text(), "original")
+
+    def check_quarantine(self, script, scenario):
+        import runpy
+        import stat
+        with tempfile.TemporaryDirectory() as temporary:
+            home = pathlib.Path(temporary)
+            config = home / ".ssh" / "swrm-pi" / "config"
+            config.parent.mkdir(parents=True)
+            config.touch()
+            path = home / "broker.sock"
+            path.write_text("dead socket")
+            original = path.stat()
+            replacement = home / "replacement"
+            replacement.write_text("attacker object")
+            real_stat, real_rename, real_unlink = os.stat, os.rename, os.unlink
+            moved_names = []
+
+            def socket_stat(name, *args, **kwargs):
+                info = real_stat(name, *args, **kwargs)
+                if (kwargs.get("dir_fd") is not None
+                        and (info.st_dev, info.st_ino) == (original.st_dev, original.st_ino)):
+                    fields = list(info)
+                    fields[0] = stat.S_IFSOCK | 0o600
+                    return os.stat_result(fields)
+                return info
+
+            def rename(source, target, **kwargs):
+                if source == path.name:
+                    if scenario in ("restore", "conflict"):
+                        # Swap after the last original-path inode check.
+                        real_rename(replacement, path)
+                    real_rename(source, target, **kwargs)
+                    moved_names.append(target)
+                    if scenario in ("after_rename", "conflict"):
+                        path.write_text("new occupant")
+                else:
+                    real_rename(source, target, **kwargs)
+
+            probe = mock.Mock()
+            probe.connect.side_effect = ConnectionRefusedError()
+            # Stop successful proxy startup before it binds a real socket.
+            probe.bind.side_effect = RuntimeError("cleanup complete")
+            with mock.patch.object(pathlib.Path, "home", return_value=home), \
+                 mock.patch.dict(os.environ, OPENSWARM_PI_WORKER_SOCKET=str(path)), \
+                 mock.patch.object(socket, "socket", return_value=probe), \
+                 mock.patch.object(os, "stat", side_effect=socket_stat), \
+                 mock.patch.object(os, "rename", side_effect=rename), \
+                 mock.patch.object(os, "unlink", wraps=real_unlink) as unlink:
+                def run():
+                    module = runpy.run_path(str(ROOT / "bin" / script))
+                    if script == "pi-broker-restart":
+                        module["clear_stale_socket"](path)
+                if scenario in ("restore", "conflict"):
+                    with self.assertRaisesRegex(SystemExit, "changed, not removing it"):
+                        run()
+                    unlink.assert_not_called()
+                elif script == "pi-worker-proxy":
+                    with self.assertRaisesRegex(RuntimeError, "cleanup complete"):
+                        run()
+                else:
+                    run()
+                if scenario in ("normal", "after_rename"):
+                    unlink.assert_called_once_with(moved_names[0], dir_fd=mock.ANY)
+            if scenario == "normal":
+                self.assertFalse(path.exists())
+            elif scenario == "restore":
+                self.assertEqual(path.read_text(), "attacker object")
+                self.assertFalse((home / moved_names[0]).exists())
+            else:
+                self.assertEqual(path.read_text(), "new occupant")
+                if scenario == "conflict":
+                    self.assertEqual((home / moved_names[0]).read_text(), "attacker object")
+
+    def test_quarantine_preserves_replacements_and_restores_without_overwrite(self):
+        for script in ("pi-broker-restart", "pi-worker-proxy"):
+            for scenario in ("normal", "after_rename", "restore", "conflict"):
+                with self.subTest(script=script, scenario=scenario):
+                    self.check_quarantine(script, scenario)
+
+    def test_shared_socket_directory_is_rejected(self):
+        import runpy
+        for script in ("pi-broker-restart", "pi-worker-proxy"):
+            with self.subTest(script=script), tempfile.TemporaryDirectory() as temporary:
+                home = pathlib.Path(temporary)
+                config = home / ".ssh" / "swrm-pi" / "config"
+                config.parent.mkdir(parents=True)
+                config.touch()
+                home.chmod(0o755)
+                path = home / "broker.sock"
+                path.write_text("untouched")
+                with mock.patch.object(pathlib.Path, "home", return_value=home), \
+                     mock.patch.dict(os.environ, OPENSWARM_PI_WORKER_SOCKET=str(path)):
+                    with self.assertRaisesRegex(SystemExit, "directory"):
+                        module = runpy.run_path(str(ROOT / "bin" / script))
+                        if script == "pi-broker-restart":
+                            module["clear_stale_socket"](path)
+                self.assertEqual(path.read_text(), "untouched")
 
     def test_restart_keeps_replaced_inode(self):
         self.check_race("pi-broker-restart", "inode")

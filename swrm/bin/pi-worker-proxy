@@ -16,7 +16,8 @@ if not path.parent.is_dir() or not config.is_file():
     sys.exit('worker proxy configuration unavailable')
 directory = os.open(str(path.parent), os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
 parent = os.fstat(directory)
-if parent.st_uid != os.getuid():
+if (parent.st_uid != os.getuid() or not stat.S_ISDIR(parent.st_mode)
+        or stat.S_IMODE(parent.st_mode) != 0o700):
     sys.exit('invalid worker socket directory')
 try:
     info = os.stat(path.name, dir_fd=directory, follow_symlinks=False)
@@ -35,7 +36,26 @@ if info is not None:
         if ((parent.st_dev, parent.st_ino) != (current_parent.st_dev, current_parent.st_ino)
                 or (info.st_dev, info.st_ino) != (current.st_dev, current.st_ino)):
             sys.exit('worker socket or directory changed, not removing it')
-        os.unlink(path.name, dir_fd=directory)
+        # Quarantine the directory entry before checking the inode to unlink.
+        # The private directory and unpredictable name keep it out of reach.
+        temporary = '.stale-' + os.urandom(16).hex()
+        os.rename(path.name, temporary, src_dir_fd=directory, dst_dir_fd=directory)
+        try:
+            moved = os.stat(temporary, dir_fd=directory, follow_symlinks=False)
+            if (not stat.S_ISSOCK(moved.st_mode) or moved.st_uid != os.getuid()
+                    or (info.st_dev, info.st_ino) != (moved.st_dev, moved.st_ino)):
+                raise ValueError('socket changed')
+        except (OSError, ValueError):
+            # Never overwrite an entry created while the socket was quarantined.
+            try:
+                os.stat(path.name, dir_fd=directory, follow_symlinks=False)
+            except FileNotFoundError:
+                try:
+                    os.rename(temporary, path.name, src_dir_fd=directory, dst_dir_fd=directory)
+                except OSError:
+                    pass
+            sys.exit('worker socket changed, not removing it (quarantined if restore failed)')
+        os.unlink(temporary, dir_fd=directory)
     else:
         sys.exit('worker proxy already running')
     finally:
