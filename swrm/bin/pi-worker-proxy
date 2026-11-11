@@ -14,8 +14,16 @@ path = pathlib.Path(os.environ.get('OPENSWARM_PI_WORKER_SOCKET', '/run/swrm-pi/b
 config = pathlib.Path.home() / '.ssh' / 'swrm-pi' / 'config'
 if not path.parent.is_dir() or not config.is_file():
     sys.exit('worker proxy configuration unavailable')
-if path.exists() or path.is_symlink():
-    info = path.lstat()
+directory = os.open(str(path.parent), os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+parent = os.fstat(directory)
+if (parent.st_uid != os.getuid() or not stat.S_ISDIR(parent.st_mode)
+        or stat.S_IMODE(parent.st_mode) != 0o700):
+    sys.exit('invalid worker socket directory')
+try:
+    info = os.stat(path.name, dir_fd=directory, follow_symlinks=False)
+except FileNotFoundError:
+    info = None
+if info is not None:
     if not stat.S_ISSOCK(info.st_mode) or info.st_uid != os.getuid():
         sys.exit('invalid worker socket')
     probe = socket.socket(socket.AF_UNIX)
@@ -23,11 +31,38 @@ if path.exists() or path.is_symlink():
         probe.settimeout(1)
         probe.connect(str(path))
     except ConnectionRefusedError:
-        path.unlink()
+        current_parent = os.stat(str(path.parent), follow_symlinks=False)
+        current = os.stat(path.name, dir_fd=directory, follow_symlinks=False)
+        if ((parent.st_dev, parent.st_ino) != (current_parent.st_dev, current_parent.st_ino)
+                or (info.st_dev, info.st_ino) != (current.st_dev, current.st_ino)):
+            sys.exit('worker socket or directory changed, not removing it')
+        # Quarantine the directory entry before checking the inode to unlink.
+        # The private directory and unpredictable name keep it out of reach.
+        temporary = '.stale-' + os.urandom(16).hex()
+        os.rename(path.name, temporary, src_dir_fd=directory, dst_dir_fd=directory)
+        try:
+            moved = os.stat(temporary, dir_fd=directory, follow_symlinks=False)
+            if (not stat.S_ISSOCK(moved.st_mode) or moved.st_uid != os.getuid()
+                    or (info.st_dev, info.st_ino) != (moved.st_dev, moved.st_ino)):
+                raise ValueError('socket changed')
+        except (OSError, ValueError):
+            # Never overwrite an entry created while the socket was quarantined.
+            try:
+                os.stat(path.name, dir_fd=directory, follow_symlinks=False)
+            except FileNotFoundError:
+                try:
+                    os.rename(temporary, path.name, src_dir_fd=directory, dst_dir_fd=directory)
+                except OSError:
+                    pass
+            sys.exit('worker socket changed, not removing it (quarantined if restore failed)')
+        os.unlink(temporary, dir_fd=directory)
     else:
         sys.exit('worker proxy already running')
     finally:
         probe.close()
+marker = os.open(path.name + '.proxy', os.O_CREAT | os.O_WRONLY | os.O_NOFOLLOW, 0o600, dir_fd=directory)
+os.close(marker)
+os.close(directory)
 server = socket.socket(socket.AF_UNIX)
 server.bind(str(path))
 os.chmod(path, 0o600)

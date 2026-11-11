@@ -203,7 +203,7 @@ class PiStreamRetryContractTests(unittest.TestCase):
                                  ("stop", error_class, sample))
 
     def test_pi_turn_classifies_stream_before_ordinary_rate_limit(self):
-        lane = {"name": "L1", "backend": "pi", "model": "fake-model"}
+        lane = {"name": "L1", "backend": "pi", "model": "fake-model", "binary": "fake-pi"}
         for sample, expected in (
                 (RATE_STREAM_SAMPLE, "exec_error"),
                 (f"429 {STREAM_SAMPLES[1]}", "exec_error"),
