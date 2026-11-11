@@ -188,6 +188,30 @@ point are abandoned. Events and brain log lines contain the run ID, level and
 commit/path recovery point; recovery failure leaves the lane available for new
 assignments.
 
+## Broker socket recovery: threat model
+
+`pi-broker-restart` and `pi-worker-proxy` remove a stale broker socket only
+after a connect probe shows nobody is listening. The socket directory is
+opened with `O_DIRECTORY|O_NOFOLLOW`, must be owned by the current user and
+mode 0700, and the entry is renamed to a unique private name, re-validated
+(inode/device, still a socket) and then unlinked relative to the directory fd.
+
+Accepted residual risk (Boss decision for PR #2134, no further code change):
+
+1. **Out of scope: processes of the same UID.** They can already delete,
+   replace or connect to these sockets directly, so no check here can stop them.
+   The directory is private (0700, current user), so other users cannot reach it.
+2. **Where the window is.** Two short races remain, both inside that private
+   directory: between validating the isolated name and the `unlink`, and in the
+   recovery branch between "name does not exist" and the `rename`. A same-UID
+   actor that wins one of them can only make recovery remove or skip its own
+   user's entry; the next recovery attempt re-probes and converges.
+3. **Why it cannot be closed completely.** POSIX has no unlink-by-inode
+   primitive; every removal is path (name) based relative to a directory fd, so
+   a check-then-act gap between validation and removal is inherent. The
+   rename-to-unique-name step shrinks it to the isolated name; the dirfd hardening
+   is kept as is and tracked in no separate issue.
+
 ### Review finding map
 
 | Finding | Change in `swrm/bin/swrm` | Test evidence |
