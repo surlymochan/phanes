@@ -3377,6 +3377,7 @@ def read_lane_streaks():
 def write_lane_streaks(streaks):
     path = f"{D}/{LANE_STREAK_FILE}"
     tmp = path + ".tmp"
+    os.makedirs(D, exist_ok=True)
     with open(tmp, "w") as stream: json.dump(streaks, stream, ensure_ascii=False, indent=1)
     os.replace(tmp, path)
 
