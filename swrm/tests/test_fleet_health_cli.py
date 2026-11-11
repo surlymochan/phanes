@@ -348,13 +348,23 @@ class StandaloneFleetHealthTest(unittest.TestCase):
         cls.addClassCleanup(cls.tmp.cleanup)
         cls.root = pathlib.Path(cls.tmp.name)
         install = cls.root / "standalone"
-        shutil.copytree(REPO_ROOT / "swrm", install,
-                        ignore=shutil.ignore_patterns("__pycache__", ".pytest_cache"))
+        source = REPO_ROOT / "swrm"
+        ignore_cache = shutil.ignore_patterns("__pycache__", ".pytest_cache")
+
+        def ignore(directory, names):
+            ignored = set(ignore_cache(directory, names))
+            if pathlib.Path(directory) == source:
+                ignored.add("tests")
+            return ignored
+
+        shutil.copytree(source, install, ignore=ignore)
+        cls.install = install
         cls.binary = cls.root / "swrm"
         cls.binary.symlink_to(install / "bin" / "swrm")
 
     def test_installed_fleet_commands_without_repository_tools(self):
         self.assertFalse((self.root / "tools").exists())
+        self.assertFalse((self.install / "tests").exists())
         for status in ("fresh", "stale", "dead", "missing"):
             with self.subTest(status=status), tempfile.TemporaryDirectory(dir=self.root) as directory:
                 stamp = STALLED_AT if status == "stale" else time.strftime("%F %T")

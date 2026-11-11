@@ -597,8 +597,10 @@ swrm bus init <bus-owner>/<bus-repo>
 ```
 
 ```json
-{"bus":{"repo":"<bus-owner>/<bus-repo>","allowed_executors":["<github-login>"],"allowed_planners":["<planner-login>"],"poll_seconds":60,"labels_prefix":"swrm"}}
+{"bus":{"repo":"<bus-owner>/<bus-repo>","allowed_executors":["<github-login>"],"allowed_planners":["<planner-login>"],"poll_seconds":15,"labels_prefix":"swrm"}}
 ```
+
+The polling interval defaults to 15 seconds and is capped at 30 seconds.
 
 Both bus allowlists default to deny. `allowed_planners` must include the GitHub login used by the planner to create issues and digest comments.
 

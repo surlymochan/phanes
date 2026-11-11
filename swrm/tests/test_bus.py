@@ -160,6 +160,40 @@ class BusTests(unittest.TestCase):
         self.assertNotIn("error", outcome, outcome.get("error"))
         return json.loads((Path(xs.RUNS) / self.issue()["body"].split('"run_id": "')[1].split('"')[0] / "result.json").read_text())
 
+    def test_poll_seconds_bounds(self):
+        for value, expected in [(None, 15), (120, 30), (0, 0.01)]:
+            bus = {"repo": "org/bus"}
+            if value is not None:
+                bus["poll_seconds"] = value
+            self.assertEqual(xs.bus_config({"bus": bus})["poll_seconds"], expected)
+
+    def test_shipped_default_policy_polls_every_15_seconds(self):
+        base = json.loads((Path(xs.SKILL_DIR) / "policy.json").read_text())
+        merged = xs.deep_merge(base, {"bus": {"repo": "org/bus"}})
+        self.assertEqual(xs.bus_config(merged)["poll_seconds"], 15)
+
+    def test_status_claim_timing(self):
+        issues = [{"number": 1, "title": "[swrm] claimed", "created_at": "2026-01-01T00:00:00Z"},
+                  {"number": 2, "title": "[swrm] waiting", "created_at": "2026-01-01T00:00:00Z"}]
+        comments = [{"id": 1, "body": "/claim agent", "user": {"login": "executor"},
+                     "created_at": "2026-01-01T00:00:17Z"}]
+        for json_output in (True, False):
+            with mock.patch.object(xs, "gh_pages", return_value=issues), \
+                 mock.patch.object(xs, "bus_comments", side_effect=[comments, []]):
+                output = io.StringIO()
+                with contextlib.redirect_stdout(output):
+                    xs.cmd_bus_status(argparse.Namespace(repo=None, json=json_output), self.policy)
+            if json_output:
+                rows = json.loads(output.getvalue())
+                self.assertEqual(rows[0]["claimed_at"], "2026-01-01T00:00:17Z")
+                self.assertEqual(rows[0]["claim_latency_seconds"], 17)
+                self.assertIsNone(rows[1]["claimed_at"])
+                self.assertIsNone(rows[1]["claim_latency_seconds"])
+            else:
+                lines = output.getvalue().splitlines()
+                self.assertTrue(lines[0].endswith("claimed_in=17s"))
+                self.assertTrue(lines[1].endswith("claimed_in=-"))
+
     def test_create_claim_fetch_branch_verify_and_done_result(self):
         thread, outcome, issue = self.start_planner(task="create worker.txt", executor="external-agent")
         metadata = xs.bus_extract_task(issue["body"])
