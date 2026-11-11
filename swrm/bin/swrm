@@ -7052,7 +7052,7 @@ def bus_config(policy, repo=None):
     if not isinstance(planners, list) or any(not isinstance(login, str) or not login.strip() for login in planners):
         raise BusError("policy.bus.allowed_planners must be a list of GitHub logins")
     cfg["allowed_planners"] = [login.strip().casefold() for login in planners]
-    cfg["poll_seconds"] = max(0.01, float(cfg.get("poll_seconds", 60)))
+    cfg["poll_seconds"] = min(30, max(0.01, float(cfg.get("poll_seconds", 15))))
     prefix = str(cfg.get("labels_prefix") or "swrm").strip().rstrip(":")
     if not re.fullmatch(r"[A-Za-z0-9_.-]+", prefix):
         raise BusError("policy.bus.labels_prefix must be a simple label prefix")
@@ -7548,9 +7548,13 @@ def cmd_bus_status(args, policy):
         claim = bus_winning_claim(comments, cfg["allowed_executors"])
         created = to_epoch(issue.get("created_at"))
         state = next((value for value in BUS_STATES if states[value] in names), "open")
+        claimed_at = claim.get("created_at") if claim else None
+        claimed = to_epoch(claimed_at)
         rows.append({"number": issue.get("number"), "title": issue.get("title"), "url": issue.get("html_url"),
                      "state": state, "executor": bus_claim(claim) if claim else None,
-                     "age_minutes": max(0, int((NOW() - created) / 60)) if created else None})
+                     "age_minutes": max(0, int((NOW() - created) / 60)) if created else None,
+                     "claimed_at": claimed_at,
+                     "claim_latency_seconds": int(claimed - created) if claimed is not None and created is not None else None})
     if args.json:
         print(json.dumps(rows, indent=2, ensure_ascii=False))
     elif not rows:
@@ -7558,7 +7562,8 @@ def cmd_bus_status(args, policy):
     else:
         for row in rows:
             age = f"{row['age_minutes']}m" if row["age_minutes"] is not None else "-"
-            print(f"#{row['number']} {row['state']:<10} executor={row['executor'] or '-':<20} age={age}  {row['title']}")
+            claimed_in = f"{row['claim_latency_seconds']}s" if row["claim_latency_seconds"] is not None else "-"
+            print(f"#{row['number']} {row['state']:<10} executor={row['executor'] or '-':<20} age={age}  {row['title']} claimed_in={claimed_in}")
 
 
 def bus_issue_task(issue):
