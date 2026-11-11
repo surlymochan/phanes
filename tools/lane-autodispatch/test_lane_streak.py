@@ -3,6 +3,7 @@
 import importlib.util
 import tempfile
 import unittest
+from pr_guard_fixtures import no_open_prs
 from pathlib import Path
 from unittest import mock
 
@@ -128,7 +129,7 @@ class LaneStreakTickTest(unittest.TestCase):
                  mock.patch.object(AUTODISPATCH, "deps_met", return_value=True), \
                  mock.patch.object(AUTODISPATCH, "read_issue", return_value=("fresh", {})), \
                  mock.patch.object(AUTODISPATCH, "sh", return_value=(0, "base refs/heads/main", "")), \
-                 mock.patch.object(AUTODISPATCH, "gh", return_value=(0, "", "")), \
+                 mock.patch.object(AUTODISPATCH, "gh", new=no_open_prs(lambda *args, **kwargs: (0, "", ""))), \
                  mock.patch.object(AUTODISPATCH, "dispatch", return_value=("new-run", None)) as dispatch, \
                  mock.patch.object(AUTODISPATCH, "replenish", return_value=[]), \
                  mock.patch.object(AUTODISPATCH, "status_snapshot", return_value={}):
