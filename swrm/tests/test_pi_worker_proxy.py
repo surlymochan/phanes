@@ -82,6 +82,18 @@ class PiWorkerProxyTests(unittest.TestCase):
             self.assertNotEqual(proc.returncode, 0)
             self.assertIn(b'invalid worker socket', proc.stderr)
 
+    def test_proxy_marker_symlink_is_rejected(self):
+        with tempfile.TemporaryDirectory() as home:
+            _install_config(home)
+            sock_path = pathlib.Path(home) / 'broker.sock'
+            target = pathlib.Path(home) / 'target'
+            target.write_text('unchanged')
+            pathlib.Path(str(sock_path) + '.proxy').symlink_to(target)
+            proc = self._run(home, sock_path)
+            self.assertNotEqual(proc.returncode, 0)
+            self.assertEqual(target.read_text(), 'unchanged')
+            self.assertFalse(sock_path.exists())
+
     def test_already_running_exits_nonzero(self):
         # A live socket owned by this user is already listening: the
         # second proxy must exit instead of stealing the path.
