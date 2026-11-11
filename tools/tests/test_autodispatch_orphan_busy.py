@@ -13,6 +13,8 @@ import threading
 import time
 import unittest
 from unittest.mock import patch
+sys.path.append(str(Path(__file__).resolve().parents[1] / "lane-autodispatch"))
+from pr_guard_fixtures import no_open_prs
 
 ROOT = Path(__file__).resolve().parents[2]
 # A process group that no process belongs to: the proof that the executor of a
@@ -35,7 +37,7 @@ class BusyOrphanTests(unittest.TestCase):
         self.order = []
         self.ad.log = lambda *args: None
         self.ad.sh = lambda *args, **kwargs: self.order.append("cleanup") or (0, "true\n", "")
-        self.ad.gh = self.github
+        self.ad.gh = no_open_prs(self.github)
 
     def github(self, args, **kwargs):
         self.order.append(args[1])
@@ -77,7 +79,7 @@ class BusyOrphanTests(unittest.TestCase):
         self.assertEqual(self.order, ["cleanup"])
         self.assertIs(self.state["D1"], self.st)
         self.status.update(lane="idle", current_run=None)
-        self.ad.gh = self.github
+        self.ad.gh = no_open_prs(self.github)
         self.assertTrue(self.reconcile())
         self.assertEqual(self.order, ["cleanup", "view", "edit"])
 
@@ -87,7 +89,7 @@ class BusyOrphanTests(unittest.TestCase):
                 self.order.append("edit-failed")
                 return 1, "", "unavailable"
             return self.github(args)
-        self.ad.gh = gh
+        self.ad.gh = no_open_prs(gh)
         self.assertFalse(self.reconcile())
         self.assertEqual(self.order, ["cleanup", "view", "edit-failed"])
         self.assertIs(self.state["D1"], self.st)

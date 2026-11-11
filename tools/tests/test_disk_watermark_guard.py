@@ -32,6 +32,8 @@ import time
 import unittest
 from unittest import mock
 from pathlib import Path
+sys.path.append(str(Path(__file__).resolve().parents[1] / "lane-autodispatch"))
+from pr_guard_fixtures import no_open_prs
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -561,7 +563,7 @@ class DispatchTickTests(unittest.TestCase):
             dispatcher.label_state = lambda number, cache=None: ("fresh", "")
             dispatcher.prefetch_labels = lambda numbers, cache=None: {}
             dispatcher.replenish = lambda count, state: []
-            dispatcher.gh = lambda *args, **kwargs: (0, "", "")
+            dispatcher.gh = no_open_prs(lambda *args, **kwargs: (0, "", ""))
             dispatcher.sh = lambda *args, **kwargs: (0, "base-sha\n", "")
             dispatcher.dispatch = (lambda lane, cfg, item, base:
                                     (dispatched.append(lane) or "run-1", False))
@@ -608,7 +610,7 @@ class DispatchTickTests(unittest.TestCase):
             dispatcher.label_state = lambda number, cache=None: ("fresh", "")
             dispatcher.prefetch_labels = lambda numbers, cache=None: {}
             dispatcher.replenish = lambda count, state: []
-            dispatcher.gh = lambda *args, **kwargs: (0, "", "")
+            dispatcher.gh = no_open_prs(lambda *args, **kwargs: (0, "", ""))
             dispatcher.sh = lambda *args, **kwargs: (0, "base-sha\n", "")
             dispatcher.dispatch = (lambda lane, cfg, item, base:
                                     (dispatched.append(lane) or "run-1", False))
