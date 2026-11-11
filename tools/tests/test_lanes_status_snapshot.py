@@ -166,6 +166,56 @@ class TickRunner:
                 setattr(module, name, value)
 
 
+class CodexServerHealthSnapshotTests(unittest.TestCase):
+    def test_remote_state_reaches_snapshot_and_health_text_and_json(self):
+        import contextlib
+        import io
+        import sys
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            ad = load_autodispatch(AD_STATE_DIR=directory)
+            spec = importlib.util.spec_from_file_location(
+                "lanes_health", ROOT / "swrm/bin/swrm_lanes_health.py")
+            health = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(health)
+            lane_root = root / "lanes" / "C1"
+            lane_root.mkdir(parents=True)
+            state_file = lane_root / "state.json"
+            snapshot = root / "lanes-status.json"
+            # True/False/unknown and old state without probe fields must survive.
+            for alive in (True, False, None):
+                expected = {"server_alive": alive, "server_last_success": 123,
+                            "server_restart_count": 2}
+                state_file.write_text(json.dumps({"state": "idle", **expected}))
+                captured = io.StringIO()
+                with mock.patch.dict(os.environ, {"OPENSWARM_HOME": directory}), \
+                        mock.patch.object(sys, "argv", ["probe", "C1"]), \
+                        contextlib.redirect_stdout(captured):
+                    exec(ad.REMOTE_STATUS, {})
+                remote = json.loads(captured.getvalue())
+                lanes = {"C1": {"backend": "codex"}, "P1": {"backend": "pi"},
+                         "C2": {"backend": "codex"}}
+                with mock.patch.object(ad, "minimax_burn_status", return_value={}):
+                    data = ad.status_snapshot(lanes, {}, {"C1": remote, "P1": {}, "C2": {}}, 0, 0)
+                self.assertEqual(data["C1"], "idle")
+                self.assertNotIn("P1", data["_server_health"])
+                self.assertEqual(data["_server_health"]["C2"], {
+                    "server_alive": None, "server_last_success": None, "server_restart_count": 0})
+                snapshot.write_text(json.dumps(data))
+                report = health.snapshot_report(snapshot)
+                self.assertEqual(report["lanes"]["C1"], expected)
+                text = health.render(report, {"status": "unknown"}, [])
+                for key, value in expected.items():
+                    self.assertIn(f"{key}={value}", text)
+                output = io.StringIO()
+                with contextlib.redirect_stdout(output):
+                    self.assertEqual(health.main([
+                        "--lanes-status-file", str(snapshot), "--state-dir", directory,
+                        "--ctl-state-dir", directory, "--json"]), 0)
+                self.assertEqual(json.loads(output.getvalue())["snapshot"]["lanes"]["C1"], expected)
+
+
 class SnapshotPublishTests(unittest.TestCase):
     """The write itself: atomic, complete and never silent about a failure."""
 

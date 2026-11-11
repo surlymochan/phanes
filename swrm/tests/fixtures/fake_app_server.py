@@ -32,9 +32,68 @@ if marker and not os.path.exists(marker):
     ignore_probe = True
 
 
+# CX9 replay: discovery works but the first process cannot create sessions.
+session_failure = os.environ.get("FAKE_APP_SERVER_SESSION_FAILURE")
+session_marker = os.environ.get("FAKE_APP_SERVER_SESSION_FAILURE_ONCE_FILE")
+if session_marker:
+    if os.path.exists(session_marker):
+        session_failure = None
+    else:
+        with open(session_marker, "w") as stream:
+            stream.write("first server cannot create sessions")
+
+
 def probe_response(req):
     if not hung and not ignore_probe:
         response(req, {"data": []})
+
+
+# Track loaded sessions independently of the task's current thread.
+created = 0
+released = 0
+task_created = 0
+live_threads = set()
+
+
+def start_thread(req):
+    global created, task_created
+    created += 1
+    if str(req.get("id", "")).startswith("health-session-"):
+        ident = f"health-thread-{created}"
+    else:
+        task_created += 1
+        ident = "fake-thread" if task_created == 1 else f"fake-thread-{task_created}"
+    live_threads.add(ident)
+    response(req, {"thread": {"id": ident}, "model": (req.get("params") or {}).get("model")})
+    return ident
+
+
+def session_control(req):
+    global released
+    method = req.get("method")
+    if method == "fixture/release-recover":
+        os.environ.pop("FAKE_APP_SERVER_RELEASE_FAILURE", None)
+        response(req)
+        return True
+    if method == "fixture/session-stats":
+        response(req, {"created": created, "released": released,
+                       "live": len(live_threads)})
+        return True
+    if method != "thread/unsubscribe":
+        return False
+    failure = os.environ.get("FAKE_APP_SERVER_RELEASE_FAILURE")
+    if failure == "timeout":
+        return True
+    if failure == "error":
+        send({"jsonrpc": "2.0", "id": req.get("id"),
+              "error": {"message": "fixture cannot release session"}})
+        return True
+    ident = (req.get("params") or {}).get("threadId")
+    if ident in live_threads:
+        live_threads.remove(ident)
+        released += 1
+    response(req, {"status": "Unsubscribed"})
+    return True
 
 
 for line in sys.stdin:
@@ -47,6 +106,8 @@ for line in sys.stdin:
             stream.write(json.dumps(req) + "\n")
     method = req.get("method")
     params = req.get("params") or {}
+    if session_control(req):
+        continue
     if method == "model/list":
         probe_response(req)
     elif method == "initialize":
@@ -55,13 +116,25 @@ for line in sys.stdin:
     elif method == "initialized":
         continue
     elif method in ("thread/start", "thread/resume"):
+        if session_failure and method == "thread/start":
+            if session_failure == "error":
+                send({"jsonrpc": "2.0", "id": req.get("id"),
+                      "error": {"message": "fixture cannot create sessions"}})
+            continue
+        if str(req.get("id", "")).startswith("health-session-"):
+            start_thread(req)
+            continue
         cwd = params.get("cwd", cwd)
         model = params.get("model")
         send({"jsonrpc": "2.0", "method": "fixture/unrelated", "params": {"before": method}})
         if thread_start_error:
             send({"jsonrpc": "2.0", "id": req.get("id"), "error": {"message": thread_start_error}})
         else:
-            response(req, {"thread": {"id": thread_id}, "model": params.get("model")})
+            if method == "thread/start":
+                thread_id = start_thread(req)
+            else:
+                thread_id = params.get("threadId", thread_id)
+                response(req, {"thread": {"id": thread_id}, "model": model})
     elif method == "turn/start":
         prompt = (params.get("input") or [{}])[0].get("text", "")
         if "LANE_TEST_CRASH" in prompt:
@@ -108,8 +181,14 @@ for line in sys.stdin:
             if not control_line:
                 os._exit(0)
             control = json.loads(control_line)
+            if session_control(control):
+                continue
             if control.get("method") == "model/list":
                 probe_response(control)
+                continue
+            if (control.get("method") == "thread/start"
+                    and str(control.get("id", "")).startswith("health-session-")):
+                start_thread(control)
                 continue
             if control.get("method") == "turn/steer":
                 steered = (control.get("params", {}).get("input") or [{}])[0].get("text", "")
