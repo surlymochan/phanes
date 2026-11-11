@@ -107,7 +107,7 @@ def _migrate_runs(root: Path, events_path: Path | None, accepted_events: list | 
             stage, data = event['stage'], event['data']
             if (not isinstance(change, str) or not _CHANGE.fullmatch(change) or
                     type(attempt) is not int or attempt < 0 or
-                    stage not in ('intake', *STAGES) or not isinstance(data, dict) or
+                    stage not in ('intake', *STAGES, 'rejection') or not isinstance(data, dict) or
                     not isinstance(event.get('input_digest'), str) or
                     not _DIGEST.fullmatch(event['input_digest'])):
                 raise ValueError('invalid event fields')
@@ -117,7 +117,9 @@ def _migrate_runs(root: Path, events_path: Path | None, accepted_events: list | 
 
         def order(event):
             stage, data = event['stage'], event['data']
-            if stage == 'intake':
+            if stage == 'rejection':
+                position = (3, 0, 0)
+            elif stage == 'intake':
                 position = (0, 0, 0)
             elif stage in ('spec', 'spec-check'):
                 position = (1, data['spec_version'], stage == 'spec-check')
@@ -128,6 +130,9 @@ def _migrate_runs(root: Path, events_path: Path | None, accepted_events: list | 
         for event in sorted(events, key=order):
             change, attempt = event['change_id'], event['attempt']
             stage, data = event['stage'], event['data']
+            if stage == 'rejection':
+                controller._reduce(event)
+                continue
             key = (change, attempt)
             history = histories.setdefault(key, [])
             expected = RoleController._expected_stage(history) if history else 'intake'
@@ -176,10 +181,6 @@ def _migrate_runs(root: Path, events_path: Path | None, accepted_events: list | 
                     'attempt': attempt, 'status': 'done', 'artifact_digest': artifact})
             history.append(event)
             controller._reduce(event)
-        # A run lacking accepted evidence is ambiguous and cannot authorize progress.
-        for directory in root.iterdir():
-            if directory.is_symlink() or not directory.is_dir() or directory.name not in used_runs:
-                raise ValueError('unmatched run')
     except (OSError, UnicodeError, ValueError, KeyError, TypeError, Rejected) as error:
         raise ReceiptError('invalid migration evidence') from error
     states = {}
@@ -234,6 +235,10 @@ def scan_runs(runs_dir: str | Path, *, events_path: str | Path | None = None,
                 raise ReceiptError(f'conflicting stage receipts: {change}/{attempt}/{stage}')
             stages[stage] = {'run_id': run_id, 'stage': stage, 'attempt': attempt,
                              'status': 'done', 'artifact_digest': artifact}
+            if stage == 'spec-check' and 'verdict' in result:
+                if result['verdict'] not in ('PASS', 'FAIL'):
+                    raise ReceiptError(f'invalid spec-check verdict: {directory}')
+                stages[stage]['verdict'] = result['verdict']
     except ReceiptError:
         raise
     except (OSError, ValueError, TypeError) as error:
@@ -245,7 +250,10 @@ def scan_runs(runs_dir: str | Path, *, events_path: str | Path | None = None,
         count = len(stages)
         if set(stages) != set(STAGES[:count]):
             raise ReceiptError(f'missing predecessor: {key}')
+        failed_check = stages.get('spec-check', {}).get('verdict') == 'FAIL'
+        if failed_check and count > 2:
+            raise ReceiptError(f'stages follow failed spec-check: {key}')
         states[key] = {'change_id': key[0], 'attempt': key[1],
-                       'next': STAGES[count] if count < len(STAGES) else 'complete',
+                       'next': 'spec' if failed_check else STAGES[count] if count < len(STAGES) else 'complete',
                        'receipts': [stages[stage] for stage in STAGES[:count]]}
     return states

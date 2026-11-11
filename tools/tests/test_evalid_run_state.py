@@ -45,6 +45,60 @@ class RunStateTests(unittest.TestCase):
         self.assertEqual(states[('change-1', 0)]['next'], 'spec-check')
         self.assertEqual(states[('change-1', 1)]['next'], 'spec-check')
 
+    def test_failed_standalone_spec_check_returns_to_spec(self):
+        self.receipt('spec', 'spec')
+        self.receipt('check', 'spec-check')
+        path = self.runs / 'check' / 'result.json'
+        value = json.loads(path.read_text())
+        value['verdict'] = 'FAIL'
+        path.write_text(json.dumps(value))
+        self.assertEqual(scan_runs(self.runs)[('change-1', 0)]['next'], 'spec')
+        self.receipt('red', 'red')
+        with self.assertRaises(ReceiptError):
+            scan_runs(self.runs)
+
+    def test_migration_ignores_rejections_and_unaccepted_runs(self):
+        self.receipt('accepted', 'spec')
+        self.receipt('rejected', 'spec')
+        (self.runs / 'unfinished').mkdir()
+        events = [
+            {'change_id': 'change-1', 'attempt': 0, 'stage': 'intake',
+             'input_digest': digest('intake'), 'data': {}},
+            {'change_id': 'change-1', 'attempt': 0, 'stage': 'rejection',
+             'input_digest': digest('rejection'),
+             'data': {'stage': 'spec', 'reason': 'SPEC_REJECTED', 'run_id': 'rejected'}},
+            {'change_id': 'change-1', 'attempt': 0, 'stage': 'spec',
+             'input_digest': digest('spec'), 'data': {'run_id': 'accepted',
+                 'spec_digest': 'sha256:' + 'a' * 64, 'spec_version': 1}},
+        ]
+        state = scan_runs(self.runs, accepted_events=events)[('change-1', 0)]
+        self.assertEqual(state['next'], 'spec-check')
+        self.assertEqual([r['run_id'] for r in state['run_receipts']], ['accepted'])
+        self.assertEqual(scan_runs(self.runs, accepted_events=events[:2])[('change-1', 0)]['next'], 'spec')
+
+    def test_migration_stops_after_spec_revision_limit(self):
+        events = [{'change_id': 'change-1', 'attempt': 0, 'stage': 'intake',
+                   'input_digest': digest('intake'), 'data': {}}]
+        parent = None
+        for version in range(1, 4):
+            spec_id, check_id = 'spec' + str(version), 'check' + str(version)
+            spec_digest = digest(spec_id)
+            self.receipt(spec_id, 'spec', artifact=spec_digest)
+            self.receipt(check_id, 'spec-check')
+            spec = {'run_id': spec_id, 'spec_digest': spec_digest,
+                    'spec_version': version}
+            if parent:
+                spec.update(versioned=True, parent_receipt=parent)
+            check = {'run_id': check_id, 'verdict': 'FAIL',
+                     'parent_spec_digest': spec['spec_digest'], 'spec_version': version,
+                     'evidence_digest': 'sha256:' + 'a' * 64}
+            for stage, data in (('spec', spec), ('spec-check', check)):
+                events.append({'change_id': 'change-1', 'attempt': 0, 'stage': stage,
+                               'input_digest': digest(data), 'data': data})
+            parent = RoleController._rejection(check, version)['receipt_digest']
+        self.assertEqual(scan_runs(self.runs, accepted_events=events)[('change-1', 0)]['next'],
+                         'needs-boss')
+
     def test_conflicts_and_gaps_fail_closed(self):
         self.receipt('one', 'spec')
         self.receipt('two', 'spec', artifact='sha256:' + 'b' * 64)
