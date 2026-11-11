@@ -40,6 +40,10 @@ Run it offline:
     python3 -m unittest discover -s tools/tests -p 'test_hot_preflight_1721.py' -v
 """
 from __future__ import annotations
+import sys
+from pathlib import Path as _FixturePath
+sys.path.append(str(_FixturePath(__file__).resolve().parents[1] / "lane-autodispatch"))
+from pr_guard_fixtures import no_open_prs
 
 import ast
 import hashlib
@@ -162,6 +166,8 @@ class Fleet:
     def labels_of(self, number):
         return list(self.issues[number]["labels"])
 
+    @no_open_prs
+
     def gh(self, args, timeout=60):
         if args[:2] == ["issue", "list"]:
             rows = [dict(issue) for issue in sorted(self.issues.values(), key=lambda i: i["number"])]
@@ -238,6 +244,7 @@ class Scenario:
         # `Scenario.replenish()` on purpose
         self.module.replenish = lambda k, state: []
         self.module.preflight_card = lambda text: None  # these scenarios judge the hot files, not the card lint
+        self.module.card_quality = lambda text: None  # nor the dispatch card quality (#1853)
         self.lanes = {name: {"host": host, "backend": "pi", "repo": "/tmp/fleet",
                               "fleet": "/tmp/swrm-fleet"} for name, host in lanes}
         self.state = {}

@@ -1,3 +1,7 @@
+import sys
+from pathlib import Path as _FixturePath
+sys.path.insert(0, str(_FixturePath(__file__).resolve().parent))
+from pr_guard_fixtures import no_open_prs
 #!/usr/bin/env python3
 """派发器的暂停判定：PauseStore（TTL/scope）+ 旧 PAUSE-* 标记 + 全局 PAUSE（Refs #1592）。
 
@@ -30,6 +34,7 @@ PAUSE**（整个派发循环）也算进去（拆自 #1366 第 3 项）。
 import importlib.util
 import inspect
 import json
+from card_fixtures import fixture_json
 import os
 import shutil
 import tempfile
@@ -197,9 +202,11 @@ class TickPauseTests(PauseHarness):
         """One tick with GitHub, ssh and the dispatch faked; returns the dispatched pairs."""
         dispatched, logs = [], []
 
+        @no_open_prs
+
         def fake_gh(args, timeout=60):
             if args[:2] == ["issue", "list"]:
-                return 0, json.dumps(self.ISSUES), ""
+                return 0, fixture_json(self.ISSUES), ""
             if args[:2] == ["issue", "view"]:
                 number = int(args[2])
                 for row in self.ISSUES:

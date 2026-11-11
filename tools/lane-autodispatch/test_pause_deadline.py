@@ -1,3 +1,7 @@
+import sys
+from pathlib import Path as _FixturePath
+sys.path.insert(0, str(_FixturePath(__file__).resolve().parent))
+from pr_guard_fixtures import no_open_prs
 #!/usr/bin/env python3
 """The deadline of a legacy pause marker (Refs #1592).
 
@@ -21,6 +25,7 @@ dispatcher and the live pause store are never read or written.
 """
 import importlib.util
 import json
+from card_fixtures import fixture_json
 import os
 import shutil
 import tempfile
@@ -215,9 +220,11 @@ class PauseTickTests(PauseDeadlineHarness):
         """One tick with GitHub, ssh and the dispatch faked; returns the dispatched pairs."""
         dispatched = []
 
+        @no_open_prs
+
         def fake_gh(args, timeout=60):
             if args[:2] == ["issue", "list"]:
-                return 0, json.dumps(self.ISSUES), ""
+                return 0, fixture_json(self.ISSUES), ""
             if args[:2] == ["issue", "view"]:
                 number = int(args[2])
                 for row in self.ISSUES:
