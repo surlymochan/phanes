@@ -1453,12 +1453,119 @@ else:
     O = next((home for home in homes if os.path.isdir(home)), homes[0])
 '''
 
-REMOTE_STATUS = REMOTE_STATE_HOME + r'''
+REMOTE_LIVENESS = r'''
+import errno
+# The process table of the host. The default is the real /proc; the override only
+# exists so that the liveness probes can be exercised without a Linux host.
+PROC_ROOT = os.environ.get("OPEN_SWARM_PROC_ROOT", "/proc")
+def _valid_pid(pid):
+  return isinstance(pid, int) and not isinstance(pid, bool) and pid > 0
+def _pid_alive(pid):
+  if not _valid_pid(pid): return None
+  try: os.kill(pid, 0); return True
+  except ProcessLookupError: return False
+  except PermissionError: return True
+  except OSError as e:
+    if e.errno == errno.ESRCH: return False
+    if e.errno == errno.EPERM: return True
+    return None
+  except Exception: return None
+def _proc_table():
+  try: names = os.listdir(PROC_ROOT)
+  except Exception: return None
+  rows = {}
+  for name in names:
+    if not name.isdigit(): continue
+    try:
+      with open(f"{PROC_ROOT}/{name}/stat") as stream: raw = stream.read()
+      fields = raw[raw.rfind(")") + 2:].split()
+      rows[int(name)] = {"ppid": int(fields[1]), "pgrp": int(fields[2])}
+    except (FileNotFoundError, ProcessLookupError):
+      continue
+    except Exception:
+      return None
+  return rows
+def _output_holders(events):
+  if not isinstance(events, str) or not events or not os.path.isabs(events): return None
+  targets = {os.path.realpath(events), os.path.realpath(events + ".err")}
+  try: names = os.listdir(PROC_ROOT)
+  except Exception: return None
+  for name in names:
+    if not name.isdigit(): continue
+    fd_dir = f"{PROC_ROOT}/{name}/fd"
+    try: fds = os.listdir(fd_dir)
+    except (FileNotFoundError, ProcessLookupError): continue
+    except Exception: return None
+    for fd in fds:
+      try: target = os.readlink(f"{fd_dir}/{fd}")
+      except (FileNotFoundError, ProcessLookupError): continue
+      except Exception: return None
+      target = target[:-10] if target.endswith(" (deleted)") else target
+      if os.path.realpath(target) in targets: return True
+  return False
+def _group_empty(pgid):
+  # True when the process group `pgid` has no member left, None when the check
+  # itself failed. `kill -0 -pgid` fails with ESRCH only when the group is empty:
+  # a member (the call succeeds), a permission error (the group exists but cannot
+  # be signalled) and every other failure are not proof that the group is empty.
+  try:
+    os.killpg(pgid, 0)
+  except ProcessLookupError:
+    return True
+  except PermissionError:
+    return False
+  except (OSError, ValueError, TypeError):
+    return None
+  return False
+def _session_process_alive(pid, rows):
+  if pid in rows or any(row["pgrp"] == pid for row in rows.values()): return True
+  children = {pid}
+  changed = True
+  while changed:
+    changed = False
+    for child, row in rows.items():
+      if row["ppid"] in children and child not in children:
+        children.add(child); changed = True
+  return any(child != pid for child in children)
+def _executor_alive(status, trust_positive=True):
+  # The persisted executor_alive flag is only a snapshot; never use it as proof.
+  # Output holders and visible descendants can veto cleanup, but neither their
+  # absence nor a workspace scan can replace the recorded process group.
+  #
+  # The proof the dispatcher accepts is the process group of the executor: the
+  # remote state has to record it and the group has to have no member left.
+  # Every other outcome is unknown: a run that is released without that proof
+  # is dispatched a second time while its executor may still be running
+  # (Refs #1663).
+  if trust_positive and status.get("executor_alive") is True: return True
+  if trust_positive and "executor_alive" in status and status.get("executor_alive") is not False: return None
+  pid = status.get("executor_pid")
+  if not _valid_pid(pid): return None      # the executor pid was never recorded
+  pgid = status.get("executor_pgid")
+  if not _valid_pid(pgid): return None     # the process group was never recorded
+  empty = _group_empty(pgid)
+  if empty is None: return None            # the group check failed
+  if not empty: return None                # the group still has a member
+  holders = _output_holders(status.get("events"))
+  if holders is None: return None
+  if holders: return True                  # a process still writes the output of the run
+  rows = _proc_table()
+  if rows is None: return None
+  # A descendant may have left the process group of the executor and outlived it.
+  if _session_process_alive(pid, rows): return None
+  alive = _pid_alive(pid)
+  if alive is True: return True
+  if alive is None: return None
+  return False                             # the recorded group is confirmed empty
+'''
+
+REMOTE_STATUS = REMOTE_STATE_HOME + REMOTE_LIVENESS + r'''
 import json,sys
 L=sys.argv[1]; R=sys.argv[2] if len(sys.argv)>2 else ""
 out={"lane":None,"run":None}
 try:
-  ls=json.load(open(f"{O}/lanes/{L}/state.json")); out["lane"]=ls.get("state"); out["current_run"]=ls.get("current_run")
+  with open(f"{O}/lanes/{L}/state.json") as stream: ls=json.load(stream)
+  out["lane"]=ls.get("state"); out["current_run"]=ls.get("current_run")
   if R and ls.get("current_run")==R: out["last_activity"]=ls.get("last_activity")
   out["server_alive"]=ls.get("server_alive")
   out["server_last_success"]=ls.get("server_last_success")
@@ -1495,12 +1602,14 @@ if R:
   else:
     out["run"]="running"
     try:
-      s=json.load(open(f"{O}/runs/{R}/status.json")); pid=s.get("runner_pid"); out["run_state"]=s.get("state")
-      if pid:
-        try: os.kill(int(pid),0); out["runner_alive"]=True
-        except ProcessLookupError: out["runner_alive"]=False
-        except PermissionError: out["runner_alive"]=True
-    except Exception: out["run_state"]="missing"
+      with open(f"{O}/runs/{R}/status.json") as stream: s=json.load(stream)
+      runner_alive=_pid_alive(s.get("runner_pid"))
+      out["run_state"] = s.get("state") if runner_alive is not None else "missing"
+      out["runner_alive"] = runner_alive
+      out["executor_pgid"] = s.get("executor_pgid")
+      out["executor_alive"] = _executor_alive(s, trust_positive=False)
+    except Exception:
+      out["run_state"]="missing"; out["runner_alive"]=None; out["executor_alive"]=None
 print(json.dumps(out))
 '''
 def remote(lane, cfg, run=""):
@@ -1509,6 +1618,56 @@ def remote(lane, cfg, run=""):
     if rc: return {"error": (err or out).strip()[-200:]}
     try: return json.loads(out.strip().splitlines()[-1])
     except Exception: return {"error": out[-200:]}
+
+# Use the same stable sidecar lock as swrm's lane_write_state. Locking the
+# state.json inode is unsafe because normal writers replace it atomically.
+REMOTE_CLEAR_ORPHAN = REMOTE_STATE_HOME + REMOTE_LIVENESS + r'''
+import fcntl, json, sys, tempfile, time
+L, R = sys.argv[1:3]
+ok = False
+try:
+  if not all(x and x not in (".", "..") and os.path.basename(x) == x for x in (L, R)):
+    raise ValueError("invalid lane or run")
+  path = f"{O}/lanes/{L}/state.json"
+  with open(path + ".lock", "a") as lock:
+    fcntl.flock(lock, fcntl.LOCK_EX)
+    with open(path) as stream: state = json.load(stream)
+    if state.get("state") == "busy" and state.get("current_run") == R:
+      # Recheck the runner while holding the lane writer lock. A stale probe
+      # must not clear a resumed run, a completed result, or a newer dispatch.
+      with open(f"{O}/runs/{R}/status.json") as stream: status = json.load(stream)
+      if _pid_alive(status.get("runner_pid")) is not False:
+        raise ValueError("runner not confirmed dead")
+      if _executor_alive(status) is not False:
+        raise ValueError("executor session not confirmed dead")
+      if not os.path.exists(f"{O}/runs/{R}/result.json"):
+        state.update(state="idle", current_run=None, updated=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()))
+        for key in ("stale_since", "stale_run", "activity_observed_since"): state.pop(key, None)
+        temporary = None
+        try:
+          with tempfile.NamedTemporaryFile(mode="w", dir=os.path.dirname(path), delete=False) as stream:
+            temporary = stream.name
+            json.dump(state, stream)
+            stream.flush()
+            os.fsync(stream.fileno())
+          os.replace(temporary, path)
+          temporary = None
+          ok = True
+        finally:
+          if temporary is not None: os.unlink(temporary)
+except Exception:
+  pass  # Missing state, denied inspection, or failed writes preserve the claim.
+print(json.dumps(ok))
+'''
+
+
+def clear_orphan_lane(L, cfg, run):
+    try:
+        rc, out, _ = sh(ssh_argv(ssh_opts(cfg["host"]), cfg["host"], "python3", "-", L, run),
+                        timeout=60, inp=REMOTE_CLEAR_ORPHAN)
+        return rc == 0 and json.loads(out.strip().splitlines()[-1]) is True
+    except (OSError, subprocess.TimeoutExpired, ValueError, IndexError):
+        return False
 
 PRIVATE_HOST_RE = re.compile(
     r'(?<![A-Za-z0-9_])(?:' + '|'.join('go' + n for n in ('vpn', 'res', 'cc', 'relay')) + r')[0-9]*(?![A-Za-z0-9_])', re.I)
@@ -1608,6 +1767,7 @@ def card_quality(body):
             if m.group() in created: continue
             if main_path_missing(m.group()): return f"main 文件不存在: {m.group()}"
     return None
+
 
 def queue(state=None):
     """Track admission clocks in tick's persisted state, keyed by JSON issue numbers.
@@ -2041,12 +2201,16 @@ def requeue_lost_run(L, st, r, state, why="orphaned"):
     return True
 
 def reconcile(L, cfg, st, r, state):
-    """Local state says busy but the remote lane is idle on another/no run, the run has no result.json and its runner is dead:
-    the run was orphaned (lane restart / reassignment). Drop it; requeue the issue unless it already got a PR or closed."""
-    if r.get("run") != "running" or r.get("lane") != "idle" or r.get("current_run") == st["run"]: return False
+    """Release a confirmed-dead orphan only after its remote lane is usable."""
+    if r.get("run") != "running": return False
     # Missing status is not evidence that the runner exited. Keep the lane claimed
     # until the remote probe positively reports a dead runner (Refs #1673).
-    if r.get("runner_alive") is not False or age_s(st) < 180: return False
+    if r.get("runner_alive") is not False or runner_liveness(r) != "dead" or age_s(st) < 180: return False
+    if r.get("executor_alive") is not False: return False
+    if r.get("lane") == "busy" and r.get("current_run") == st["run"]:
+        if not clear_orphan_lane(L, cfg, st["run"]): return False
+    elif r.get("lane") != "idle" or r.get("current_run") == st["run"]:
+        return False
     return requeue_lost_run(L, st, r, state, "orphaned")
 
 def verify_recovered_run(L, cfg, st, r, state):
@@ -2069,7 +2233,17 @@ def verify_recovered_run(L, cfg, st, r, state):
     if liveness == "unknown":
         log(f"{L} run {st['run']}: the liveness of the runner is unknown, the lane keeps its card until the host can tell", brain=False)
         return False
+    # The session of the executor has to be proven dead before the lane is
+    # touched: an unknown session keeps the run in flight, and the remote lane
+    # must not be cleared for it (Refs #1663).
+    if r.get("runner_alive") is not False or r.get("executor_alive") is not False: return False
     if age_s(st) < 180: return False  # a young run: the host may still be starting it
+    # A busy lane still needs the same identity-checked remote cleanup before
+    # relabeling; a lane now owned by another run is never touched.
+    if r.get("lane") == "busy" and r.get("current_run") == st["run"]:
+        if not clear_orphan_lane(L, cfg, st["run"]): return False
+    elif r.get("lane") != "idle" or r.get("current_run") == st["run"]:
+        return False
     if not requeue_lost_run(L, st, r, state, "lost with the outage of the host"): return False
     pending.pop(L, None)
     return True

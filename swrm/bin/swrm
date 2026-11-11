@@ -3953,6 +3953,13 @@ def set_status(rdir, **kw):
     with open(os.path.join(rdir, "status.lock"), "a") as lock:
         _flock(lock, LOCK_EX)
         s = jload(f"{rdir}/status.json", {}) or {}
+        if "executor_pid" in kw:
+            # A restarted executor must never inherit the previous group's proof.
+            s.pop("executor_pgid", None)
+            try:
+                kw["executor_pgid"] = os.getpgid(kw["executor_pid"])
+            except (OSError, TypeError, ValueError):
+                pass
         s.update(kw)
         s["updated"] = NOW()
         jsave(f"{rdir}/status.json", s)
