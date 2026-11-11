@@ -38,8 +38,13 @@ class HarvestFilterTest(unittest.TestCase):
         self.base = self.git("rev-parse", "HEAD")
         self.patch = mock.patch.object(ad, "LOCAL", str(self.repo))
         self.patch.start()
+        self.state_dir = self.repo / "state"
+        self.state_dir.mkdir()
+        self.state_patch = mock.patch.object(ad, "D", str(self.state_dir))
+        self.state_patch.start()
 
     def tearDown(self):
+        self.state_patch.stop()
         self.patch.stop()
         self.tmp.cleanup()
 

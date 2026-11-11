@@ -1717,6 +1717,187 @@ if R:
       out["run_state"]="missing"; out["runner_alive"]=None; out["executor_alive"]=None
 print(json.dumps(out))
 '''
+
+# Kill only after the executor has independently confirmed the ledger, event, queue and
+# process evidence. Every sandbox thread must remain in a local blocking wait with
+# unchanged scheduler counters; unavailable evidence is fail-closed. Runs are counted
+# from the executor's own ledger, not AD health state.
+REMOTE_STUCK_CLEANUP = REMOTE_STATE_HOME + r'''
+import glob,json,os,signal,sys,time
+L=sys.argv[1]; N=3
+PROC_ROOT=os.environ.get("AD_PROC_ROOT", "/proc")
+def read(path):
+  try:
+    with open(path) as f: return json.load(f)
+  except Exception: return None
+def event_count(run):
+  paths=glob.glob(os.path.join(O,"runs",run,"events*.jsonl"))
+  if not paths: return None
+  count=0
+  for path in paths:
+    try:
+      with open(path) as f:
+        for line in f:
+          if not line.strip(): continue
+          event=json.loads(line)
+          if not isinstance(event,dict): return None
+          # lane_start and the supervisor's interrupt timeout are local
+          # bookkeeping, not evidence that the executor produced any events.
+          if event.get("type")=="lane_start" and event.get("lane")==L: continue
+          if (event.get("type")=="error" and event.get("source")=="supervisor" and
+              event.get("error")=="executor did not stop within 30s after interrupt"): continue
+          count += 1
+    except (OSError,ValueError): return None
+  return count
+def children(pid):
+  found=[]; todo=[pid]
+  while todo:
+    parent=todo.pop()
+    try:
+      tasks=glob.glob(f"{PROC_ROOT}/{parent}/task/[0-9]*")
+      if not tasks: return None
+      kids=sorted({int(x) for task in tasks for x in open(task+"/children").read().split()})
+    except Exception: return None
+    kids=[kid for kid in kids if kid not in found]
+    found.extend(kids); todo.extend(kids)
+  return sorted(found)
+def proc(pid):
+  try:
+    raw=open(f"{PROC_ROOT}/{pid}/stat").read(); rest=raw[raw.rfind(")")+2:].split()
+    wchan=open(f"{PROC_ROOT}/{pid}/wchan").read().strip()
+    cmd=open(f"{PROC_ROOT}/{pid}/cmdline","rb").read().replace(b"\0",b" ").decode(errors="replace")
+    threads=[]
+    for task in sorted(glob.glob(f"{PROC_ROOT}/{pid}/task/[0-9]*")):
+      raw=open(task+"/stat").read(); fields=raw[raw.rfind(")")+2:].split()
+      wait=open(task+"/wchan").read().strip()
+      sched=tuple(int(x) for x in open(task+"/schedstat").read().split())
+      # schedstat is readable by a sibling SSH process without ptrace access.
+      # Zero/disabled accounting cannot establish absence of activity.
+      if len(sched)!=3 or sched[0]<=0 or sched[2]<=0 or not wait or wait=="0": return None
+      threads.append((task,fields[0],fields[19],fields[11],fields[12],wait,sched))
+    if not threads: return None
+    return {"pid":pid,"state":rest[0],"start":rest[19],"ticks":(rest[11],rest[12]),"wchan":wchan,"threads":threads,"cmd":cmd}
+  except Exception: return None
+def snapshot(pids):
+  rows=[proc(pid) for pid in pids]
+  if any(row is None for row in rows): return None
+  return rows
+ledger=[]
+try:
+  with open(os.path.join(O,"ledger.jsonl")) as f:
+    for line in f:
+      try:
+        row=json.loads(line)
+        if not isinstance(row,dict): raise ValueError("invalid ledger row")
+        if row.get("lane")==L: ledger.append(row)
+      except ValueError:
+        print(json.dumps({"cleaned":False,"reason":"ledger-corrupt"})); sys.exit(0)
+except (OSError,UnicodeError): print(json.dumps({"cleaned":False,"reason":"ledger-unreadable"})); sys.exit(0)
+tail=ledger[-N:]
+if len(tail)!=N or any(r.get("status")!="budget_exceeded" or not r.get("id") for r in tail):
+  print(json.dumps({"cleaned":False,"reason":"not-three-budget-runs"})); sys.exit(0)
+ids=[str(r["id"]) for r in tail]
+for run in ids:
+  if event_count(run)!=0:
+    print(json.dumps({"cleaned":False,"reason":"events-unknown-or-nonzero"})); sys.exit(0)
+  status=read(os.path.join(O,"runs",run,"status.json"))
+  if not isinstance(status,dict) or status.get("queue_reason") or not status.get("execution_started"):
+    print(json.dumps({"cleaned":False,"reason":"queued-or-status-unknown"})); sys.exit(0)
+lane=read(os.path.join(O,"lanes",L,"state.json"))
+pid=(lane or {}).get("child_pid") if isinstance(lane,dict) else None
+if isinstance(pid,bool) or not isinstance(pid,int) or pid<=1:
+  print(json.dumps({"cleaned":False,"reason":"rpc-pid-unknown"})); sys.exit(0)
+def rpc_owned():
+  expected=lane.get("child_identity")
+  if not isinstance(expected,dict) or not expected.get("boot") or not expected.get("start"): return False
+  try:
+    with open(f"{PROC_ROOT}/sys/kernel/random/boot_id") as f: boot=f.read().strip()
+    with open(f"{PROC_ROOT}/{pid}/stat") as f: raw=f.read()
+    start=raw[raw.rfind(")")+2:].split()[19]
+    current=read(os.path.join(O,"lanes",L,"state.json"))
+    return (expected=={"boot":boot,"start":start} and isinstance(current,dict)
+            and current.get("child_pid")==pid and current.get("child_identity")==expected)
+  except (OSError,IndexError): return False
+if not rpc_owned():
+  print(json.dumps({"cleaned":False,"reason":"rpc-ownership-unproven"})); sys.exit(0)
+tree=children(pid)
+if tree is None: print(json.dumps({"cleaned":False,"reason":"process-tree-unknown"})); sys.exit(0)
+pids=[pid]+tree; first=snapshot(pids)
+if first is None or "pi" not in first[0]["cmd"].lower() or first[0]["wchan"]!="do_wait":
+  print(json.dumps({"cleaned":False,"reason":"rpc-not-waiting"})); sys.exit(0)
+bwrap=[row for row in first[1:] if "bwrap" in row["cmd"]]
+if not bwrap: print(json.dumps({"cleaned":False,"reason":"bwrap-not-found"})); sys.exit(0)
+time.sleep(2)
+tree2=children(pid)
+second=snapshot([pid]+tree2) if tree2 is not None else None
+if second is None or [r["pid"] for r in first] != [r["pid"] for r in second]:
+  print(json.dumps({"cleaned":False,"reason":"process-tree-changed"})); sys.exit(0)
+if any(a["ticks"]!=b["ticks"] or a["wchan"]!=b["wchan"] or a["threads"]!=b["threads"]
+       for a,b in zip(first[1:],second[1:])):
+  print(json.dumps({"cleaned":False,"reason":"sandbox-active"})); sys.exit(0)
+# Three executed budgets without events plus stable local blocking waits establish
+# the operational stall. Check every thread: a sleeping main thread can otherwise
+# hide a working CPU/network thread. Exclude timers, socket/poll waits and unknown
+# kernel waits, even when their counters are stable. No ptrace-only syscall/IO
+# files are needed, and ordinary pipe/futex deadlocks need not be SIGSTOP'ed.
+# Newer kernels rename the futex wait symbol (futex_wait_queue -> futex_do_wait).
+local_waits={"do_wait","pipe_read","anon_pipe_read","futex_wait_queue","futex_wait_queue_me",
+             "futex_do_wait","futex_wait","do_signal_stop","ptrace_stop"}
+for row in second[1:]:
+  if any(thread[1] not in ("S","T","t") or thread[5] not in local_waits
+         for thread in row["threads"]):
+    print(json.dumps({"cleaned":False,"reason":"sandbox-progress-unproven"})); sys.exit(0)
+if any(a["start"]!=b["start"] or a["cmd"]!=b["cmd"] for a,b in zip(first,second)):
+  print(json.dumps({"cleaned":False,"reason":"process-identity-changed"})); sys.exit(0)
+# Recheck the RPC wait channel and identity immediately before signaling.
+if second[0]["wchan"]!="do_wait" or second[0]["cmd"]!=first[0]["cmd"]:
+  print(json.dumps({"cleaned":False,"reason":"rpc-state-changed"})); sys.exit(0)
+if not rpc_owned():
+  print(json.dumps({"cleaned":False,"reason":"rpc-ownership-unproven"})); sys.exit(0)
+sent=[]
+for row in reversed(second):
+  target=row["pid"]
+  try:
+    os.kill(target,signal.SIGTERM); sent.append(target)
+    # A stopped process cannot handle TERM until resumed. Queue TERM first,
+    # then continue only the stopped members of this verified lane tree.
+    if row["state"] in ("T","t"): os.kill(target,signal.SIGCONT)
+  except ProcessLookupError: pass
+  except OSError: print(json.dumps({"cleaned":False,"reason":"term-failed","sent":sent})); sys.exit(0)
+if pid not in sent: print(json.dumps({"cleaned":False,"reason":"rpc-term-unconfirmed","sent":sent})); sys.exit(0)
+def exited(row):
+  try:
+    with open(f'{PROC_ROOT}/{row["pid"]}/stat') as f: raw=f.read()
+    rest=raw[raw.rfind(")")+2:].split()
+    return rest[0]=="Z" or rest[19]!=row["start"]
+  except FileNotFoundError: return not os.path.exists(f'{PROC_ROOT}/{row["pid"]}')
+  except (OSError,IndexError): return False
+deadline=time.time()+2
+while time.time()<deadline:
+  if all(exited(row) for row in second): break
+  time.sleep(0.1)
+else: print(json.dumps({"cleaned":False,"reason":"tree-term-not-confirmed","sent":sent})); sys.exit(0)
+audit={"at":time.strftime("%F %T"),"lane":L,"runs":ids,"pids":sent,"action":"SIGTERM","confirmed":True}
+warning=None
+try:
+  with open(os.path.join(O,"lane-stuck-audit.jsonl"),"a") as f: f.write(json.dumps(audit)+"\n")
+except OSError: warning="lane-stuck-audit-write-failed"
+print(json.dumps({"cleaned":True,"runs":ids,"pids":sent,"warning":warning}))
+'''
+
+def cleanup_lane_stuck(lane, cfg):
+    """Ask the lane host to verify actual ledger/events and terminate a proven stuck Pi tree."""
+    try:
+        rc, out, err = sh(ssh_argv(ssh_opts(cfg.get("host")), cfg.get("host"),
+                                  "python3", "-", lane), timeout=15, inp=REMOTE_STUCK_CLEANUP)
+        if rc:
+            return {"cleaned": False, "reason": f"ssh-failed: {(err or out).strip()[-120:]}"}
+        result = json.loads(out.strip().splitlines()[-1])
+        if isinstance(result, dict) and result.get("warning"):
+            log(f"{lane}: stuck cleanup warning: {result['warning']}")
+        return result if isinstance(result, dict) else {"cleaned": False, "reason": "invalid-response"}
+    except Exception as error:
+        return {"cleaned": False, "reason": f"probe-failed: {error!r}"}
 def remote(lane, cfg, run=""):
     try: rc, out, err = sh(ssh_argv(ssh_opts(cfg["host"]), cfg["host"], "python3", "-", lane, run), timeout=60, inp=REMOTE_STATUS)
     except subprocess.TimeoutExpired: return {"error": "ssh status timeout"}
@@ -3184,6 +3365,82 @@ def lane_in_fetch_backoff(st, now=None):
 def mark_done(state, n):
     state.setdefault("_done", []); state["_done"] = (state["_done"] + [n])[-200:]
 
+LANE_STREAK_FILE = "lane-streak.json"
+LANE_STREAK_LIMIT = 3
+
+def read_lane_streaks():
+    """Load only well-formed streak entries; damaged state is treated as empty."""
+    path = f"{D}/{LANE_STREAK_FILE}"
+    try:
+        with open(path) as stream: raw = json.load(stream)
+    except (OSError, ValueError, TypeError):
+        return {}
+    if not isinstance(raw, dict): return {}
+    streaks = {}
+    for lane, entry in raw.items():
+        if (not isinstance(lane, str) or not lane or not isinstance(entry, dict)
+                or set(entry) != {"n", "runs"}):
+            continue
+        count, runs = entry["n"], entry["runs"]
+        if (isinstance(count, bool) or not isinstance(count, int) or not 0 <= count <= LANE_STREAK_LIMIT
+                or not isinstance(runs, list) or len(runs) != count
+                or any(not isinstance(run, str) or not run for run in runs)):
+            continue
+        streaks[lane] = {"n": count, "runs": runs[-LANE_STREAK_LIMIT:]}
+    return streaks
+
+def write_lane_streaks(streaks):
+    path = f"{D}/{LANE_STREAK_FILE}"
+    tmp = path + ".tmp"
+    os.makedirs(D, exist_ok=True)
+    with open(tmp, "w") as stream: json.dump(streaks, stream, ensure_ascii=False, indent=1)
+    os.replace(tmp, path)
+
+# First matching row wins. Benign gate/budget endings take precedence over failures;
+# other terminal outcomes retain the existing reset behavior. Nonterminals are ignored.
+LANE_TERMINAL_RULES = (
+    ("committed", {True}, "reset"),
+    ("error_class", {"budget_exceeded", "budget_exceeded_daily", "thin_gate", "thin-gate", "thin_card", "thin"}, "reset"),
+    ("status", {"budget_exceeded", "budget_exceeded_daily", "thin_gate", "thin-gate", "thin_card", "thin"}, "reset"),
+    ("error_class", {"exec_error"}, "failure"),
+    ("status", {"exec_error", "failed", "error", "none", ""}, "failure"),
+    ("status", {"running", "queued", "pending"}, "ignore"),
+    ("status", None, "reset"),
+)
+
+def lane_terminal_kind(info, committed=False):
+    """Apply the ordered (status, error_class, commit) streak rules from #1825."""
+    values = {key: str(info.get(key) or "").strip().lower()
+              for key in ("status", "error_class")}
+    values["committed"] = committed
+    for field, accepted, kind in LANE_TERMINAL_RULES:
+        if accepted is None or values[field] in accepted:
+            return kind
+
+def record_lane_terminal(lane, run, info, committed=False):
+    """Track consecutive failed terminal runs and pause a lane after three."""
+    streaks = read_lane_streaks()
+    kind = lane_terminal_kind(info, committed)
+    if kind == "ignore": return
+    if kind == "reset":
+        if lane in streaks:
+            streaks.pop(lane)
+            write_lane_streaks(streaks)
+        return
+    previous = streaks.get(lane, {"n": 0, "runs": []})
+    runs = (previous["runs"] + [str(run)])[-LANE_STREAK_LIMIT:]
+    count = min(previous["n"] + 1, LANE_STREAK_LIMIT)
+    streaks[lane] = {"n": count, "runs": runs}
+    write_lane_streaks(streaks)
+    if count < LANE_STREAK_LIMIT:
+        return
+    marker = f"{D}/PAUSE-{lane}"
+    if os.path.exists(marker): return
+    reason = f"auto:streak {time.strftime('%F %T')} {count}次 {','.join(runs)}"
+    with open(marker, "w") as stream: stream.write(reason + "\n")
+    with open(f"{D}/health.alert", "a") as stream: stream.write(reason + f" lane={lane}\n")
+    log(f"{lane} {reason}")
+
 def label_lane_failed(n, body):
     """Label the issue lane-failed and explain why in a comment."""
     gh(["issue", "edit", str(n), "--remove-label", "in-progress", "--remove-label", "lane-ready", "--add-label", "lane-failed"])
@@ -3711,6 +3968,7 @@ def finish(lane, cfg, st, info, state):
         if missing:
             return block_pr_validation(lane, cfg, st, info, state, "", "", missing)
     if info.get("branch") and info["branch"] != "None" and info.get("commit"):
+        record_lane_terminal(lane, run, info, committed=True)
         b = f"fleet/{lane}-issue{n}-{run}"
         fetch = git_fetch_command(ssh_opts(cfg["host"]), LOCAL, f"{cfg['host']}:{info['repo']}", info["branch"], lane)
         ok, err, failures = harvest_fetch(lane, n, fetch, st, cfg)
@@ -3793,6 +4051,16 @@ def finish(lane, cfg, st, info, state):
         return {"done": True, "status": "pr-created",
                 "error": None if delivered else "PR delivery labels unverified", "missing": []}
     else:
+        record_lane_terminal(lane, run, info)
+        if info.get("status") == "budget_exceeded":
+            cleanup = cleanup_lane_stuck(lane, cfg)
+            if cleanup.get("cleaned"):
+                audit = (f"auto:stuck {time.strftime('%F %T')} lane={lane} "
+                         f"runs={','.join(cleanup.get('runs', []))} pids={','.join(map(str, cleanup.get('pids', [])))}")
+                with open(f"{D}/health.alert", "a") as stream: stream.write(audit + "\n")
+                log(audit)
+            else:
+                log(f"{lane} run {run}: stuck cleanup not performed ({cleanup.get('reason', 'unknown')})", brain=False)
         if budget_failure(info):
             return hold_budget_failure(lane, cfg, st, info, state)
         label_lane_failed(n, f"Lane {lane} ({cfg['host']}, run `{run}`) ended `{info.get('status')}` without a commit "
@@ -4271,9 +4539,15 @@ def run_tick(lanes, state, last_warn, publisher):
             state.pop(L); state.get("_review_queued", {}).pop(L, None); save_state(state); freed = True
         if freed:
             freed_lanes.add(L)
+            # finishing can create a PAUSE marker (e.g. the lane-failure streak): apply it
+            # before this lane is considered for a card in the same tick
+            scopes = paused_scopes()
             outcomes[L] = give_card(L, lanes[L], remote_idle=False)
         # The harvest of one lane can take minutes: refresh after every lane.
         publisher.publish(res=res, phase="harvest")
+    # Terminal handling can create PAUSE markers. Apply them before considering
+    # any newly idle lane for dispatch in this same tick.
+    scopes = paused_scopes()
     queue_ok = tick_queue()
     update_busy_stale(lanes, state, res)
     if not queue_ok:
