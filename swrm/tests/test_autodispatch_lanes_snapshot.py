@@ -18,7 +18,7 @@ The tests below pin the contract of the writer:
 """
 import sys as _sys
 from pathlib import Path as _P
-_sys.path.insert(0, str(_P(__file__).resolve().parents[2] / "tools" / "lane-autodispatch"))
+_sys.path.append(str(_P(__file__).resolve().parents[2] / "tools" / "lane-autodispatch"))
 from pr_guard_fixtures import no_open_prs
 import importlib.machinery
 import importlib.util
