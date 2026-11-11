@@ -237,3 +237,17 @@ cd swrm/tests && python3 -m unittest test_broker_recovery
 ```
 
 The default restart script only removes a socket that belongs to the current user, is a socket, and refuses connections; any other connect failure leaves the path in place and the restart fails.
+
+### Capacity lease audit
+
+Run `swrm/bin/fleet-capacity-audit --health` periodically on the coordinator.
+The independent command opens `capacity.sqlite` with SQLite `mode=ro` and never
+renews, releases, or recovers reservations. `--db` and `--runs` select the
+coordinator database and run directory; `--grace-seconds` defaults to 60.
+`--state` selects the audit's deduplication ledger, which defaults alongside
+the database. Protect this file and retain it between rounds: current findings
+are marked `new` once and `ongoing` on consecutive rounds. The JSON report
+includes current counts and counts first seen within 24 hours, including
+resolved findings. Missing run records are counted; expiry and duplicate run
+checks still work without them. The coordinator has no acquire queue timing,
+so `lease_age_seconds` is null with an explanation rather than an estimate.
