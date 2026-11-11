@@ -197,7 +197,7 @@ def parse(content, source="denylist"):
     the content of the denylist.
     """
     rules = []
-    for number, raw in enumerate(str(content).splitlines(), 1):
+    for number, raw in enumerate(str(content).split("\n"), 1):
         line = raw.rstrip("\r")
         if not line.strip() or line.strip().startswith("#"):
             continue
@@ -337,7 +337,7 @@ def _from_env(env):
 def _read_file(path):
     """Read the denylist file."""
     try:
-        return Path(path).read_text(encoding="utf-8")
+        return Path(path).read_bytes().decode("utf-8")
     except UnicodeError:
         raise DenylistError(f"denylist file is not valid UTF-8: {path}")
     except OSError as exc:
