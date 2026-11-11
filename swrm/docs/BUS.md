@@ -28,6 +28,7 @@ Configure `policy.local.json` under `$OPENSWARM_HOME`:
     "worker_repos": ["<target-owner>/<target-repo>"],
     "worker_verify_allow": ["<exact-verify-command>"],
     "poll_seconds": 15,
+    "reserve_ttl_seconds": 300,
     "labels_prefix": "swrm",
     "open_pr": false
   }
@@ -87,6 +88,45 @@ The worker checks out the requested base, runs swrm's regular local run machiner
 `status`, `summary`, `files_changed`, `tests`, and `followups` follow swrm's regular result schema. The bus result adds `branch`, `commit`, and optional `pr_url`. The planner takes the terminal status from a valid `swrm-result` comment authored by the winning claimer, regardless of done or failed labels. It fetches the reported result branch, verifies it locally when requested, writes the usual run result and ledger entry, and never merges or pushes to the target repository. The worker always pushes `swrm/<run_id>`; `branch_hint` is informational and ignored.
 
 Failed results may include an `error_class`. `executor_start_failed` means the executor exited before producing a stable turn; it is distinct from `exec_error`, which indicates a failure after startup.
+
+## Reservation receipt and card state
+
+A worker reserves a card before it clones or verifies anything, so the dispatcher can see that a worker picked the card up instead of assuming nobody claimed it. The worker posts one machine-marked comment right after it accepts the card and before its `/claim` comment:
+
+```html
+<!-- swrm-bus:reserve worker=<executor-name> at=<iso-8601-utc> -->
+```
+
+The receipt is visibility only: it never decides who wins a card, and the claim rule stays exactly as before — the earliest `/claim` comment from an allowlisted account wins.
+
+`swrm bus status` reports the receipt and the card state:
+
+- `reserved_at`: the timestamp of the latest trusted reservation receipt, `null` when there is none. Historical timestamps remain visible after the freshness window expires, including after claim and completion.
+- `reserve_latency_seconds`: the seconds between the card creation and that receipt.
+- the state column: `queued` (no claim or fresh receipt), `reserved` (a worker left a fresh receipt, no claim yet), `claimed` (an allowlisted worker claimed it and is preparing to execute), `running` (the winning worker started its execution process, before reporting a result), `done` (the winning worker reported its result or the card has a terminal label).
+
+After cloning and preparing the command, the winning worker posts a start receipt as soon as its execution process starts:
+
+```html
+<!-- swrm-bus:running claim=<winning-claim-comment-id> at=<iso-8601-utc> -->
+```
+
+Only a start receipt authored by the winning claimer and referencing that claim's comment ID with a valid timestamp changes the state to `running`. Other workers' start receipts are ignored. Older workers without this receipt remain `claimed` until completion. Receipt freshness controls the `reserved` state and withdrawal protection only; it does not erase `reserved_at` or `reserve_latency_seconds`.
+
+Only receipts written by `bus.allowed_executors` are trusted, exactly like claims: a receipt from any other account is ignored and never holds a card.
+
+## Withdrawal guard
+
+Before the planner withdraws or cancels a card it reads the receipts and the claims on it. A fresh reservation (within `bus.reserve_ttl_seconds`, 300 seconds by default) or an existing claim holds the card: the withdrawal is refused and the planner is told to repeat the command with `--force`. With `--force` the card is cancelled anyway and the cancellation comment records the override.
+
+```sh
+swrm stop <run-id>            # refused while a worker holds the card
+swrm stop <run-id> --force    # cancels the card and records the override
+```
+
+A receipt that is older than the freshness window no longer holds the card, and a receipt or claim from an account outside `bus.allowed_executors` never holds it.
+
+Planner budget expiry follows the same guard and never forces a withdrawal. The local run ends with `budget_exceeded`; if a worker holds the card, its labels and comments are left intact and the refusal (including the `--force` hint) is recorded in the run events. An unheld card is cancelled as usual.
 
 ## Trust and cancellation
 

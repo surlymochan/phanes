@@ -237,3 +237,46 @@ cd swrm/tests && python3 -m unittest test_broker_recovery
 ```
 
 The default restart script only removes a socket that belongs to the current user, is a socket, and refuses connections; any other connect failure leaves the path in place and the restart fails.
+
+### Capacity lease audit
+
+Run `swrm/bin/fleet-capacity-audit --health` periodically on the coordinator.
+The independent command opens `capacity.sqlite` with SQLite `mode=ro` and never
+renews, releases, or recovers reservations. `--db` and `--runs` select the
+coordinator database and run directory; `--grace-seconds` defaults to 60.
+`--state` selects the audit's deduplication ledger, which defaults alongside
+the database. Protect this file and retain it between rounds: current findings
+are marked `new` once and `ongoing` on consecutive rounds. The JSON report
+includes current counts and counts first seen within 24 hours, including
+resolved findings. Missing run records are counted; expiry and duplicate run
+checks still work without them. The coordinator has no acquire queue timing,
+so `lease_age_seconds` is null with an explanation rather than an estimate.
+Run records are merged by field: an explicitly terminal `result.json` wins;
+otherwise `status.json` takes priority, followed by `result.json` and `run.json`.
+The first available status (`status`, then `state`) and card (`issue`, then
+`title`, excluding blank values) in that order are used. Thus a result without
+a title can borrow the status record's title. `partial` is terminal and any
+reservation it still holds is reported as a ghost.
+
+The lifecycle writers in `swrm/bin/swrm` use these records:
+
+| Record | Stage and card fields | Status fields | Time fields |
+| --- | --- | --- | --- |
+| `status.json` | Queue, routing, execution, finalization; `title` is set on admission/detach and lane assignment | `state` during execution; final `status` plus `state=finished` | `started`, `queued_at`, final `finished`; `set_status` always updates `updated` |
+| `result.json` | Finalization or early failure; normally `title`, but some failure paths omit it | Final `status`, including `partial` | Durations `seconds` / sometimes `queued_seconds`; no consistent absolute state timestamp |
+| `run.json` | Compatibility input; no writer in the current `swrm` binary; optional `issue` / `title` | Optional `status` / `state` | No current writer contract |
+| Other run artifacts | `task.md`, event logs, `review.json`, reservation/release JSON, lock files and executor outputs | Not authoritative run lifecycle records; never used to infer card/state | Not used by the audit |
+
+`missing_run_records` counts reservations with incomplete run evidence once per
+round. `missing_run_record_reasons` reports per-reason reservation counts:
+`directory_missing`, `files_missing` (none of the three lifecycle files exists),
+`invalid_json`, `invalid_record` (JSON is not an object), `unreadable_file`,
+`missing_card`, `missing_status`, or `invalid_run_id`. Multiple reasons can apply
+to one reservation. Missing optional files do not count when another lifecycle
+file exists. Corrupt files count even if a readable fallback supplies the
+fields. Missing fields are checked after merging readable objects. These
+counters are included in `--health` and ordinary JSON output; they describe
+coverage of this round, not the 24-hour alert window. Missing card information
+skips card grouping; missing status skips terminal detection. Independently
+available card/status evidence, duplicate run checks and expiry checks remain
+usable. Only the audit ledger is written; all run artifacts remain untouched.
