@@ -43,7 +43,14 @@ class LaneStuckTickTest(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         return json.loads(result.stdout.splitlines()[-1])
 
+    def write_fake_lane_state(self, home, identity=None):
+        state = {"child_pid": 43210,
+                 "child_identity": identity if identity is not None else {"boot": "test-boot", "start": "18"}}
+        (home / "lanes/M19/state.json").write_text(json.dumps(state))
+
     def make_fake_process_tree(self, root):
+        (root / "sys/kernel/random").mkdir(parents=True)
+        (root / "sys/kernel/random/boot_id").write_text("test-boot")
         for pid, cmd, wchan, children in (
                 (43210, b"pi\0--mode\0rpc", "do_wait", "43211"),
                 (43211, b"bwrap\0--unshare-all", "poll_schedule_timeout", "")):
@@ -188,7 +195,7 @@ class LaneStuckTickTest(unittest.TestCase):
             proc_root = home / "proc"
             self.make_fake_process_tree(proc_root)
             (home / "lanes" / "M19").mkdir(parents=True)
-            (home / "lanes" / "M19" / "state.json").write_text('{"child_pid":43210}')
+            self.write_fake_lane_state(home)
             with mock.patch.dict(os.environ, {"AD_PROC_ROOT": str(proc_root)}):
                 result = self.run_probe(home)
             self.assertFalse(result["cleaned"])
@@ -205,7 +212,7 @@ class LaneStuckTickTest(unittest.TestCase):
             proc_root = home / "proc"
             self.make_fake_process_tree(proc_root)
             (home / "lanes" / "M19").mkdir(parents=True)
-            (home / "lanes" / "M19" / "state.json").write_text('{"child_pid":43210}')
+            self.write_fake_lane_state(home)
             (proc_root / "43211/task/43211/schedstat").unlink()
             with mock.patch.dict(os.environ, {"AD_PROC_ROOT": str(proc_root)}):
                 self.assertFalse(self.run_probe(home)["cleaned"])
@@ -218,7 +225,7 @@ class LaneStuckTickTest(unittest.TestCase):
             self.make_fake_process_tree(proc_root)
             (proc_root / "43211/wchan").write_text("anon_pipe_read")
             (home / "lanes/M19").mkdir(parents=True)
-            (home / "lanes/M19/state.json").write_text('{"child_pid":43210}')
+            self.write_fake_lane_state(home)
 
             def deliver(pid, sig):
                 path = proc_root / str(pid) / "stat"
@@ -232,6 +239,48 @@ class LaneStuckTickTest(unittest.TestCase):
                 exec(AUTODISPATCH.REMOTE_STUCK_CLEANUP, {})
             self.assertTrue(json.loads(output.getvalue())["cleaned"])
 
+    def test_stale_pid_or_missing_identity_never_signals_pi_process(self):
+        for identity in ({"boot": "test-boot", "start": "17"},
+                         {"boot": "previous-boot", "start": "18"}, {}, "invalid"):
+            with self.subTest(identity=identity), tempfile.TemporaryDirectory() as directory:
+                home = Path(directory)
+                self.make_run_data(home)
+                proc_root = home / "proc"
+                self.make_fake_process_tree(proc_root)
+                (proc_root / "43211/wchan").write_text("anon_pipe_read")
+                (home / "lanes/M19").mkdir(parents=True)
+                self.write_fake_lane_state(home, identity)
+                output = io.StringIO()
+                with mock.patch.dict(os.environ, {"OPENSWARM_HOME": str(home), "AD_PROC_ROOT": str(proc_root)}), \
+                     mock.patch.object(sys, "argv", ["-", "M19"]), \
+                     mock.patch.object(os, "kill") as kill, \
+                     mock.patch.object(time, "sleep"), contextlib.redirect_stdout(output):
+                    with self.assertRaises(SystemExit):
+                        exec(AUTODISPATCH.REMOTE_STUCK_CLEANUP, {})
+                self.assertEqual(json.loads(output.getvalue()),
+                                 {"cleaned": False, "reason": "rpc-ownership-unproven"})
+                kill.assert_not_called()
+
+    def test_ownership_changed_during_sampling_never_signals(self):
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory)
+            self.make_run_data(home)
+            proc_root = home / "proc"
+            self.make_fake_process_tree(proc_root)
+            (proc_root / "43211/wchan").write_text("anon_pipe_read")
+            (home / "lanes/M19").mkdir(parents=True)
+            self.write_fake_lane_state(home)
+            output = io.StringIO()
+            with mock.patch.dict(os.environ, {"OPENSWARM_HOME": str(home), "AD_PROC_ROOT": str(proc_root)}), \
+                 mock.patch.object(sys, "argv", ["-", "M19"]), \
+                 mock.patch.object(os, "kill") as kill, \
+                 mock.patch.object(time, "sleep", side_effect=lambda _: self.write_fake_lane_state(
+                     home, {"boot": "test-boot", "start": "17"})), contextlib.redirect_stdout(output):
+                with self.assertRaises(SystemExit):
+                    exec(AUTODISPATCH.REMOTE_STUCK_CLEANUP, {})
+            self.assertEqual(json.loads(output.getvalue())["reason"], "rpc-ownership-unproven")
+            kill.assert_not_called()
+
     def test_rpc_exit_alone_does_not_confirm_tree_cleanup(self):
         for unreadable in (False, True):
             with self.subTest(unreadable=unreadable), \
@@ -244,7 +293,7 @@ class LaneStuckTickTest(unittest.TestCase):
                 sandbox_stat.write_text(sandbox_stat.read_text().replace(") S ", ") T "))
                 (proc_root / "43211/wchan").write_text("do_signal_stop")
                 (home / "lanes/M19").mkdir(parents=True)
-                (home / "lanes/M19/state.json").write_text('{"child_pid":43210}')
+                self.write_fake_lane_state(home)
 
                 def deliver(pid, sig):
                     path = proc_root / str(pid) / "stat"
@@ -291,7 +340,7 @@ class LaneStuckTickTest(unittest.TestCase):
                 proc_root = home / "proc"
                 self.make_fake_process_tree(proc_root)
                 (home / "lanes/M19").mkdir(parents=True)
-                (home / "lanes/M19/state.json").write_text('{"child_pid":43210}')
+                self.write_fake_lane_state(home)
                 sandbox = proc_root / "43211"
                 (sandbox / "wchan").write_text({
                     "network": "sock_recvmsg", "timer": "hrtimer_nanosleep",

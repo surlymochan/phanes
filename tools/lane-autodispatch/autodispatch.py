@@ -1807,6 +1807,19 @@ lane=read(os.path.join(O,"lanes",L,"state.json"))
 pid=(lane or {}).get("child_pid") if isinstance(lane,dict) else None
 if isinstance(pid,bool) or not isinstance(pid,int) or pid<=1:
   print(json.dumps({"cleaned":False,"reason":"rpc-pid-unknown"})); sys.exit(0)
+def rpc_owned():
+  expected=lane.get("child_identity")
+  if not isinstance(expected,dict) or not expected.get("boot") or not expected.get("start"): return False
+  try:
+    with open(f"{PROC_ROOT}/sys/kernel/random/boot_id") as f: boot=f.read().strip()
+    with open(f"{PROC_ROOT}/{pid}/stat") as f: raw=f.read()
+    start=raw[raw.rfind(")")+2:].split()[19]
+    current=read(os.path.join(O,"lanes",L,"state.json"))
+    return (expected=={"boot":boot,"start":start} and isinstance(current,dict)
+            and current.get("child_pid")==pid and current.get("child_identity")==expected)
+  except (OSError,IndexError): return False
+if not rpc_owned():
+  print(json.dumps({"cleaned":False,"reason":"rpc-ownership-unproven"})); sys.exit(0)
 tree=children(pid)
 if tree is None: print(json.dumps({"cleaned":False,"reason":"process-tree-unknown"})); sys.exit(0)
 pids=[pid]+tree; first=snapshot(pids)
@@ -1839,6 +1852,8 @@ if any(a["start"]!=b["start"] or a["cmd"]!=b["cmd"] for a,b in zip(first,second)
 # Recheck the RPC wait channel and identity immediately before signaling.
 if second[0]["wchan"]!="do_wait" or second[0]["cmd"]!=first[0]["cmd"]:
   print(json.dumps({"cleaned":False,"reason":"rpc-state-changed"})); sys.exit(0)
+if not rpc_owned():
+  print(json.dumps({"cleaned":False,"reason":"rpc-ownership-unproven"})); sys.exit(0)
 sent=[]
 for row in reversed(second):
   target=row["pid"]
@@ -3381,17 +3396,36 @@ def write_lane_streaks(streaks):
     with open(tmp, "w") as stream: json.dump(streaks, stream, ensure_ascii=False, indent=1)
     os.replace(tmp, path)
 
+# First matching row wins. Benign gate/budget endings take precedence over failures;
+# other terminal outcomes retain the existing reset behavior. Nonterminals are ignored.
+LANE_TERMINAL_RULES = (
+    ("committed", {True}, "reset"),
+    ("error_class", {"budget_exceeded", "budget_exceeded_daily", "thin_gate", "thin-gate", "thin_card", "thin"}, "reset"),
+    ("status", {"budget_exceeded", "budget_exceeded_daily", "thin_gate", "thin-gate", "thin_card", "thin"}, "reset"),
+    ("error_class", {"exec_error"}, "failure"),
+    ("status", {"exec_error", "failed", "error", "none", ""}, "failure"),
+    ("status", {"running", "queued", "pending"}, "ignore"),
+    ("status", None, "reset"),
+)
+
+def lane_terminal_kind(info, committed=False):
+    """Apply the ordered (status, error_class, commit) streak rules from #1825."""
+    values = {key: str(info.get(key) or "").strip().lower()
+              for key in ("status", "error_class")}
+    values["committed"] = committed
+    for field, accepted, kind in LANE_TERMINAL_RULES:
+        if accepted is None or values[field] in accepted:
+            return kind
+
 def record_lane_terminal(lane, run, info, committed=False):
     """Track consecutive failed terminal runs and pause a lane after three."""
     streaks = read_lane_streaks()
-    if committed:
-        streaks.pop(lane, None)
-        write_lane_streaks(streaks)
-        return
-    status = info.get("status")
-    if status not in {"exec_error", "failed", None}:
-        streaks.pop(lane, None)
-        write_lane_streaks(streaks)
+    kind = lane_terminal_kind(info, committed)
+    if kind == "ignore": return
+    if kind == "reset":
+        if lane in streaks:
+            streaks.pop(lane)
+            write_lane_streaks(streaks)
         return
     previous = streaks.get(lane, {"n": 0, "runs": []})
     runs = (previous["runs"] + [str(run)])[-LANE_STREAK_LIMIT:]
@@ -4017,6 +4051,7 @@ def finish(lane, cfg, st, info, state):
         return {"done": True, "status": "pr-created",
                 "error": None if delivered else "PR delivery labels unverified", "missing": []}
     else:
+        record_lane_terminal(lane, run, info)
         if info.get("status") == "budget_exceeded":
             cleanup = cleanup_lane_stuck(lane, cfg)
             if cleanup.get("cleaned"):
@@ -4032,7 +4067,6 @@ def finish(lane, cfg, st, info, state):
             f"(error_class `{info.get('error_class')}`).\n\nExecutor summary: {info.get('summary')}\n\nLabel `lane-failed`; re-add `lane-ready` to retry.")
         clear_budget_history(state, n)
         mark_done(state, n); log(f"{lane} ended #{n} without a commit (run {run}, {info.get('status')}/{info.get('error_class')}) → labelled lane-failed")
-        record_lane_terminal(lane, run, info)
         return {"done": True, "status": "lane-failed", "error": None, "missing": []}
 
 # --- 空闲窗口（Refs #1688）--------------------------------------------------------

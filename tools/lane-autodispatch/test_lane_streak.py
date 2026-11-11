@@ -62,6 +62,71 @@ class LaneStreakTickTest(unittest.TestCase):
 
         self.with_state_dir(run)
 
+    def test_terminal_classification_table(self):
+        # One case per ordered rule, including precedence over conflicting fields.
+        cases = [
+            ({"status": "failed", "error_class": "exec_error"}, True, "reset"),
+            ({"status": "failed", "error_class": "thin_gate"}, False, "reset"),
+            ({"status": "budget_exceeded", "error_class": "exec_error"}, False, "reset"),
+            ({"status": "stopped", "error_class": "exec_error"}, False, "failure"),
+            ({"status": "failed"}, False, "failure"),
+            ({"status": "running"}, False, "ignore"),
+            ({"status": "finished"}, False, "reset"),
+            ({"status": None}, False, "failure"),
+            ({"status": "error", "error_class": "exec_error"}, False, "failure"),
+            ({"status": "failed", "error_class": "thin-gate"}, False, "reset"),
+        ]
+        for info, committed, expected in cases:
+            with self.subTest(info=info, committed=committed):
+                self.assertEqual(AUTODISPATCH.lane_terminal_kind(info, committed), expected)
+
+    def tick_terminals(self, infos):
+        lane = "M19"
+        lanes = {lane: {"host": "executor", "backend": "pi"}}
+        holds = []
+        with mock.patch.object(AUTODISPATCH, "audit_switches"), \
+             mock.patch.object(AUTODISPATCH, "paused_scopes", return_value=set()), \
+             mock.patch.object(AUTODISPATCH, "host_ok", return_value=True), \
+             mock.patch.object(AUTODISPATCH, "remote") as remote, \
+             mock.patch.object(AUTODISPATCH, "cleanup_lane_stuck", return_value={"cleaned": False}), \
+             mock.patch.object(AUTODISPATCH, "hold_budget_failure", wraps=AUTODISPATCH.hold_budget_failure) as hold, \
+             mock.patch.object(AUTODISPATCH, "label_lane_failed"), \
+             mock.patch.object(AUTODISPATCH, "queue", return_value=[]), \
+             mock.patch.object(AUTODISPATCH, "replenish", return_value=[]), \
+             mock.patch.object(AUTODISPATCH, "status_snapshot", return_value={}), \
+             mock.patch.object(AUTODISPATCH, "save_state"), \
+             mock.patch.object(AUTODISPATCH, "log"):
+            for index, info in enumerate(infos):
+                run_id = f"run-{index}"
+                remote.return_value = {"lane": "idle", "run": info}
+                state = {lane: {"issue": 1825 + index, "run": run_id, "host": "executor"}}
+                AUTODISPATCH.tick(lanes, state, 0)
+                holds.append(state.get("_budget_requeue"))
+            return hold.call_count, holds
+
+    def test_tick_budget_hold_clears_two_failures_before_next_failure(self):
+        def run(directory):
+            failed = {"status": "failed", "error_class": "exec_error"}
+            budget = {"status": "budget_exceeded", "error_class": "budget_exceeded"}
+            hold_count, holds = self.tick_terminals([failed, failed, budget, failed])
+            self.assertEqual(hold_count, 1, "the real budget hold must still run")
+            self.assertEqual(holds[2]["1827"]["run"], "run-2")
+            self.assertEqual(holds[2]["1827"]["tries"], 1)
+            self.assertEqual(AUTODISPATCH.read_lane_streaks()["M19"],
+                             {"n": 1, "runs": ["run-3"]})
+            self.assertFalse((directory / "PAUSE-M19").exists())
+        self.with_state_dir(run)
+
+    def test_tick_thin_gate_resets_and_exec_error_class_counts(self):
+        def run(directory):
+            failed = {"status": "stopped", "error_class": "exec_error"}
+            self.tick_terminals([failed, failed, {"status": "failed", "error_class": "thin_gate"}, failed])
+            self.assertEqual(AUTODISPATCH.read_lane_streaks()["M19"]["n"], 1)
+            self.assertFalse((directory / "PAUSE-M19").exists())
+            self.tick_terminals([failed, failed])
+            self.assertTrue((directory / "PAUSE-M19").exists())
+        self.with_state_dir(run)
+
     def test_commit_clears_streak_and_budget_exceeded_is_not_counted(self):
         def run(directory):
             AUTODISPATCH.record_lane_terminal("M19", "run-0", {"status": "exec_error"})
@@ -73,6 +138,27 @@ class LaneStreakTickTest(unittest.TestCase):
             streaks = AUTODISPATCH.read_lane_streaks()
             self.assertNotIn("M19", streaks)
             self.assertFalse((directory / "PAUSE-M19").exists())
+        self.with_state_dir(run)
+
+    def test_replays_recorded_m19_autodispatch_terminals_of_2026_11_03(self):
+        # Terminal outcomes (status/error_class) of lane M19 as recorded in its autodispatch.log
+        # on 2026-11-03, replayed through the real tick path.  The recorded order is:
+        #   03:35 finished #1713 budget_exceeded (committed -> PR)  [not replayed: committed]
+        #   04:23 ended #1361  budget_exceeded/budget_exceeded
+        #   04:25 ended #1793  failed/exec_error
+        #   04:36 ended #1794  failed/exec_error
+        #   04:50 ended #1771  failed/exec_error   -> lane M19 was paused by the failure streak
+        def run(directory):
+            recorded = [("budget_exceeded", "budget_exceeded"), ("failed", "exec_error"),
+                        ("failed", "exec_error"), ("failed", "exec_error")]
+            self.tick_terminals([{"status": status, "error_class": error_class}
+                                 for status, error_class in recorded[:3]])
+            self.assertEqual(AUTODISPATCH.read_lane_streaks()["M19"]["n"], 2,
+                             "the budget_exceeded ending clears; two failures follow")
+            self.assertFalse((directory / "PAUSE-M19").exists())
+            self.tick_terminals([{"status": "failed", "error_class": "exec_error"}])
+            self.assertTrue((directory / "PAUSE-M19").exists(),
+                            "the third consecutive recorded failure pauses the lane")
         self.with_state_dir(run)
 
     def test_m19_interleaved_terminal_sequence_does_not_pause(self):
