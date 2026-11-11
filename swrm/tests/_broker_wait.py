@@ -1,16 +1,40 @@
 """Shared connect-based readiness checks for broker integration tests."""
+import atexit
 import os
+import shutil
+from pathlib import Path
 import select
 import socket
 import tempfile
 import time
 
 
+_owned_roots = set()
+
+
 def short_tmp_root():
-    """Keep private workspaces short even when TMPDIR points into a checkout."""
-    if os.path.isdir('/tmp') and os.access('/tmp', os.W_OK | os.X_OK):
-        return '/tmp'
-    return tempfile.gettempdir()
+    """Return a new owned root; never hand a caller a shared cleanup target.
+
+    Keep paths short for Unix sockets even with a checkout-local TMPDIR. Each invocation
+    is private, including repeated calls in the same worker or test.
+    """
+    base = tempfile.gettempdir()
+    # Leave room for fixture subdirectories and the socket filename.
+    checkout = str(Path(__file__).resolve().parents[2])
+    if (len(os.fsencode(os.path.realpath(base))) > 24 or
+            os.path.commonpath((os.path.realpath(base), checkout)) == checkout):
+        base = "/tmp"
+    root = tempfile.mkdtemp(prefix="", dir=base)
+    _owned_roots.add((root, os.getpid()))
+    atexit.register(_remove_owned_root, root, os.getpid())
+    return root
+
+
+def _remove_owned_root(root, owner):
+    # A forked child must not clean up its parent's still-live workspace.
+    if os.getpid() == owner and (root, owner) in _owned_roots:
+        shutil.rmtree(root, ignore_errors=True)
+        _owned_roots.discard((root, owner))
 
 
 def _wait_listening(family, address, timeout, proc, errors):

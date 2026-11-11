@@ -49,6 +49,11 @@ from pathlib import Path as _FixturePath
 sys.path.append(str(_FixturePath(__file__).resolve().parents[1] / "lane-autodispatch"))
 from pr_guard_fixtures import no_open_prs
 
+try:
+    from tools.tests._test_tmp import short_tmp_root
+except ImportError:
+    from _test_tmp import short_tmp_root
+
 import importlib.util
 import json
 import os
@@ -62,7 +67,7 @@ from unittest.mock import patch
 ROOT = Path(__file__).resolve().parents[2]
 AUTODISPATCH_PATH = ROOT / "tools" / "lane-autodispatch" / "autodispatch.py"
 HEALTH_PAUSE_PATH = ROOT / "tools" / "check-health-pause.py"
-SCRATCH = ROOT / ".swrm-tmp"
+SCRATCH = Path(short_tmp_root())
 
 LANE = "GH2"
 HOST = "lane-host"
