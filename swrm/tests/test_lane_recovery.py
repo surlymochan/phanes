@@ -20,6 +20,10 @@ xs = _load.load()
 
 class LaneRecoveryTests(unittest.TestCase):
     def setUp(self):
+        # The mocked RPC child does not use the isolated broker launcher.
+        policy = mock.patch.object(xs, "load_policy", return_value={"pi": {"require_isolation": False}})
+        policy.start()
+        self.addCleanup(policy.stop)
         self.tmp = tempfile.TemporaryDirectory(prefix="lane-recovery-", dir=pathlib.Path(__file__).resolve().parents[2])
         self.root = pathlib.Path(self.tmp.name)
         self.repo = self.root / "repo"

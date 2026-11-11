@@ -3646,6 +3646,303 @@ def plan_pi(prof, st, policy, forced, notes):
     return {"backend": "pi", "model": model, "effort": None, "tier": tier}, None
 
 
+# ---------------------------------------------------------------- pi broker recovery
+#
+# The MiniMax broker is the single point of failure of a Pi host: every Pi run
+# of that host goes through its AF_UNIX socket.  A broker that died used to end
+# every Pi run of the host with a vague exec_error, and only a human restart
+# brought the host back (Refs #1714).  The executor therefore probes the socket
+# before every dispatch, restarts a dead broker with a capped backoff and
+# verifies the fresh broker with a minimal session (no run budget).  The state of
+# every host is kept, so the fleet status can report an interrupted Pi channel.
+
+PI_BROKER_DEFAULT_SOCKET = "/run/swrm-pi/broker.sock"
+PI_BROKER_DEFAULT_MODEL = "MiniMax-M3.1-Flash"
+PI_BROKER_STATE_FILE = "broker-recovery.json"
+PI_BROKER_BRAIN_FILE = "brain.log"
+PI_BROKER_RESTART_LOG = "broker-restart.log"
+PI_BROKER_UNAVAILABLE_RE = re.compile(r"pi broker (?:unavailable|channel interrupted)", re.I)
+# The broker processes stay alive on purpose: they are the broker of the host.  They are
+# kept here so the interpreter does not warn about a running child.
+_BROKER_RESTART_PROCESSES = []
+# The restart command of the deployment: it starts the broker again on the socket
+# the executor probes (bin/pi-broker-restart).
+PI_BROKER_DEFAULT_RESTART_CMD = os.path.join(os.path.dirname(os.path.realpath(__file__)), "pi-broker-restart")
+
+
+def broker_recovery_module():
+    """The broker recovery module (bin/broker_recovery.py), loaded by path."""
+    name = "swrm_broker_recovery"
+    module = sys.modules.get(name)
+    if module is None:
+        path = os.path.join(os.path.dirname(os.path.realpath(__file__)), "broker_recovery.py")
+        spec = importlib.util.spec_from_file_location(name, path)
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[name] = module
+        spec.loader.exec_module(module)
+    return module
+
+
+def pi_broker_socket_path(lane=None):
+    """The broker socket of a Pi lane: the exported variable, then the lane field, then the default.
+
+    The exported variable comes first: it is what bin/pi-isolated hands to the
+    sandbox, so it is the socket the run really talks to.
+    """
+    lane = lane or {}
+    return str(envvar("PI_BROKER_SOCKET") or lane.get("broker_socket") or PI_BROKER_DEFAULT_SOCKET)
+
+
+def pi_broker_model(lane=None, policy=None):
+    """The model the broker serves; the minimal session has to ask for exactly this one."""
+    lane = lane or {}
+    policy = policy if policy is not None else load_policy()
+    cfg = policy.get("pi") or {}
+    return str(lane.get("model") or cfg.get("default_model") or envvar("PI_ISOLATED_MODEL")
+               or PI_BROKER_DEFAULT_MODEL)
+
+
+def pi_broker_isolation_required(policy=None):
+    """True when the Pi run goes through the broker socket (the isolated launcher).
+
+    Only an isolated Pi talks to the model through the broker; a plain Pi run
+    never touches the socket and must not be blocked by a broker that is down.
+    """
+    policy = policy if policy is not None else load_policy()
+    return bool((policy.get("pi") or {}).get("require_isolation", sys.platform != "darwin"))
+
+
+def pi_broker_lane_uses_socket(lane=None, policy=None):
+    """True when this Pi lane really talks to the model through the broker socket.
+
+    A lane that names its broker socket uses it; a lane without one falls back
+    to the isolation setting, because the isolated launcher always talks to the
+    broker. Explicit binary overrides are checked against the isolated launcher.
+    A plain (unisolated) Pi lane never touches the socket and must not
+    be blocked by a broker that is down.
+    """
+    lane = lane or {}
+    if lane.get("backend") != "pi":
+        return False
+    if lane.get("broker_socket") or envvar("PI_BROKER_SOCKET"):
+        return True
+    binary = envvar("PI_RPC_BIN") or lane.get("binary")
+    if binary:
+        return os.path.basename(os.path.realpath(binary)) == "pi-isolated"
+    return pi_broker_isolation_required(policy)
+
+
+def pi_broker_number(value, default, cast):
+    """A policy number of the broker settings, falling back to the default."""
+    try:
+        return cast(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def pi_broker_settings(policy=None):
+    """The broker recovery settings of the live policy (``pi.broker``)."""
+    policy = policy if policy is not None else load_policy()
+    cfg = (policy.get("pi") or {}).get("broker") or {}
+    module = broker_recovery_module()
+    attempts = pi_broker_number(cfg.get("attempts"), module.DEFAULT_ATTEMPTS, int)
+    return {
+        "attempts": max(1, attempts),
+        "backoff_base_s": pi_broker_number(cfg.get("backoff_base_s"), module.DEFAULT_BACKOFF_BASE_S, float),
+        "backoff_cap_s": pi_broker_number(cfg.get("backoff_cap_s"), module.DEFAULT_BACKOFF_CAP_S, float),
+        # Without an explicit threshold the alert follows the number of attempts.
+        "alert_failures": max(1, pi_broker_number(cfg.get("alert_failures"), attempts, int)),
+        # Without a configured command the deployment restarts the broker with
+        # bin/pi-broker-restart, so a dead socket is not a dead host.
+        "restart_cmd": (cfg.get("restart_cmd") or envvar("PI_BROKER_RESTART_CMD")
+                        or PI_BROKER_DEFAULT_RESTART_CMD),
+        "restart_grace_s": pi_broker_number(cfg.get("restart_grace_s"), 5.0, float),
+        "socket_wait_s": pi_broker_number(cfg.get("socket_wait_s"), module.DEFAULT_SOCKET_WAIT_S, float),
+        "session_timeout_s": pi_broker_number(cfg.get("session_timeout_s"),
+                                              module.DEFAULT_SESSION_TIMEOUT_S, float),
+        "brain_log": cfg.get("brain_log") or envvar("PI_BROKER_BRAIN_LOG"),
+        "state_path": os.path.join(DATA, PI_BROKER_STATE_FILE),
+    }
+
+
+def pi_broker_state_path():
+    """The file the recovery state of every host is kept in."""
+    return pi_broker_settings()["state_path"]
+
+
+def pi_broker_brain_log_path(policy=None):
+    """Where the reconnect events go: the policy, the environment, then the executor's brain log."""
+    configured = pi_broker_settings(policy)["brain_log"]
+    return os.path.expanduser(str(configured)) if configured else os.path.join(DATA, PI_BROKER_BRAIN_FILE)
+
+
+def pi_broker_restart_argv(command):
+    """The argv of the restart command.
+
+    A command with a path is resolved against the swrm root (the default is
+    `bin/pi-broker-restart`), a command without one is looked up on the PATH.
+    The command `none` disables the restart: a host whose broker is managed by
+    a service manager wants to see the failure, not a second broker.
+    """
+    if not command:
+        return None
+    if isinstance(command, str) and command.strip().lower() == "none":
+        return None
+    argv = shlex.split(command) if isinstance(command, str) else [str(part) for part in command]
+    if not argv:
+        return None
+    head = argv[0]
+    if os.path.isabs(head):
+        return argv
+    if os.sep in head:
+        return [os.path.join(SKILL_DIR, head), *argv[1:]]
+    found = shutil.which(head)
+    if found:
+        return [found, *argv[1:]]
+    candidate = os.path.join(SKILL_DIR, head)
+    if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
+        return [candidate, *argv[1:]]
+    return argv
+
+
+def pi_broker_restart_tail(path, limit=200):
+    """The last lines of the restart log: the reason of a failed restart."""
+    try:
+        with open(path, encoding="utf-8", errors="ignore") as stream:
+            text = stream.read()
+    except OSError:
+        return ""
+    text = " ".join(line.strip() for line in text.splitlines() if line.strip())
+    return (": " + text[-limit:]) if text else ""
+
+
+def pi_broker_restart(policy=None, socket_path=None):
+    """The callable that restarts the local broker, or None when no restart is configured.
+
+    The command is started detached: a broker service that stays in the foreground
+    is the broker itself.  A command that fails right away is a failed restart.
+    The socket path travels in the environment, so bin/pi-broker-restart binds
+    the broker to the socket the executor probes.
+    """
+    settings = pi_broker_settings(policy)
+    argv = pi_broker_restart_argv(settings["restart_cmd"])
+    if not argv:
+        return None
+    grace = max(0.0, float(settings["restart_grace_s"]))
+    log_path = os.path.join(DATA, PI_BROKER_RESTART_LOG)
+
+    def restart(timeout=None):
+        env = dict(os.environ)
+        if socket_path:
+            env["OPENSWARM_PI_BROKER_SOCKET"] = str(socket_path)
+            env["PI_BROKER_SOCKET"] = str(socket_path)
+        try:
+            os.makedirs(DATA, exist_ok=True)
+            log = open(log_path, "wb")
+        except OSError:
+            log = subprocess.DEVNULL
+        try:
+            proc = subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                                    stderr=log, start_new_session=True, env=env)
+        finally:
+            if log is not subprocess.DEVNULL:
+                log.close()
+        try:
+            code = proc.wait(timeout=min(grace, timeout) if timeout is not None else grace)
+        except subprocess.TimeoutExpired:
+            # The command is still running: it is the broker, not a launcher.
+            _BROKER_RESTART_PROCESSES.append(proc)
+            return
+        if code:
+            raise RuntimeError("broker restart failed (rc=%s)%s" % (code, pi_broker_restart_tail(log_path)))
+
+    return restart
+
+
+def pi_broker_minimal_session(socket_path, model, timeout=None):
+    """The budget-free minimal session: one tiny request over the broker socket.
+
+    The session always has a timeout: a broker that accepts the connection but
+    never answers must not block the dispatch forever.
+    """
+    limit = min(10.0, max(0.001, float(timeout))) if timeout else 10.0
+
+    def validate(timeout=None):
+        remaining = min(limit, timeout) if timeout is not None else limit
+        return broker_recovery_module().minimal_session(socket_path, model=model, timeout=remaining)
+
+    return validate
+
+
+def pi_broker_ensure_ready(lane=None, policy=None, host=None):
+    """Make sure the Pi channel of this host can be used, recovering a dead broker.
+
+    The probe is light (one connect).  A dead socket is restarted with a capped
+    exponential backoff and the fresh broker is verified with a minimal session;
+    a channel that stays broken keeps the host interrupted, and the fleet status
+    reports it.
+    """
+    policy = policy if policy is not None else load_policy()
+    settings = pi_broker_settings(policy)
+    module = broker_recovery_module()
+    socket_path = pi_broker_socket_path(lane)
+    recovery = module.BrokerRecovery(
+        socket_path,
+        host=host or socket.gethostname(),
+        restart=pi_broker_restart(policy, socket_path),
+        validate=pi_broker_minimal_session(socket_path, pi_broker_model(lane, policy),
+                                            settings["session_timeout_s"]),
+        attempts=settings["attempts"],
+        backoff_base_s=settings["backoff_base_s"],
+        backoff_cap_s=settings["backoff_cap_s"],
+        alert_failures=settings["alert_failures"],
+        socket_wait_s=settings["socket_wait_s"],
+        state_path=settings["state_path"],
+        brain_log=pi_broker_brain_log_path(policy),
+    )
+    return recovery.ensure_ready()
+
+
+def pi_broker_record(host=None):
+    """The recovery record of this host, as the fleet status reads it."""
+    module = broker_recovery_module()
+    return module.host_state(module.read_state(pi_broker_state_path()), host or socket.gethostname())
+
+
+def pi_broker_channels(lanes=None, policy=None):
+    """The broker socket of every Pi lane of this host that really uses one."""
+    return {lane["name"]: pi_broker_socket_path(lane) for lane in (lanes or [])
+            if isinstance(lane, dict) and lane.get("name")
+            and pi_broker_lane_uses_socket(lane, policy)}
+
+
+def pi_broker_channel_status(lanes=None):
+    """The Pi broker channel of this host: does the socket answer, is the channel interrupted?
+
+    The status is what the fleet status turns into an alert: a host whose Pi
+    channel is interrupted keeps its other backends, so this is a warning and
+    never a pause (Refs #1714).
+    """
+    channels = pi_broker_channels(lanes)
+    if not channels:
+        return None
+    module = broker_recovery_module()
+    record = pi_broker_record()
+    problems = []
+    policy = load_policy()
+    for lane in lanes:
+        path = channels.get(lane.get("name"))
+        if path and not module.minimal_session(path, model=pi_broker_model(lane, policy),
+                                               timeout=pi_broker_settings(policy)["session_timeout_s"])[0]:
+            problems.append("broker socket %s does not answer a minimal session" % path)
+    if record.get("interrupted"):
+        problems.append(record.get("detail") or record.get("result") or
+                        "the last recovery never validated a session")
+    return {"ok": not problems, "interrupted": bool(problems), "sockets": sorted(set(channels.values())),
+            "failures": record.get("failures") or 0, "alert": record.get("alert"),
+            "detail": "; ".join(problems) if problems else "broker socket answers"}
+
+
 def minimax_key_from_pi():
     """Read Pi's MiniMax credential without exposing it in command arguments."""
     # Resolved at call time, honouring $HOME first: Windows home resolution
@@ -4330,6 +4627,8 @@ def executor_error_class(rc, final, err_text, backend=None):
         return "auth"
     if rc == 75 or (RATE_LIMIT_RE.search(err_text or "") and (rc != 0 or final is None)):
         return "rate_limit"
+    if rc != 0 and PI_BROKER_UNAVAILABLE_RE.search(err_text or ""):
+        return "broker_unavailable"
     if rc != 0 or final is None:
         return "exec_error"
     return None
@@ -5329,6 +5628,16 @@ def exec_pi(d, st, prompt, wd, rdir, timeout, evp):
         open(evp, "w").close()
         return 1, None, {"usage": {}, "resume_supported": False}, "isolated Pi cannot resume a session"
     cfg = load_policy().get("pi") or {}
+    if isolated:
+        # The isolated Pi talks to the model through the broker socket: probe it first and
+        # recover a dead broker instead of ending the run with a vague exec_error.
+        broker = pi_broker_ensure_ready({"model": d.get("model")})
+        if not broker.get("ok"):
+            detail = "pi broker unavailable: %s" % (broker.get("detail") or broker.get("result"),)
+            open(evp, "w").close()
+            with open(evp + ".err", "w") as f:
+                f.write(detail + "\n")
+            return 1, None, {"usage": {k: 0 for k in PI_USAGE_KEYS}, "broker": broker}, detail
     sessions = os.path.abspath(os.path.join(rdir, "pi-sessions"))
     os.makedirs(sessions, exist_ok=True)
     cmd = [binary, "-p", "--mode", "json", "--session-dir", sessions]
@@ -8075,6 +8384,12 @@ class LaneChild:
             cmd = [binary, "--sandbox", "enabled", "acp"]
         child_env = dict(self.env) if getattr(self, "env", None) else os.environ.copy()
         self.secret = None
+        if backend == "pi" and pi_broker_lane_uses_socket(lane, policy):
+            broker = pi_broker_ensure_ready(lane, policy)
+            if not broker.get("ok"):
+                raise RuntimeError("pi broker unavailable: %s" %
+                                   (broker.get("detail") or broker.get("result"),))
+            child_env["OPENSWARM_PI_BROKER_SOCKET"] = pi_broker_socket_path(lane)
         if backend == "hermes":
             cfg = policy.get("hermes") or {}
             self.secret = minimax_key_from_pi()
@@ -9156,6 +9471,15 @@ def lane_run_turn(lane, child, spec, prompt, ws, rdir, server, turn, pending, at
                workspace=ws["path"], events=event_file, attempt=attempt, deadline=deadline,
                executor_pid=child.pid)
     lane_record_event(event_file, {"type": "lane_start", "lane": lane["name"]})
+    if lane["backend"] == "pi" and pi_broker_lane_uses_socket(lane):
+        # The Pi lane talks to the model through the broker socket: probe it before every
+        # dispatch and recover a dead broker.  A channel that stays broken ends the turn
+        # with its own error class instead of a vague exec_error (Refs #1714).
+        broker = pi_broker_ensure_ready(lane)
+        if not broker.get("ok"):
+            detail = "pi broker unavailable: %s" % (broker.get("detail") or broker.get("result"),)
+            lane_record_event(event_file, {"type": "error", "error": detail})
+            return None, {}, "broker_unavailable", 1, event_file, detail
     if continuation:
         lane_continue_turn(lane, child, prompt, event_file, turn)
     else:
@@ -11135,13 +11459,26 @@ def transfer_ref(source, source_repo, rev, target, target_repo, destination=""):
                                            timeout=300, input=bundle), "bundle import").decode().strip()
 
 
+def fleet_pi_channel_alert(pi_channel):
+    """The alert of a host whose Pi channel is interrupted (None when the channel is fine).
+
+    A broken Pi channel is a warning, not a pause: the other backends of the host
+    keep working (Refs #1714).
+    """
+    if not pi_channel or pi_channel.get("ok"):
+        return None
+    return "pi channel interrupted: %s" % (pi_channel.get("detail") or "the broker does not answer",)
+
+
 def fleet_snapshot():
     capacity_only = os.environ.get("OPENSWARM_FLEET_CAPACITY_ONLY") == "1"
     config_error = None
+    lanes_file = envvar("LANES_FILE", os.path.join(DATA, "lanes.json"))
     try:
-        lanes = lane_status_rows() if os.path.exists(envvar("LANES_FILE", os.path.join(DATA, "lanes.json"))) else []
+        lanes = lane_status_rows() if os.path.exists(lanes_file) else []
+        lane_config_rows = lane_config() if os.path.exists(lanes_file) else []
     except ValueError as error:
-        lanes, config_error = [], str(error)
+        lanes, lane_config_rows, config_error = [], [], str(error)
     runs = []
     for path in sorted(glob.glob(os.path.join(RUNS, "*", "status.json"))):
         if capacity_only and (jload(path, {}) or {}).get("state") in ("finished", "unroutable", "dry-run"):
@@ -11153,8 +11490,12 @@ def fleet_snapshot():
     providers = {backend: execution_provider(backend, policy=policy)
                  for backend in ("codex", "cursor", "agy", "pi", "ocgo", "deepseek")}
     backends = {} if capacity_only else {"agy": agy_status(policy)}
+    # The Pi broker channel of this host: the fleet status turns a broken channel
+    # into an alert for the host (Refs #1714).
+    pi_channel = None if capacity_only else pi_broker_channel_status(lane_config_rows)
     return {"lanes": lanes, "active_runs": runs, "providers": providers,
-            "backends": backends, "lane_config_valid": config_error is None,
+            "backends": backends, "pi_channel": pi_channel,
+            "lane_config_valid": config_error is None,
             "lane_config_error": config_error}
 
 
@@ -11737,6 +12078,10 @@ def cmd_fleet(args):
             row["status"] = "no lanes"
         else:
             row["status"] = "reachable"
+        pi_channel = row.get("pi_channel") or {}
+        alert = fleet_pi_channel_alert(pi_channel)
+        if alert:
+            row["alerts"] = [alert]
         rows.append(row)
     probe = lanes_health_probe()
     control_plane = lanes_health_report(probe)
@@ -11760,6 +12105,8 @@ def cmd_fleet(args):
                 print(f"  {lane['name']} {lane['state']} {lane.get('model') or '-'} run={lane.get('current_run') or '-'}")
             for run in row["active_runs"]:
                 print(f"  run {run['id']} {run['state']}")
+            for alert in row.get("alerts") or []:
+                print(f"  alert: {alert}")
 
 
 def safe_id(value):
