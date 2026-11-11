@@ -182,7 +182,8 @@ class ImplCardTaskBookTests(unittest.TestCase):
         self.tmp = scratch_dir()
         self.addCleanup(self.tmp.cleanup)
         for name, value in (("D", self.tmp.name), ("sh", MODULE.sh), ("gh", MODULE.gh), ("log", MODULE.log),
-                            ("preflight_card", lambda text: None)):  # the card lint is not under test here
+                            ("preflight_card", lambda text: None),  # the card lint is not under test here
+                            ("card_quality", lambda text: None)):  # nor the dispatch card quality
             self.addCleanup(setattr, MODULE, name, getattr(MODULE, name))
             setattr(MODULE, name, value)
         self.github = FakeGitHub()
