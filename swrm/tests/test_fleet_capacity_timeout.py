@@ -37,7 +37,7 @@ class FleetCapacityTimeoutTests(unittest.TestCase):
             'p=json.load(sys.stdin)\n'
             f'with open({str(requests)!r}, "a") as f: f.write(json.dumps(p)+"\\n")\n'
             f'if not pathlib.Path({str(online)!r}).exists(): time.sleep(30)\n'
-            'print(json.dumps({"ok":True,"admitted":True,"existing":True}))\n')
+            'print(json.dumps({"ok":True,"admitted":True,"existing":True,"fence":1}))\n')
         command = [sys.executable, str(guard)]
         run = subprocess.run
 
@@ -177,7 +177,7 @@ class FleetCapacityTimeoutTests(unittest.TestCase):
 
         def coordinator(command, payload):
             requests.append(dict(payload))
-            return {'ok': True, 'admitted': True}
+            return {'ok': True, 'admitted': True, 'fence': 1}
 
         def wait(seconds):
             clock[0] += seconds
@@ -279,7 +279,7 @@ class FleetCapacityTimeoutTests(unittest.TestCase):
         def slow_guard(command, payload):
             entered.set()
             self.assertTrue(finish.wait(5))
-            return {'admitted': True}
+            return {'admitted': True, 'fence': 1}
 
         def other_admission():
             with open(self.root / 'provider-concurrency.lock', 'a') as lock:
@@ -325,7 +325,7 @@ class FleetCapacityTimeoutTests(unittest.TestCase):
 
         def acquire(command, payload):
             xs.set_status(str(other), state='running', backend='pi', concurrency_keys=['pi', 'total'])
-            return {'admitted': True}
+            return {'admitted': True, 'fence': 1}
 
         with mock.patch.object(xs, 'DATA', str(self.root)), \
                 mock.patch.object(xs, 'RUNS', str(self.root / 'runs')), \
@@ -406,7 +406,7 @@ class FleetCapacityTimeoutTests(unittest.TestCase):
             if len(requests) <= 3:
                 clock[0] += 8
                 raise RuntimeError('timeout')
-            return {'admitted': True}
+            return {'admitted': True, 'fence': 1}
 
         def queued_wait(*args):
             status = xs.jload(str(self.rdir / 'status.json'), {})
