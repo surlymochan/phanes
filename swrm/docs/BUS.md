@@ -101,9 +101,17 @@ The receipt is visibility only: it never decides who wins a card, and the claim 
 
 `swrm bus status` reports the receipt and the card state:
 
-- `reserved_at`: the timestamp of the freshest trusted reservation receipt, `null` when there is none.
+- `reserved_at`: the timestamp of the latest trusted reservation receipt, `null` when there is none. Historical timestamps remain visible after the freshness window expires, including after claim and completion.
 - `reserve_latency_seconds`: the seconds between the card creation and that receipt.
-- the state column: `queued` (nobody touched the card), `reserved` (a worker left a fresh receipt, no claim yet), `claimed` (an allowlisted worker claimed it and is working on it), `running` (the claimed worker reported its result and the planner is still collecting the branch), `done` (the card is finalized).
+- the state column: `queued` (no claim or fresh receipt), `reserved` (a worker left a fresh receipt, no claim yet), `claimed` (an allowlisted worker claimed it and is preparing to execute), `running` (the winning worker started its execution process, before reporting a result), `done` (the winning worker reported its result or the card has a terminal label).
+
+After cloning and preparing the command, the winning worker posts a start receipt as soon as its execution process starts:
+
+```html
+<!-- swrm-bus:running claim=<winning-claim-comment-id> at=<iso-8601-utc> -->
+```
+
+Only a start receipt authored by the winning claimer and referencing that claim's comment ID with a valid timestamp changes the state to `running`. Other workers' start receipts are ignored. Older workers without this receipt remain `claimed` until completion. Receipt freshness controls the `reserved` state and withdrawal protection only; it does not erase `reserved_at` or `reserve_latency_seconds`.
 
 Only receipts written by `bus.allowed_executors` are trusted, exactly like claims: a receipt from any other account is ignored and never holds a card.
 

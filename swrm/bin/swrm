@@ -6976,6 +6976,7 @@ BUS_RESERVE_MARKER = "swrm-bus:reserve"
 BUS_RESERVE_TTL_SECONDS = 300
 BUS_RESERVE_RE = re.compile(r"<!--\s*" + re.escape(BUS_RESERVE_MARKER)
                             + r"\s+worker=([A-Za-z0-9_.-]{1,64})\s+at=(\S+?)\s*-->")
+BUS_RUNNING_RE = re.compile(r"<!--\s*swrm-bus:running\s+claim=(\d+)\s+at=(\S+?)\s*-->")
 BUS_REPO_RE = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
 BUS_RUN_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,99}$")
 BUS_SHA_RE = re.compile(r"^[0-9a-fA-F]{40,64}$")
@@ -7084,16 +7085,23 @@ def bus_trusted_reservations(comments, allowed):
             and bus_reservation(comment)]
 
 
-def bus_fresh_reservation(comments, allowed, window_seconds):
-    """The newest reservation receipt that is still inside the freshness window."""
-    fresh = []
+def bus_latest_reservation(comments, allowed):
+    """The newest trusted receipt, including historical reservations."""
+    receipts = []
     for comment in bus_trusted_reservations(comments, allowed):
         moment = to_epoch(bus_reservation_stamp(comment))
         if moment is None:
             continue
-        if NOW() - moment <= float(window_seconds):
-            fresh.append((moment, comment))
-    return max(fresh, key=lambda item: item[0])[1] if fresh else None
+        receipts.append((moment, comment))
+    return max(receipts, key=lambda item: item[0])[1] if receipts else None
+
+
+def bus_fresh_reservation(comments, allowed, window_seconds):
+    """The newest reservation receipt that is still inside the freshness window."""
+    receipt = bus_latest_reservation(comments, allowed)
+    if receipt and NOW() - to_epoch(bus_reservation_stamp(receipt)) <= float(window_seconds):
+        return receipt
+    return None
 
 
 def bus_reserve_ttl(value):
@@ -7640,9 +7648,15 @@ def bus_card_state(label_state, reservation, claim, comments):
         return "done"
     if claim:
         claimer = str((claim.get("user") or {}).get("login") or "").casefold()
-        reported = any(str((comment.get("user") or {}).get("login") or "").casefold() == claimer
-                       and bus_parse_result(comment.get("body") or "") for comment in comments)
-        return "running" if reported else "claimed"
+        own_comments = [comment for comment in comments
+                        if str((comment.get("user") or {}).get("login") or "").casefold() == claimer]
+        if any(bus_parse_result(comment.get("body") or "") for comment in own_comments):
+            return "done"
+        for comment in own_comments:
+            marker = BUS_RUNNING_RE.search(comment.get("body") or "")
+            if marker and marker.group(1) == str(claim.get("id")) and to_epoch(marker.group(2)) is not None:
+                return "running"
+        return "claimed"
     if reservation:
         return "reserved"
     return "queued"
@@ -7660,7 +7674,8 @@ def cmd_bus_status(args, policy):
             continue
         comments = bus_comments(cfg["repo"], issue["number"])
         claim = bus_winning_claim(comments, cfg["allowed_executors"])
-        reservation = bus_fresh_reservation(comments, cfg["allowed_executors"], cfg["reserve_ttl_seconds"])
+        reservation = bus_latest_reservation(comments, cfg["allowed_executors"])
+        fresh_reservation = bus_fresh_reservation(comments, cfg["allowed_executors"], cfg["reserve_ttl_seconds"])
         created = to_epoch(issue.get("created_at"))
         state = next((value for value in BUS_STATES if states[value] in names), "open")
         claimed_at = claim.get("created_at") if claim else None
@@ -7669,7 +7684,7 @@ def cmd_bus_status(args, policy):
         reserved = to_epoch(reserved_at)
         rows.append({"number": issue.get("number"), "title": issue.get("title"), "url": issue.get("html_url"),
                      "state": state,
-                     "bus_state": bus_card_state(state, reservation, claim, comments),
+                     "bus_state": bus_card_state(state, fresh_reservation, claim, comments),
                      "executor": bus_claim(claim) if claim else None,
                      "age_minutes": max(0, int((NOW() - created) / 60)) if created else None,
                      "reserved_at": reserved_at,
@@ -7799,6 +7814,8 @@ def bus_worker_run(issue, cfg, args, policy):
             command += ["--verify", effective_verify]
         process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
                                    start_new_session=True)
+        bus_comment(cfg["repo"], issue["number"],
+                    f"<!-- swrm-bus:running claim={own_claim['id']} at={bus_timestamp()} -->")
         while process.poll() is None:
             current = gh_transport(f"repos/{cfg['repo']}/issues/{issue['number']}")
             if labels["cancelled"] in issue_label_names(current):

@@ -457,13 +457,18 @@ class BusTests(unittest.TestCase):
     def test_reference_worker_claims_runs_pushes_and_reports(self):
         fake_pi = self.root / "fake-pi"
         fake_pi.write_text("""#!/usr/bin/env python3
-import json
+import json, os, time
+deadline = time.monotonic() + 15
+while not os.path.exists(RELEASE_PATH):
+    if time.monotonic() >= deadline:
+        raise RuntimeError('test did not release the executor')
+    time.sleep(0.01)
 with open('worker.txt', 'w') as stream:
     stream.write('worker result\\n')
 report = {'status':'done','summary':'worker completed','files_changed':['worker.txt'],'tests':'fake executor','followups':[]}
 message = {'role':'assistant','content':[{'type':'text','text':json.dumps(report)}], 'usage':{'input':2,'output':3}}
 print(json.dumps({'type':'message_end','message':message}), flush=True)
-""")
+""".replace("RELEASE_PATH", repr(str(self.root / "executor-release"))))
         fake_pi.chmod(fake_pi.stat().st_mode | stat.S_IEXEC)
         os.environ["OPENSWARM_PI_BIN"] = str(fake_pi)
         knowledge = self.root / "knowledge"
@@ -487,7 +492,30 @@ print(json.dumps({'type':'message_end','message':message}), flush=True)
                                          budget_minutes=1, once=True, repos="org/target", verify=None,
                                          card_type="fix", paths=["src/worker.py"])
         os.environ["OPENSWARM_FAKE_GH_LOGIN"] = "executor"
-        xs.cmd_bus_worker(worker_args, self.policy)
+        observed = []
+        post_comment = xs.bus_comment
+        clone = xs.bus_worker_clone
+
+        def observe_preparation(*args, **kwargs):
+            observed.append(self.bus_status_rows()[0]["bus_state"])
+            return clone(*args, **kwargs)
+
+        def observe_progress(repo, number, body):
+            comment = post_comment(repo, number, body)
+            if "swrm-bus:running" in body:
+                try:
+                    current = self.issue(number)
+                    self.assertFalse(any(xs.bus_parse_result(row["body"]) for row in current["comments"]))
+                    observed.append(self.bus_status_rows()[0]["bus_state"])
+                finally:
+                    (self.root / "executor-release").touch()
+            return comment
+
+        with mock.patch.object(xs, "bus_comment", side_effect=observe_progress), \
+                mock.patch.object(xs, "bus_worker_clone", side_effect=observe_preparation):
+            xs.cmd_bus_worker(worker_args, self.policy)
+        self.assertEqual(observed, ["claimed", "running"],
+                         "preparation and execution must be distinguishable before posting a result")
         current = self.issue(issue["number"])
         names = {label["name"] for label in current["labels"]}
         self.assertIn("swrm:done", names)
@@ -621,6 +649,93 @@ print(json.dumps({'type':'message_end','message':message}), flush=True)
             if isinstance(value, str):
                 return value
         return None
+
+    def bus_status_rows(self):
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            xs.cmd_bus_status(argparse.Namespace(repo=None, json=True), self.policy)
+        return json.loads(output.getvalue())
+
+    def test_bus_status_tracks_claim_start_and_result(self):
+        number = self.create_bus_card("visible-progress")
+        self.assertEqual(self.bus_status_rows()[0]["bus_state"], "queued")
+        self.add_comment(number, self.reserve_body())
+        self.assertEqual(self.bus_status_rows()[0]["bus_state"], "reserved")
+        claim = self.add_comment(number, "/claim external-agent")
+        self.assertEqual(self.bus_status_rows()[0]["bus_state"], "claimed")
+        self.add_comment(number, f"<!-- swrm-bus:running claim={claim['id']} at={self.stamp(0)} -->")
+        self.assertEqual(self.bus_status_rows()[0]["bus_state"], "running")
+        # A result is completion evidence even before the terminal label arrives.
+        self.add_comment(number, "```swrm-result\n" + json.dumps(self.report("done")) + "\n```")
+        self.assertEqual(self.bus_status_rows()[0]["bus_state"], "done")
+
+    def test_running_receipt_must_belong_to_the_winning_claimer(self):
+        number = self.create_bus_card("untrusted-start")
+        claim = self.add_comment(number, "/claim external-agent")
+        stamp = self.stamp(0)
+        marker = f"<!-- swrm-bus:running claim={claim['id']} at={stamp} -->"
+        self.add_comment(number, marker, login="not-allowed")
+        self.assertEqual(self.bus_status_rows()[0]["bus_state"], "claimed")
+        # Even another allowlisted account cannot announce the winner's start.
+        policy = xs.deep_merge(self.policy, {"bus": {"allowed_executors": ["executor", "other-executor"]}})
+        self.add_comment(number, "/claim other-agent", login="other-executor")
+        self.add_comment(number, marker, login="other-executor")
+        with mock.patch.object(self, "policy", policy):
+            self.assertEqual(self.bus_status_rows()[0]["bus_state"], "claimed")
+        self.add_comment(number, f"<!-- swrm-bus:running claim={claim['id'] + 100} at={stamp} -->")
+        self.add_comment(number, f"<!-- swrm-bus:running claim={claim['id']} at=invalid -->")
+        self.assertEqual(self.bus_status_rows()[0]["bus_state"], "claimed")
+
+    def test_status_keeps_reservation_history_after_ttl(self):
+        number = self.create_bus_card("historical-reservation")
+        state = self.state()
+        state["repos"]["org/bus"]["issues"][0]["created_at"] = "2026-01-01T00:00:00Z"
+        self.state_path.write_text(json.dumps(state))
+        created = xs.to_epoch(self.issue(number)["created_at"])
+        reserved_at = xs.bus_timestamp(created + 9)
+        self.add_comment(number, self.reserve_body(moment=reserved_at))
+        with mock.patch.object(xs, "NOW", return_value=created + 10):
+            fresh = self.bus_status_rows()[0]
+            self.assertEqual(fresh["bus_state"], "reserved")
+        with mock.patch.object(xs, "NOW", return_value=created + 1000):
+            expired = self.bus_status_rows()[0]
+            self.assertEqual(expired["bus_state"], "queued")
+            self.assertEqual(expired["reserved_at"], reserved_at)
+            self.assertEqual(expired["reserve_latency_seconds"], 9)
+            claim = self.add_comment(number, "/claim external-agent")
+            claimed = self.bus_status_rows()[0]
+            self.assertEqual(claimed["bus_state"], "claimed")
+            self.add_comment(number, f"<!-- swrm-bus:running claim={claim['id']} at={self.stamp(0)} -->")
+            running = self.bus_status_rows()[0]
+            self.assertEqual(running["bus_state"], "running")
+            self.send_result(number, self.report("done"))
+            done = self.bus_status_rows()[0]
+            self.assertEqual(done["bus_state"], "done")
+        for row in (fresh, expired, claimed, running, done):
+            self.assertEqual(row["reserved_at"], reserved_at)
+            self.assertEqual(row["reserve_latency_seconds"], 9)
+
+    def test_worker_does_not_announce_running_if_process_start_fails(self):
+        number = self.create_bus_card("start-failed")
+        args = argparse.Namespace(name="external-agent", backend="pi", model=None,
+                                  budget_minutes=1, repos="org/target", verify=None)
+        os.environ["OPENSWARM_FAKE_GH_LOGIN"] = "executor"
+        popen = xs.subprocess.Popen
+
+        def fail_executor(command, *args, **kwargs):
+            if len(command) > 2 and command[2] == "run":
+                raise OSError("executor process could not start")
+            return popen(command, *args, **kwargs)
+
+        with mock.patch.object(xs, "bus_worker_clone"), \
+                mock.patch.object(xs.subprocess, "Popen", side_effect=fail_executor):
+            self.assertTrue(xs.bus_worker_run(self.issue(number), self.cfg, args, self.policy))
+        comments = self.issue(number)["comments"]
+        self.assertFalse(any("swrm-bus:running" in comment["body"] for comment in comments))
+        result = next(xs.bus_parse_result(comment["body"]) for comment in comments
+                      if xs.bus_parse_result(comment["body"]))
+        self.assertIn("executor process could not start", result["summary"])
+        self.assertEqual(self.bus_status_rows()[0]["bus_state"], "done")
 
     def test_worker_writes_a_reservation_receipt_before_it_claims(self):
         """#2159: the worker reserves the card before the claim, so the dispatcher can see it."""
