@@ -9,6 +9,10 @@ from pathlib import Path
 from unittest import TestCase, mock
 from contextlib import ExitStack
 
+import sys
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from pr_guard_fixtures import no_open_prs
+
 spec = importlib.util.spec_from_file_location('autodispatch', Path(__file__).with_name('autodispatch.py'))
 ad = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(ad)
@@ -80,7 +84,7 @@ class CardQualityTest(TestCase):
         with tempfile.TemporaryDirectory() as directory, ExitStack() as stack:
             dispatch = mock.Mock(return_value=('run', None))
             sh = mock.Mock(side_effect=lambda cmd, **k: (0, '8388608' if '/proc/meminfo' in ' '.join(cmd) else 'a' * 40, ''))
-            replacements = dict(D=directory, gh=gh, dispatch=dispatch, sh=sh,
+            replacements = dict(D=directory, gh=no_open_prs(gh), dispatch=dispatch, sh=sh,
                 remote=lambda *a: {'lane': 'idle'}, audit_switches=lambda: None,
                 paused_scopes=lambda **k: {'mint'}, log=mock.Mock(),
                 preflight_card=mock.Mock(side_effect=RuntimeError('legacy')))
