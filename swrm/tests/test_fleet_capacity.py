@@ -1175,15 +1175,15 @@ class FleetCapacityTTLReclaimTests(unittest.TestCase):
 
     # ------------------------------------------------------- the terminal paths
 
-    def run_to_terminal_state(self, rdir, rc):
+    def run_to_terminal_state(self, rdir, rc, executor=None):
         """Run the executor of a run to its terminal state (the real client path)."""
-        def executor(_decision, _state, _prompt, _wd, _rdir, _timeout, _event_file):
+        def failed_executor(_decision, _state, _prompt, _wd, _rdir, _timeout, _event_file):
             return rc, None, {}, 'the executor failed' if rc else ''
 
         env = {'OPENSWARM_FLEET_GUARD_CONFIG': str(self.guard()),
                'OPENSWARM_FLEET_CAPACITY_DIR': self.temp.name}
         with mock.patch.dict(os.environ, env), \
-                mock.patch.dict(xs.EXECUTORS, {'pi': executor}), \
+                mock.patch.dict(xs.EXECUTORS, {'pi': executor or failed_executor}), \
                 mock.patch.object(xs.procboundary.CgroupBoundary, 'create',
                                   return_value=SafeBoundary()), \
                 mock.patch.object(xs, 'start_fleet_release_worker'):
@@ -1192,12 +1192,7 @@ class FleetCapacityTTLReclaimTests(unittest.TestCase):
                 str(rdir), xs.NOW() + 30, {'concurrency': {'total': 8}}, defer_fleet_release=True)
 
     def rebase_workspace(self, rdir):
-        """Rebase the workspace of a run onto a new base (the rebase path).
-
-        ``swrm`` has no separate rebase termination path any more (the one of
-        the old openswarm was migrated away with #1894), so the case is
-        simulated by a real rebase of the workspace of the run.
-        """
+        """Prepare diverged branches which conflict when the executor rebases."""
         repo = rdir / 'repo'
         repo.mkdir()
 
@@ -1215,13 +1210,10 @@ class FleetCapacityTTLReclaimTests(unittest.TestCase):
         (repo / 'file').write_text('work\n')
         git('commit', '-qam', 'work')
         git('checkout', '-q', 'base')
-        (repo / 'other').write_text('upstream\n')
-        git('add', 'other')
-        git('commit', '-qm', 'upstream')
+        (repo / 'file').write_text('upstream\n')
+        git('commit', '-qam', 'upstream')
         git('checkout', '-q', 'swrm/run')
-        git('rebase', 'base')
-        self.assertEqual((repo / 'file').read_text(), 'work\n')
-        self.assertEqual(git('log', '--oneline').splitlines()[0].split(' ', 1)[1], 'work')
+        return repo
 
     def test_a_rebase_run_gives_its_slot_back_with_the_lease(self):
         self.check_terminal_path('rebase')
@@ -1236,26 +1228,49 @@ class FleetCapacityTTLReclaimTests(unittest.TestCase):
         """The slot of a run which ended in `kind` comes back with the lease."""
         rdir = self.runs / kind
         rdir.mkdir()
+        self.addCleanup(xs._FLEET_RESERVATIONS.pop, os.path.realpath(str(rdir)), None)
+        self.addCleanup(self.stop_renewal, rdir)
         if kind == 'rebase':
-            token = 'c' * 32
-            self.assertTrue(self.ask('broker', op='acquire', token=token, run_id=kind,
-                                     backend='cursor', provider=None)['admitted'])
-            self.rebase_workspace(rdir)
+            repo = self.rebase_workspace(rdir)
+
+            def executor(_decision, _state, _prompt, _wd, _rdir, _timeout, _event_file):
+                # The client must have acquired capacity before trying the rebase.
+                self.assertEqual([row['run_id'] for row in self.rows()], [kind])
+                process = subprocess.run(['git', '-C', str(repo), 'rebase', 'base'],
+                                         text=True, capture_output=True, timeout=_timeout)
+                return process.returncode, None, {}, process.stdout + process.stderr
+
+            attempts, final, error = self.run_to_terminal_state(rdir, None, executor)
+            # swrm has no dedicated rebase/base-drift terminal class. A rebase
+            # conflict terminates through executor_error_class as exec_error.
+            self.assertEqual(error, 'exec_error')
+            self.assertIsNone(final)
+            self.assertEqual(len(attempts), 1)
+            self.assertEqual(attempts[0]['rc'], 1)
+            self.assertEqual(attempts[0]['error_class'], 'exec_error')
+            self.assertIn('CONFLICT', attempts[0]['error_tail'])
+            self.assertTrue((repo / '.git' / 'rebase-merge').is_dir())
         else:
             rc = 1 if kind == 'exec_error' else 124
             attempts, final, error = self.run_to_terminal_state(rdir, rc)
             self.assertEqual(error, kind)
-            rows = [row for row in self.rows() if row['run_id'] == kind]
-            self.assertEqual(len(rows), 1, 'the run did not hold a slot')
-            token = rows[0]['token']
-            self.stop_renewal(rdir)
+        rows = [row for row in self.rows() if row['run_id'] == kind]
+        self.assertEqual(len(rows), 1, 'the terminal run did not retain its slot')
+        token = rows[0]['token']
+        reservation = xs._FLEET_RESERVATIONS[os.path.realpath(str(rdir))]
+        self.stop_renewal(rdir)
         # The release of the run never reached the coordinator (the supervisor
         # died with the run): the lease has to free the slot.
         self.expire(token)
-        self.sweep()
+        self.assertEqual(self.sweep()['count'], 1)
         self.assertEqual([row for row in self.rows() if row['run_id'] == kind], [],
                          'the slot of the %s run was not reclaimed by its lease' % kind)
-        xs._FLEET_RESERVATIONS.pop(os.path.realpath(str(rdir)), None)
+        with mock.patch.dict(os.environ, {'OPENSWARM_FLEET_CAPACITY_DIR': self.temp.name}):
+            out = {'status': 'done'}
+            reason = xs.publish_fleet_result(str(rdir), out, [], reservation)
+        self.assertEqual(reason, 'missing')
+        self.assertEqual(out['status'], 'fenced')
+        self.assertEqual(out['error_class'], 'fenced')
 
 
 if __name__ == '__main__':
