@@ -26,9 +26,9 @@ the round 3 result, which is the final decision; rounds 1 and 2 are summarised a
 Frozen manifest digest: sha256:e584877fa14ff059ebf9b22d4bfe5b5ad0f5dd9c44aeb17c7440ea606909ada5
 Report digest: sha256:74755e1a756f20e12ddbdbd12352e3a74a1b1f6ff957f4f78611787cd6562a4d
 Paired sample count: 10
-Discordant results: merge-valid (hidden suite pass and reviewer APPROVE) treatment-only 0 pairs, control-only 1 pair (p03, where the treatment change passed the hidden suite but the reviewer asked for changes), net -1; merge-valid totals control 3, treatment 2 (p05 p07); hidden suite pass totals control 4, treatment 5; false approvals control 2, treatment 1; NEEDS_HUMAN 2 cards (p02 p06), below the frozen limit of 3.
+Discordant results: merge-valid (hidden suite pass and reviewer APPROVE) treatment-only 0 pairs, control-only 1 pair (p03, where the treatment change passed the hidden suite but the reviewer asked for changes), net -1; merge-valid totals control 3, treatment 2 (p05 p07); hidden suite pass totals control 4, treatment 5; false approvals control 2, treatment 1; NEEDS_HUMAN 2 cards (p02 p06), the frozen criteria require noting an excessively high return rate if more than 3 cards are NEEDS_HUMAN.
 Extra runs: treatment used 63 model runs against 30 for control, 33 extra, counting the round 1 Spec and checks it reused; strict mode asked 10 questions in total (p02 5, p03 3, p06 2, and 0 for p05 p08 p10 whose rejection was the Spec overreaching), 4 of the 6 cards passed the check after one answered refinement and 2 ended as NEEDS_HUMAN.
-Queue impact: each clarification, refinement or check waited about 0.4 seconds in the queue, so the extra time is serial model time; median per-card wall time was 720 seconds for control and 1806 seconds for treatment, 2.51 times, above the frozen 2.0 times limit; the 50 seconds Boss took to answer the single batch is excluded and reported here only.
+Queue impact: in round 2, each refinement or check waited about 0.4 seconds in the queue, so the extra time was serial model time; median per-card wall time was 720 seconds for control and 1806 seconds for treatment, 2.51 times, above the frozen 2.0 times limit; the 50 seconds Boss took to answer the single batch is excluded and reported here only.
 Quota impact: at frozen public list prices total cost was 1.87 USD for control and 4.66 USD for treatment; cost per merge-valid PR was 0.62 USD for control and 2.33 USD for treatment, 3.7 times, within the limit of 5.0 times and 10 USD; the most expensive refined card was p08 at 0.66 USD; a voided recheck (0.12 USD) is reported apart from the criteria.
 INFRA counted as PASS: no
 Decision: abandon
@@ -65,5 +65,5 @@ Manifest v2 digest sha256:f0a930fdab98f5ede384f9a4a7f14ba2a928e27f40d8b017ece612
 
 ### Follow-ups
 
-- Strict mode was tested in round 3; it fixes false approvals but not throughput. Cards rejected for Spec overreach should still be asked about interfaces the hidden behaviour depends on (names, fields, signatures); round 3 shows that is where p08 and p10 failed.
+- Strict mode was tested in round 3; no card with answered clarification questions was wrongly approved, but throughput did not improve. Cards rejected for Spec overreach should still be asked about interfaces the hidden behaviour depends on (names, fields, signatures); round 3 shows that is where p08 and p10 failed.
 - Move the Spec check and clarification questions to supply time as a card-quality gate, so ambiguity is resolved once before a card enters L2 instead of on the critical path of every run, which is what drives the 2.5 times wall time.
