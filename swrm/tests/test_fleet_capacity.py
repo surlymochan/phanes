@@ -463,8 +463,10 @@ class FleetCapacityTests(unittest.TestCase):
             db.execute('CREATE TABLE reservations (token TEXT PRIMARY KEY, host TEXT NOT NULL, '
                        'run_id TEXT NOT NULL, backend TEXT NOT NULL, provider TEXT, '
                        'created REAL NOT NULL, lease_expires REAL, boot_id TEXT)')
+            # Keep the expired lease inside grace to exercise boot evidence,
+            # rather than the independent TTL-only reclaim.
             db.execute('INSERT INTO reservations VALUES (?,?,?,?,?,?,?,?)',
-                       (payload['token'], 'worker', payload['run_id'], 'cursor', None, 1, 0, BOOT))
+                       (payload['token'], 'worker', payload['run_id'], 'cursor', None, 1, time.time(), BOOT))
             db.execute('CREATE TABLE host_boots (host TEXT, boot_id TEXT, retired INTEGER)')
             db.execute('INSERT INTO host_boots VALUES (?,?,?)', ('worker', BOOT, 1))
             db.execute('INSERT INTO host_boots VALUES (?,?,?)', ('worker', NEXT_BOOT, 0))
@@ -521,7 +523,8 @@ class FleetCapacityTests(unittest.TestCase):
 
     def test_legacy_reservations_migrate_to_conservative_lease(self):
         import sqlite3
-        created = 1_800_000_000.0
+        created = time.time() - 10000
+        before = time.time()
         db = sqlite3.connect(pathlib.Path(self.temp.name, 'capacity.sqlite'))
         db.execute('CREATE TABLE reservations (token TEXT PRIMARY KEY, host TEXT NOT NULL, run_id TEXT NOT NULL, '
                    'backend TEXT NOT NULL, provider TEXT, created REAL NOT NULL)')
@@ -531,8 +534,10 @@ class FleetCapacityTests(unittest.TestCase):
         db.close()
         status = self.call('broker', op='status')
         row = status['reservations'][0]
-        self.assertEqual(row['lease_expires'], created + 300)
-        self.assertEqual(self.call('broker', op='status')['reservations'][0]['lease_expires'], created + 300)
+        self.assertGreaterEqual(row['lease_expires'], before + 300)
+        self.assertLessEqual(row['lease_expires'], time.time() + 300)
+        self.assertEqual(self.call('broker', op='status')['reservations'][0]['lease_expires'],
+                         row['lease_expires'])
 
     def test_host_limit_is_shared_across_backend_types(self):
         first = dict(op='acquire', token='1' * 32, run_id='one', backend='codex', provider=None)
@@ -787,6 +792,83 @@ class FleetCapacityTTLReclaimTests(unittest.TestCase):
         return records
 
     # ------------------------------------------------------------------ cases
+
+    # Review 1 mapping (Refs #2160):
+    # BLOCKER 1 -> swrm/bin/fleet-capacity:220 (migrate_leases), :263 (sweep_once)
+    # -> test_sweep_migrates_old_rows_once_and_preserves_renewed_leases and
+    # FleetCapacityTests.test_legacy_reservations_migrate_to_conservative_lease.
+    # BLOCKER 2 -> swrm/bin/fleet-capacity:379 (request maintenance)
+    # -> test_every_capacity_request_reclaims_and_audits_other_expired_leases,
+    # test_request_audit_failure_rolls_back_migration_and_reclaim.
+    # Result: migration protects old runs, all capacity operations reclaim with
+    # atomic audit. The original 16 TTL acceptance tests stay intact.
+    def test_sweep_migrates_old_rows_once_and_preserves_renewed_leases(self):
+        # Start with the actual pre-lease schema, not just a NULL in a new DB.
+        with sqlite3.connect(self.db_path) as db:
+            db.execute('CREATE TABLE reservations (token TEXT PRIMARY KEY, host TEXT NOT NULL, '
+                       'run_id TEXT NOT NULL, backend TEXT NOT NULL, provider TEXT, created REAL NOT NULL)')
+            db.execute('INSERT INTO reservations VALUES (?,?,?,?,?,?)',
+                       ('e' * 32, 'worker', 'legacy', 'cursor', None, time.time() - 10000))
+        before = time.time()
+        self.assertEqual(self.sweep()['count'], 0)
+        expiry = self.rows()[0]['lease_expires']
+        self.assertGreaterEqual(expiry, before + 300)
+        self.assertLessEqual(expiry, time.time() + 300)
+        self.sweep()
+        self.assertEqual(self.rows()[0]['lease_expires'], expiry)
+        self.assertEqual(self.audit_rows(), [])
+        # A new run coexists with the migrated one, and a renewal survives a
+        # sweep which reclaims only the expired legacy row.
+        self.assertTrue(self.ask('local', op='acquire', token='f' * 32,
+                                 run_id='new', backend='codex')['admitted'])
+        self.assertTrue(self.ask('local', op='renew', token='f' * 32, run_id='new')['ok'])
+        self.expire('e' * 32)
+        self.assertEqual(self.sweep()['count'], 1)
+        self.assertEqual([row['run_id'] for row in self.rows()], ['new'])
+        self.assertEqual(len(self.audit_rows()), 1)
+        self.sweep()
+        self.assertEqual(len(self.audit_rows()), 1)
+
+    def test_every_capacity_request_reclaims_and_audits_other_expired_leases(self):
+        requests = [
+            ('broker', dict(op='status')),
+            ('local', dict(op='release', token='f' * 32, run_id='absent')),
+            ('broker', dict(op='recover', host='worker', token='f' * 32, run_id='absent')),
+            ('worker', dict(op='attest_boot', boot_id=BOOT)),
+            ('local', dict(op='acquire', token='f' * 32, run_id='live', backend='codex')),
+            ('local', dict(op='renew', token='f' * 32, run_id='live')),
+        ]
+        for index, (host, request) in enumerate(requests):
+            with self.subTest(op=request['op']):
+                token = '%032x' % (index + 1)
+                run_id = 'ghost-%d' % index
+                self.assertTrue(self.ask('worker', op='acquire', token=token,
+                                         run_id=run_id, backend='cursor')['admitted'])
+                self.expire(token)
+                answer = self.ask(host, **request)
+                self.assertTrue(answer['ok'], answer)
+                self.assertEqual(answer['reclaimed'], 1)
+                self.assertNotIn(run_id, [row['run_id'] for row in self.rows()])
+                records = [row for row in self.audit_rows() if row['event'] == 'lease-expired']
+                self.assertEqual(len(records), index + 1)
+                self.assertEqual(json.loads(records[-1]['entry'])['run_id'], run_id)
+
+    def test_request_audit_failure_rolls_back_migration_and_reclaim(self):
+        self.assertTrue(self.ask('worker', op='acquire', token='a' * 32,
+                                 run_id='ghost', backend='cursor')['admitted'])
+        self.expire('a' * 32)
+        with sqlite3.connect(self.db_path) as db:
+            db.execute('INSERT INTO reservations (token,host,run_id,backend,created) VALUES (?,?,?,?,?)',
+                       ('b' * 32, 'local', 'legacy', 'codex', time.time() - 10000))
+            db.execute("CREATE TRIGGER reject_audit BEFORE INSERT ON lease_audit "
+                       "BEGIN SELECT RAISE(ABORT, 'audit unavailable'); END")
+        answer = self.ask('broker', op='status')
+        self.assertFalse(answer['ok'], answer)
+        rows = {row['run_id']: row for row in self.rows()}
+        self.assertEqual(set(rows), {'ghost', 'legacy'})
+        self.assertEqual(rows['ghost']['lease_expires'], 0)
+        self.assertIsNone(rows['legacy']['lease_expires'])
+        self.assertEqual(self.audit_rows(), [])
 
     def test_an_expired_lease_is_reclaimed_without_any_boot_evidence(self):
         token = 'a' * 32

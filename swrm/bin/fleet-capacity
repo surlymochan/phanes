@@ -17,11 +17,9 @@ The reclaim:
 * waits for the grace period (OPENSWARM_FLEET_CAPACITY_GRACE_SECONDS), so a
   slow renewal or a clock skew does not cost a live run its slot.
 
-Every request which manages the capacity (acquire, renew) reclaims the expired
-leases on the way, and "fleet-capacity --sweep-once" reclaims them without any
-request at all (a janitor or a timer may call it).  The read-only observations
-(status, validate) and the single reservation operations (release, recover,
-attest_boot) never change the state of the coordinator on their own.
+Every capacity request reclaims the expired leases on the way, and
+"fleet-capacity --sweep-once" reclaims them without any request at all (a
+janitor or a timer may call it). The fencing protocol keeps validate read-only.
 
 Recovery protocol (over the existing forced-command authenticated transport):
 * The coordinator administrator can install boot-probes.json beside this DB:
@@ -219,6 +217,16 @@ def prepare_schema(db):
                'at REAL NOT NULL, event TEXT NOT NULL, entry TEXT NOT NULL)')
 
 
+def migrate_leases(db, now):
+    """Give legacy rows one full TTL from migration, never from creation.
+
+    Called inside the sweep/request transaction, including autonomous sweeps.
+    Only NULL expiries are initialized, so later sweeps cannot extend ghosts.
+    """
+    db.execute('UPDATE reservations SET lease_expires=? WHERE lease_expires IS NULL',
+               (now + LEASE_TTL,))
+
+
 def lease_audit(db, event, **fields):
     """Record one lease action in the audit trail of the coordinator.
 
@@ -265,7 +273,9 @@ def sweep_once(root):
         db.execute('BEGIN IMMEDIATE')
         try:
             prepare_schema(db)
-            reclaimed = reclaim_expired(db, time.time(), reclaim_grace())
+            now = time.time()
+            migrate_leases(db, now)
+            reclaimed = reclaim_expired(db, now, reclaim_grace())
             db.execute('COMMIT')
         except Exception:
             db.execute('ROLLBACK')
@@ -365,18 +375,13 @@ try:
         elif op == 'attest_boot':
             raise ValueError('coordinator boot probe is not configured')
     now = time.time()
-    if op != 'validate':
-        # A fence check is read-only: it never migrates or renews a reservation.
-        db.execute('UPDATE reservations SET lease_expires=CASE WHEN created>0 THEN created+? ELSE ? END '
-                   'WHERE lease_expires IS NULL', (LEASE_TTL, now + LEASE_TTL))
     reclaimed = []
-    if op in ('acquire', 'renew'):
-        # A request which manages the capacity reclaims the expired leases on
-        # the way: a slot which a lost run still holds is never handed out
-        # again.  The read-only observations (status, validate) and the single
-        # reservation operations (release, recover, attest_boot) never change
-        # the state of the coordinator on their own.
-        reclaimed = reclaim_expired(db, now, reclaim_grace())
+    if op != 'validate':
+        # Preserve #2158's read-only fence check. All capacity operations,
+        # including status/release/recover/attest_boot, share this maintenance.
+        migrate_leases(db, now)
+        if op != 'recover':
+            reclaimed = reclaim_expired(db, now, reclaim_grace())
     if op == 'attest_boot':
         out = {'ok': True}
     elif op == 'status':
@@ -518,6 +523,10 @@ try:
                                (token,host,run_id,backend,provider,now,now + LEASE_TTL,boot_id,fence))
                     out = {'ok': True, 'admitted': True, 'fence': fence, 'lease_expires': now + LEASE_TTL,
                            'lease_ttl_seconds': LEASE_TTL}
+    if op == 'recover':
+        # Preserve the boot-evidence recovery path and its recovered count,
+        # then reclaim other expired leases in the same transaction.
+        reclaimed = reclaim_expired(db, now, reclaim_grace())
     if reclaimed:
         out['reclaimed'] = len(reclaimed)
     db.execute('COMMIT')
