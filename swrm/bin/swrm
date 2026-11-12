@@ -10276,6 +10276,10 @@ def lane_finalize_run(lane, spec, ws, final, usage, error_class, rc, event_file,
         status, error_class = out["status"], out["error_class"]
     else:
         jsave(os.path.join(rdir, "result.json"), out)
+    # The descendant proof permits release only after the fence was checked,
+    # including when the coordinator rejected ownership of this result.
+    if (jload(os.path.join(rdir, "status.json"), {}) or {}).get("fleet_release_ready"):
+        release_fleet_slot(rdir)
     changed = changed_paths(ws.get("repo") or ws.get("root"), ws.get("base"), fin.get("commit"),
                             (final or {}).get("files_changed"))
     read_only = spec.get("read_only") or spec.get("card_type") in READ_ONLY_CARD_TYPES
@@ -10553,8 +10557,6 @@ def lane_do_run(lane, spec, child, server, current):
                 release_fleet_slot(rdir)
         out = lane_finalize_run(attempt_lane, spec, ws, final, usage, error_class, rc, evp,
                                 attempts=attempts)
-        if (jload(os.path.join(rdir, "status.json"), {}) or {}).get("fleet_release_ready"):
-            release_fleet_slot(rdir)
         return out
     except Exception as e:
         error_class = "exec_error"

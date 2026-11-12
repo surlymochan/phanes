@@ -466,6 +466,14 @@ class FleetCapacityTimeoutTests(unittest.TestCase):
             (None, {}, 'upstream_forbidden', 1, 'events1', 'HTML response 403'),
             ({'status': 'done'}, {}, None, 0, 'events2', None),
         ]
+        def finalize_and_release(*args, **kwargs):
+            # Finalization owns the last release; retry release must already
+            # have completed before the second turn acquired its reservation.
+            self.assertIn(str(self.rdir), xs._FLEET_RESERVATIONS)
+            self.assertTrue(xs.jload(str(self.rdir / 'status.json'), {})['fleet_release_ready'])
+            xs.release_fleet_slot(str(self.rdir))
+            return {'status': 'done'}
+
         with mock.patch.object(xs, 'RUNS', str(self.root / 'runs')), \
                 mock.patch.dict(os.environ, {'OPENSWARM_FLEET_CAPACITY_DIR': str(self.root)}), \
                 mock.patch.object(xs, 'fleet_guard_command', return_value=[
@@ -478,10 +486,11 @@ class FleetCapacityTimeoutTests(unittest.TestCase):
                 mock.patch.object(xs, 'lane_write_state'), \
                 mock.patch.object(xs, 'git', return_value=(0, '', '')), \
                 mock.patch.object(xs, 'lane_run_turn', side_effect=turns) as turn, \
-                mock.patch.object(xs, 'lane_finalize_run', return_value={'status': 'done'}) as finalize:
+                mock.patch.object(xs, 'lane_finalize_run', side_effect=finalize_and_release) as finalize:
             outcome = xs.lane_do_run(lane, spec, child, None, spec)
         self.assertEqual(outcome['status'], 'done')
         self.assertEqual(turn.call_count, 2)
+        finalize.assert_called_once()
         self.assertIsNone(finalize.call_args.args[5])
         pending = self.rdir / 'fleet-release-pending.json'
         deadline = time.monotonic() + 5
