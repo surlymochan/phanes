@@ -61,9 +61,17 @@ class FleetCapacityTests(unittest.TestCase):
         return json.loads(p.stdout)
 
     def expire(self, token):
+        """Let the lease of a reservation run out.
+
+        The lease runs out *now*: since #2160 the coordinator reclaims a lease
+        which ran out before the grace period, so a lease which expired long
+        ago would be gone before the explicit recovery of this suite could
+        prove the reboot of its owner.  The reclaim of an expired lease has
+        its own suite (``FleetCapacityTTLReclaimTests``).
+        """
         import sqlite3
         db = sqlite3.connect(pathlib.Path(self.temp.name, 'capacity.sqlite'))
-        db.execute('UPDATE reservations SET lease_expires=0 WHERE token=?', (token,))
+        db.execute('UPDATE reservations SET lease_expires=? WHERE token=?', (time.time(), token))
         db.commit()
         db.close()
 
@@ -410,6 +418,9 @@ class FleetCapacityTests(unittest.TestCase):
             self.assertFalse(self.call('worker', op='attest_boot', boot_id=fake_boot)['ok'])
             self.assertFalse(self.call('broker', op='recover', host='worker',
                                        boot_id=fake_boot, **payload)['ok'])
+            # The lease of the reservation just ran out: it waits for the grace
+            # period of the coordinator, so the slot still belongs to it
+            # (Refs #2160).
             self.assertEqual(self.call('broker', op='acquire', token='3' * 32,
                                        run_id='overlap', backend='cursor')['blocked'], ['cursor'])
             self.assertIsNone(process.poll())

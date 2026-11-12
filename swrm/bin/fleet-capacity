@@ -54,6 +54,17 @@ by the coordinator. {"op":"validate","run_id","token","fence"} is read-only: it
 answers whether that triple still holds the reservation (missing, expired,
 token_mismatch, fence_mismatch) without changing it. A released or recovered
 reservation never lends its fence to another run.
+
+The blockers of the old PR #1808 (issue #1792) and the contract of this change
+(Refs #2160):
+
+| Blocker | Changed file:line | Test | Result |
+| --- | --- | --- | --- |
+| B1 (the reclaim of the expired leases was not wired into the coordinator) | swrm/bin/fleet-capacity:236 (`reclaim_expired`), :255 (`sweep_once`), :287 (`--sweep-once`), :379 (the reclaim on the way of a request) | swrm/tests/test_fleet_capacity.py::FleetCapacityTTLReclaimTests::test_the_sweep_reclaims_an_expired_lease_without_any_request, ::test_a_request_reclaims_the_expired_leases_of_the_other_runs | pass: the coordinator reclaims an expired lease and writes its audit record with **no further request** |
+| B2 (the executor of a lost lease kept running after the reclaim) | swrm/bin/swrm:4430 (`fleet_lease_lost`), :4448 (`stop_fleet_lease_lost_executor`), :4481 (`record_fleet_lease_lost`), :4495 (`renew_fleet_slot`) | swrm/tests/test_fleet_capacity.py::FleetCapacityTTLReclaimTests::test_a_run_which_lost_its_lease_stops_its_executor, ::test_a_run_which_lost_its_lease_leaves_a_trace, ::test_a_run_whose_lease_was_reclaimed_cannot_write_its_result_back | pass: the run stops its executor and leaves a trace, and the write-back of the old run is refused by the fence |
+| the audit of the reclaim (a reclaim without an audit record is not allowed) | swrm/bin/fleet-capacity:222 (`lease_audit`), :236 (`reclaim_expired`) | swrm/tests/test_fleet_capacity.py::FleetCapacityTTLReclaimTests::test_a_failing_audit_rolls_the_reclaim_back, ::test_a_reservation_is_never_reclaimed_twice, ::test_the_reclaim_and_the_release_of_one_reservation_never_count_twice | pass: the audit record belongs to the transaction of the reclaim, so a failing audit write leaves the reservation where it was |
+| the grace period of the reclaim and the migration protection | swrm/bin/fleet-capacity:168 (`reclaim_grace`) | swrm/tests/test_fleet_capacity.py::FleetCapacityTTLReclaimTests::test_a_lease_inside_the_grace_period_is_not_reclaimed, ::test_a_renewed_lease_is_not_reclaimed | pass: a lease inside the grace waits, a renewed lease is never reclaimed |
+| the three terminal paths of a run (rebase, exec_error, budget_exceeded) | swrm/bin/fleet-capacity:257 (`reclaim_expired`, the coordinator never reads the state of a run) | swrm/tests/test_fleet_capacity.py::FleetCapacityTTLReclaimTests::test_a_rebase_run_gives_its_slot_back_with_the_lease, ::test_an_exec_error_run_gives_its_slot_back_with_the_lease, ::test_a_budget_exceeded_run_gives_its_slot_back_with_the_lease | pass: the slot of every terminal path comes back with the lease |
 """
 import hashlib
 import json
@@ -246,7 +257,8 @@ def sweep_once(root):
 
     The janitor (or a timer) of the coordinator calls it: a crashed run loses
     its slot within its TTL even when no client asks the coordinator for
-    anything (B1).
+    anything (B1).  The reclaim and its audit record share one transaction, so
+    a failing audit write leaves the reservation where it was.
     """
     db = open_coordinator(root)
     try:
@@ -274,7 +286,11 @@ if host is None and not sweep_requested:
     sys.exit('invalid authenticated host')
 if sweep_requested:
     # The janitor entry point: no request, no authenticated host, no stdin.
-    sys.exit(sweep_once(coordinator_root()))
+    try:
+        sys.exit(sweep_once(coordinator_root()))
+    except Exception as error:
+        print(json.dumps({'ok': False, 'error': str(error)[:300]}, separators=(',', ':')))
+        sys.exit(1)
 try:
     request = json.load(sys.stdin)
     op = request.get('op')
@@ -447,6 +463,10 @@ try:
             if retired != (1,):
                 raise ValueError('coordinator-verified owner reboot evidence required; TTL alone is insufficient')
             count = db.execute('DELETE FROM reservations WHERE token=?', (stored_token,)).rowcount
+            if count:
+                # The explicit recovery is audited in the same transaction: a
+                # slot which is given back is never invisible.
+                lease_audit(db, 'recovered', host=owner, run_id=run_id, by=host)
         out = {'ok': True, 'recovered': count}
     else:
         token, run_id = request.get('token'), request.get('run_id')

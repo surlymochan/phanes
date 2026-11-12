@@ -4427,14 +4427,87 @@ def release_fleet_slot(rdir):
     return False
 
 
-def renew_fleet_slot(command, payload, interval, stop):
+def fleet_lease_lost(rdir, reservation=None):
+    """Whether the coordinator says that the lease of this run is gone.
+
+    The check is read-only on the coordinator side: it asks whether the run
+    still holds its fencing token (Refs #2158).  An unreachable coordinator
+    cannot prove the loss of a lease, so the renewal keeps retrying and the
+    run only stops when the coordinator confirms that its reservation is gone
+    (Refs #2160).
+    """
+    verdict = fleet_fence_verdict(rdir, reservation)
+    if verdict is None or verdict.get("ok"):
+        return None
+    reason = str(verdict.get("reason") or "")
+    if reason in ("missing", "token_mismatch", "fence_mismatch", "expired"):
+        return reason
+    return None
+
+
+def stop_fleet_lease_lost_executor(rdir):
+    """Stop the executor of a run whose lease the coordinator reclaimed.
+
+    The coordinator may hand the slot of a reclaimed lease to another run, so
+    the executor of the old run has to be gone before it may continue: two
+    runs must never share one slot (Refs #2160).
+    """
+    status = jload(os.path.join(rdir, "status.json"), {}) or {}
+    try:
+        pid = int(status.get("executor_pid"))
+    except (TypeError, ValueError):
+        pid = None
+    try:
+        pgid = int(status.get("executor_pgid"))
+    except (TypeError, ValueError):
+        pgid = None
+    getpgid = getattr(os, "getpgid", None)
+    killpg = getattr(os, "killpg", None)
+    try:
+        own = getpgid(0) if getpgid else None
+    except OSError:
+        own = None
+    if pgid and pgid != own and killpg:
+        # The executor owns a process group of its own (it spawns shells in
+        # new groups); the group is stopped with the executor.
+        try:
+            killpg(pgid, getattr(signal, "SIGKILL", signal.SIGTERM))
+        except OSError:
+            pass
+    if pid and pid_alive(pid):
+        kill_tree(pid, grace=0.5)
+
+
+def record_fleet_lease_lost(rdir, reason):
+    """Leave a durable trace of a lost lease (Refs #2160)."""
+    detail = short(reason, 250)
+    set_status(rdir, fleet_lease_state="lost", fleet_lease_lost_at=NOW(),
+               fleet_lease_error=detail)
+    try:
+        with open(os.path.join(rdir, "fleet-lease.jsonl"), "a", encoding="utf-8") as stream:
+            stream.write(json.dumps({"type": "FLEET_LEASE_LOST", "reason": detail,
+                                     "run_id": os.path.basename(rdir), "ts": NOW()},
+                                    ensure_ascii=False) + "\n")
+    except OSError as error:
+        print(f"fleet capacity lease trace unavailable: {error}", file=sys.stderr)
+
+
+def renew_fleet_slot(command, payload, interval, stop, rdir=None):
     """Keep a coordinator lease alive while this supervisor owns the run."""
     while not stop.wait(interval):
         try:
             fleet_guard_call(command, {"op": "renew", "run_id": payload["run_id"], "token": payload["token"]})
-        except RuntimeError:
+        except RuntimeError as error:
             # Keep retrying. A coordinator outage must never be converted to a
             # local release. TTL alone never authorizes coordinator recovery.
+            # A lease which the coordinator really reclaimed is gone for good:
+            # the run must not keep a slot which another run may take, so its
+            # executor is stopped and the loss leaves a trace (Refs #2160).
+            reason = fleet_lease_lost(rdir, (command, payload)) if rdir else None
+            if reason:
+                record_fleet_lease_lost(rdir, "%s: %s" % (reason, short(error, 120)))
+                stop_fleet_lease_lost_executor(rdir)
+                return
             continue
 
 
@@ -4681,7 +4754,8 @@ def reserve_provider_slot(rdir, backend, provider, policy, lane_name=None, keep_
                     _FLEET_RESERVATIONS[reservation_key] = (command, payload)
                     interval = max(0.1, float(answer.get("lease_ttl_seconds", 300)) / 3)
                     stop = threading.Event()
-                    thread = threading.Thread(target=renew_fleet_slot, args=(command, payload, interval, stop),
+                    thread = threading.Thread(target=renew_fleet_slot,
+                                              args=(command, payload, interval, stop, reservation_key),
                                               daemon=True)
                     _FLEET_RENEWALS[reservation_key] = (stop, thread)
                     thread.start()
