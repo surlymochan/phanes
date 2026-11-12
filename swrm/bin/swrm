@@ -11873,7 +11873,11 @@ def fleet_snapshot():
     for path in sorted(glob.glob(os.path.join(RUNS, "*", "status.json"))):
         if capacity_only and (jload(path, {}) or {}).get("state") in ("finished", "unroutable", "dry-run"):
             continue
-        row = run_digest(os.path.basename(os.path.dirname(path)))
+        # Snapshot needs state only: parsing every run's event log made `fleet status` time out on busy hosts
+        # (100 run dirs took 40s, so the host showed "unreachable" and its runs and lanes disappeared).
+        if (jload(path, {}) or {}).get("state") in ("finished", "unroutable", "dry-run"):
+            continue
+        row = run_digest(os.path.basename(os.path.dirname(path)), parse_events=False)
         if row["state"] not in ("finished", "unroutable", "dry-run", "dead"):
             runs.append(row)
     policy = load_policy()
@@ -13439,7 +13443,7 @@ def cmd_watch(args, policy):
         time.sleep(2)
 
 
-def run_digest(rid):
+def run_digest(rid, parse_events=True):
     rdir = f"{RUNS}/{rid}"
     st = jload(f"{rdir}/status.json", {}) or {}
     r = jload(f"{rdir}/result.json", {}) or {}
@@ -13449,7 +13453,7 @@ def run_digest(rid):
         state = "dead"
     cmds, last = 0, ""
     messages = WatchMessages()
-    if st.get("events") and os.path.exists(st["events"]):
+    if parse_events and st.get("events") and os.path.exists(st["events"]):
         with open(st["events"], errors="ignore") as fh:
             for line in fh:
                 try:
