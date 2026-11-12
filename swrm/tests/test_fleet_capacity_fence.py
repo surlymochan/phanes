@@ -12,6 +12,7 @@ import sqlite3
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 
 HERE = pathlib.Path(__file__).resolve().parent
@@ -47,9 +48,9 @@ class FleetCapacityFenceTests(unittest.TestCase):
                            capture_output=True, env=self.env, timeout=15)
         return json.loads(p.stdout)
 
-    def expire(self, token):
+    def expire(self, token, lease_expires=0):
         db = sqlite3.connect(pathlib.Path(self.temp.name, 'capacity.sqlite'))
-        db.execute('UPDATE reservations SET lease_expires=0 WHERE token=?', (token,))
+        db.execute('UPDATE reservations SET lease_expires=? WHERE token=?', (lease_expires, token))
         db.commit()
         db.close()
 
@@ -116,8 +117,10 @@ class FleetCapacityFenceTests(unittest.TestCase):
     def test_recovered_reservation_refuses_the_old_fence_and_the_reissue_gets_a_bigger_one(self):
         token = 'a' * 32
         old_fence = self.acquire('worker', token, 'orphan', 'cursor')
-        # Recovery still needs the expired lease and an attested owner reboot.
-        self.expire(token)
+        # Keep this boot-recovery case inside grace: otherwise attest_boot or
+        # status reclaims the expired lease before explicit recovery (#2160).
+        self.env['OPENSWARM_FLEET_CAPACITY_GRACE_SECONDS'] = '3600'
+        self.expire(token, time.time())
         self.boot_files['worker'].write_text(NEXT_BOOT)
         self.assertTrue(self.call('worker', op='attest_boot', boot_id=NEXT_BOOT)['ok'])
         row = self.call('broker', op='status')['reservations'][0]
