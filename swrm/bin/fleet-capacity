@@ -25,6 +25,12 @@ normal boundary-checked release or owner reboot. Rows without boot evidence
 (including legacy rows or owners without probes) require normal owner release.
 Probe failures retain capacity; client assertions and old self-reported boot
 records cannot make a reservation recoverable.
+
+Fencing: every reservation carries a monotonically increasing fence handed out
+by the coordinator. {"op":"validate","run_id","token","fence"} is read-only: it
+answers whether that triple still holds the reservation (missing, expired,
+token_mismatch, fence_mismatch) without changing it. A released or recovered
+reservation never lends its fence to another run.
 """
 import hashlib
 import json
@@ -79,6 +85,15 @@ def observe_boot(root, owner):
     if result.returncode or not re.fullmatch(r'[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}', boot):
         raise ValueError('coordinator boot probe failed or returned invalid kernel boot id')
     return boot
+
+
+def next_fence(db):
+    """Hand out the next fencing token: monotonic, never reused, even after recovery."""
+    db.execute('INSERT OR IGNORE INTO fence_counter (id,value) VALUES (1,0)')
+    value = db.execute('SELECT value FROM fence_counter WHERE id=1').fetchone()[0]
+    fence = int(value) + 1
+    db.execute('UPDATE fence_counter SET value=? WHERE id=1', (fence,))
+    return fence
 
 
 def record_boot(db, owner, boot):
@@ -157,7 +172,7 @@ try:
             result = json.loads(bundle.stdout)
         print(json.dumps({'ok': process.returncode == 0, 'result': result}, separators=(',', ':')))
         sys.exit(0 if process.returncode == 0 else 1)
-    if op not in ('acquire', 'release', 'status', 'recover', 'renew', 'attest_boot'):
+    if op not in ('acquire', 'release', 'status', 'recover', 'renew', 'attest_boot', 'validate'):
         raise ValueError('invalid operation')
     root = Path(os.environ.get('OPENSWARM_FLEET_CAPACITY_DIR') or
                 (Path(_home()) / '.claude/swrm-fleet-capacity'))
@@ -166,10 +181,14 @@ try:
     os.chmod(root / 'capacity.sqlite', 0o600)
     db.execute('PRAGMA busy_timeout=10000')
     db.execute('BEGIN IMMEDIATE')
-    db.execute('CREATE TABLE IF NOT EXISTS reservations (token TEXT PRIMARY KEY, host TEXT NOT NULL, run_id TEXT NOT NULL, backend TEXT NOT NULL, provider TEXT, created REAL NOT NULL, lease_expires REAL)')
+    db.execute('CREATE TABLE IF NOT EXISTS reservations (token TEXT PRIMARY KEY, host TEXT NOT NULL, run_id TEXT NOT NULL, backend TEXT NOT NULL, provider TEXT, created REAL NOT NULL, lease_expires REAL, fence INTEGER NOT NULL DEFAULT 0)')
     columns = {row[1] for row in db.execute('PRAGMA table_info(reservations)')}
     if 'lease_expires' not in columns:
         db.execute('ALTER TABLE reservations ADD COLUMN lease_expires REAL')
+    # Fencing tokens are monotonic; rows migrated from an older database count as 0.
+    if 'fence' not in columns:
+        db.execute('ALTER TABLE reservations ADD COLUMN fence INTEGER NOT NULL DEFAULT 0')
+    db.execute('CREATE TABLE IF NOT EXISTS fence_counter (id INTEGER PRIMARY KEY, value INTEGER NOT NULL)')
     # Deliberately do not migrate self-reported boot_id / host_boots evidence.
     # A prior client may have forged both; those reservations stay unrecoverable.
     if 'verified_boot_id' not in columns:
@@ -192,8 +211,10 @@ try:
         elif op == 'attest_boot':
             raise ValueError('coordinator boot probe is not configured')
     now = time.time()
-    db.execute('UPDATE reservations SET lease_expires=CASE WHEN created>0 THEN created+? ELSE ? END '
-               'WHERE lease_expires IS NULL', (LEASE_TTL, now + LEASE_TTL))
+    if op != 'validate':
+        # A fence check is read-only: it never migrates or renews a reservation.
+        db.execute('UPDATE reservations SET lease_expires=CASE WHEN created>0 THEN created+? ELSE ? END '
+                   'WHERE lease_expires IS NULL', (LEASE_TTL, now + LEASE_TTL))
     if op == 'attest_boot':
         out = {'ok': True}
     elif op == 'status':
@@ -220,6 +241,33 @@ try:
         if not count:
             raise ValueError('reservation owner mismatch or reservation missing')
         out = {'ok': True, 'lease_expires': expires, 'lease_ttl_seconds': LEASE_TTL}
+    elif op == 'validate':
+        # Read-only: the reservation is never touched by a fence check.
+        token, run_id, fence = request.get('token'), request.get('run_id'), request.get('fence')
+        if not isinstance(token, str) or not re.fullmatch(r'[0-9a-f]{32}', token):
+            raise ValueError('invalid token')
+        if not isinstance(run_id, str) or not run_id or len(run_id) > 128:
+            raise ValueError('invalid run id')
+        if not isinstance(fence, int) or isinstance(fence, bool) or fence < 0:
+            raise ValueError('invalid fence')
+        row = db.execute('SELECT run_id,fence,lease_expires FROM reservations WHERE token=?',
+                         (token,)).fetchone()
+        reason = None
+        if row is None:
+            # The token is gone. Another reservation for the same run means the
+            # caller presented a stale token instead of the current one.
+            other = db.execute('SELECT token FROM reservations WHERE run_id=? LIMIT 1', (run_id,)).fetchone()
+            reason = 'token_mismatch' if other else 'missing'
+        elif row[0] != run_id:
+            reason = 'token_mismatch'
+        elif int(row[1] or 0) != fence:
+            reason = 'fence_mismatch'
+        elif row[2] is None or row[2] <= now:
+            reason = 'expired'
+        if reason:
+            out = {'ok': False, 'valid': False, 'reason': reason, 'error': reason}
+        else:
+            out = {'ok': True, 'valid': True, 'fence': fence}
     elif op == 'recover':
         # TTL is only a minimum age. Independently read the owning kernel,
         # rather than trusting even an authenticated owner's reboot claim.
@@ -271,12 +319,14 @@ try:
             if backend not in ALLOWED or provider not in (None, 'minimax-cn'):
                 raise ValueError('invalid backend/provider')
             if old:
-                stored_boot = db.execute('SELECT verified_boot_id FROM reservations WHERE token=?', (token,)).fetchone()[0]
+                stored_boot, stored_fence = db.execute('SELECT verified_boot_id,fence FROM reservations WHERE token=?',
+                                                       (token,)).fetchone()
                 if stored_boot != boot_id:
                     raise ValueError('reservation boot mismatch')
                 if old != (host,run_id,backend,provider):
                     raise ValueError('reservation token conflict')
                 out = {'ok': True, 'admitted': True, 'existing': True,
+                       'fence': int(stored_fence or 0),
                        'lease_expires': db.execute('SELECT lease_expires FROM reservations WHERE token=?',
                                                    (token,)).fetchone()[0],
                        'lease_ttl_seconds': LEASE_TTL}
@@ -291,13 +341,15 @@ try:
                 if blocked:
                     out = {'ok': True, 'admitted': False, 'blocked': blocked}
                 else:
-                    db.execute('INSERT INTO reservations (token,host,run_id,backend,provider,created,lease_expires,verified_boot_id) '
-                               'VALUES (?,?,?,?,?,?,?,?)',
-                               (token,host,run_id,backend,provider,now,now + LEASE_TTL,boot_id))
-                    out = {'ok': True, 'admitted': True, 'lease_expires': now + LEASE_TTL,
+                    fence = next_fence(db)
+                    db.execute('INSERT INTO reservations (token,host,run_id,backend,provider,created,lease_expires,verified_boot_id,fence) '
+                               'VALUES (?,?,?,?,?,?,?,?,?)',
+                               (token,host,run_id,backend,provider,now,now + LEASE_TTL,boot_id,fence))
+                    out = {'ok': True, 'admitted': True, 'fence': fence, 'lease_expires': now + LEASE_TTL,
                            'lease_ttl_seconds': LEASE_TTL}
     db.execute('COMMIT')
     print(json.dumps(out, separators=(',',':')))
+    sys.exit(0 if out.get('ok', True) else 1)
 except Exception as error:
     try: db.execute('ROLLBACK')
     except Exception: pass

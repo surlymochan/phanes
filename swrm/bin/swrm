@@ -4315,15 +4315,35 @@ def fleet_guard_command():
         raise RuntimeError(f"fleet capacity configuration invalid: {error}")
 
 
-def fleet_guard_call(command, payload):
+def fleet_guard_answer(command, payload):
+    """Return (returncode, answer); a refusal is an answer, not a transport error."""
     started = time.monotonic()
     try:
         result = subprocess.run(_spawnable(command), input=json.dumps(payload), text=True, capture_output=True, timeout=8)
-        answer = json.loads(result.stdout)
-        if result.returncode != 0 or not answer.get("ok"):
-            raise ValueError(answer.get("error") or "coordinator rejected request")
-        return answer
+        return result.returncode, json.loads(result.stdout)
     except (OSError, ValueError, subprocess.TimeoutExpired) as error:
+        elapsed = time.monotonic() - started
+        print(f"fleet capacity {payload.get('op', 'unknown')} failed after {elapsed:.2f}s: {error}",
+              file=sys.stderr)
+        raise RuntimeError(f"fleet capacity coordinator unavailable: {error}")
+
+
+def fleet_guard_call(command, payload):
+    started = time.monotonic()
+    try:
+        returncode, answer = fleet_guard_answer(command, payload)
+        if not isinstance(answer, dict):
+            raise ValueError("invalid coordinator response")
+        if returncode != 0 or answer.get("ok") is not True:
+            raise ValueError(answer.get("error") or answer.get("reason") or "coordinator rejected request")
+        if payload.get("op") == "acquire" and type(answer.get("admitted")) is not bool:
+            raise ValueError("invalid coordinator admission response")
+        if payload.get("op") == "renew":
+            expires = answer.get("lease_expires")
+            if type(expires) not in (int, float) or not math.isfinite(expires) or expires <= NOW():
+                raise ValueError("invalid coordinator renewal response")
+        return answer
+    except ValueError as error:
         elapsed = time.monotonic() - started
         print(f"fleet capacity {payload.get('op', 'unknown')} failed after {elapsed:.2f}s: {error}",
               file=sys.stderr)
@@ -4418,6 +4438,86 @@ def renew_fleet_slot(command, payload, interval, stop):
             continue
 
 
+def fleet_fence_verdict(rdir, reservation=None):
+    """Ask the coordinator whether this run still holds its fencing token.
+
+    The check is read-only on the coordinator side. It must happen while the
+    reservation still exists: once the lease is released the coordinator can no
+    longer confirm the holder. Only an unguarded, single-machine run may skip
+    validation. Missing or malformed ownership in guarded mode fails closed.
+    """
+    key = os.path.realpath(rdir)
+    item = reservation or _FLEET_RESERVATIONS.get(key)
+    saved = jload(os.path.join(rdir, "fleet-reservation.json"), None)
+    if not item and saved:
+        if not isinstance(saved, dict) or not isinstance(saved.get("payload"), dict) or not saved.get("command"):
+            return {"ok": False, "reason": "invalid_reservation"}
+        item = saved["command"], saved["payload"]
+    if not item:
+        status = jload(os.path.join(rdir, "status.json"), {}) or {}
+        try:
+            guarded = status.get("fleet_guarded") or fleet_guard_command()
+        except RuntimeError as error:
+            return {"ok": False, "reason": "coordinator_unavailable", "error": str(error)}
+        if guarded:
+            return {"ok": False, "reason": status.get("fleet_admission_rejected") or "missing"}
+        return None
+    if not isinstance(item, (tuple, list)) or len(item) != 2 or not isinstance(item[1], dict):
+        return {"ok": False, "reason": "invalid_reservation"}
+    command, payload = item
+    fence = payload.get("fence")
+    if type(fence) is not int or fence <= 0:
+        return {"ok": False, "reason": "invalid_fence"}
+    if not command or not payload.get("run_id") or not payload.get("token"):
+        return {"ok": False, "reason": "invalid_reservation"}
+    request = {"op": "validate", "run_id": payload["run_id"], "token": payload["token"], "fence": fence}
+    try:
+        returncode, answer = fleet_guard_answer(command, request)
+    except RuntimeError as error:
+        # An unreachable coordinator cannot prove ownership: fail closed.
+        return {"ok": False, "reason": "coordinator_unavailable", "error": str(error)}
+    if not isinstance(answer, dict):
+        return {"ok": False, "reason": "invalid_response"}
+    if (returncode == 0 and answer.get("ok") is True and answer.get("valid") is True
+            and type(answer.get("fence")) is int and answer["fence"] == fence):
+        return {"ok": True, "fence": fence}
+    reason = (answer.get("reason") or answer.get("error") or answer.get("fence_rejected")
+              or "invalid_response")
+    return {"ok": False, "reason": str(reason)}
+
+
+def record_fence_rejection(rdir, attempts, reason):
+    """Leave a durable trace of a refused fence; a refusal is never dropped silently."""
+    event_file = None
+    for attempt in reversed(attempts or []):
+        if attempt.get("events"):
+            event_file = attempt["events"]
+            break
+    event_file = event_file or os.path.join(rdir, "fence.jsonl")
+    try:
+        lane_record_event(event_file, {"type": "FENCE_REJECTED", "reason": reason,
+                                       "run_id": os.path.basename(rdir), "ts": NOW()})
+    except OSError as error:
+        print(f"fleet capacity fence trace unavailable: {error}", file=sys.stderr)
+        return False
+    return True
+
+
+def publish_fleet_result(rdir, out, attempts, reservation=None):
+    """Validate ownership at the shared CLI/lane result publication boundary."""
+    verdict = fleet_fence_verdict(rdir, reservation)
+    reason = verdict["reason"] if verdict is not None and not verdict["ok"] else None
+    if reason:
+        out.update(status="fenced", error_class="fenced", fence_rejected=reason)
+        if "exec_pass" in out:
+            out.update(exec_pass=False, exec_pass_reason="fenced")
+        record_fence_rejection(rdir, attempts, reason)
+    jsave(os.path.join(rdir, "result.json"), out)
+    if verdict is not None:
+        set_status(rdir, fence_valid=verdict["ok"], fence_rejected=reason)
+    return reason
+
+
 def executor_boundary_empty(rdir, boundary):
     """Require descendant-set proof before releasing an executor reservation."""
     if os.path.realpath(rdir) not in _FLEET_RESERVATIONS:
@@ -4477,6 +4577,7 @@ def reserve_provider_slot(rdir, backend, provider, policy, lane_name=None, keep_
     payload = {"op": "acquire", "token": token, "run_id": os.path.basename(rdir),
                "backend": backend, "provider": provider}
     if command:
+        set_status(rdir, fleet_guarded=True)
         # Persist before sending: a timeout may follow a successful remote commit.
         jsave(os.path.join(rdir, "fleet-reservation.json"), {"command": command, "payload": payload})
     coordinator_failures = 0
@@ -4536,7 +4637,7 @@ def reserve_provider_slot(rdir, backend, provider, policy, lane_name=None, keep_
         if local_available and command and not fleet_admitted:
             try:
                 answer = fleet_guard_call(command, payload)
-                fleet_admitted = bool(answer.get("admitted"))
+                fleet_admitted = answer.get("admitted") is True
             except RuntimeError as error:
                 coordinator_failures += 1
                 set_status(rdir, fleet_reservation_error=str(error),
@@ -4564,6 +4665,19 @@ def reserve_provider_slot(rdir, backend, provider, policy, lane_name=None, keep_
                 if lane_name:
                     lane_write_state(lane_name, capacity_unreachable=False, queue_reason=None)
                 if fleet_admitted:
+                    fence = answer.get("fence")
+                    if type(fence) is not int or fence <= 0:
+                        # No executor started, so this untrusted admission can
+                        # be released without descendant evidence.
+                        release_fleet_slot(rdir)
+                        set_status(rdir, fleet_admission_rejected="invalid_fence",
+                                   fleet_reservation_error="acquire rejected: invalid_fence")
+                        record_fence_rejection(rdir, [], "invalid_fence")
+                        return False
+                    payload["fence"] = fence
+                    set_status(rdir, fleet_admission_rejected=None)
+                    jsave(os.path.join(rdir, "fleet-reservation.json"),
+                          {"command": command, "payload": payload})
                     _FLEET_RESERVATIONS[reservation_key] = (command, payload)
                     interval = max(0.1, float(answer.get("lease_ttl_seconds", 300)) / 3)
                     stop = threading.Event()
@@ -4645,7 +4759,7 @@ def wait_run_rate_limit(seconds, rdir, deadline):
 
 
 def run_executor_with_rate_limit(backend, decision, state, prompt, wd, rdir, budget_deadline,
-                                 policy, first_attempt=1):
+                                 policy, first_attempt=1, defer_fleet_release=False):
     attempts = []
     retries, continuation = 0, False
     current_prompt, resume_session = prompt, None
@@ -4674,9 +4788,11 @@ def run_executor_with_rate_limit(backend, decision, state, prompt, wd, rdir, bud
                        deadline=budget_deadline + max(0, NOW() - queue_start))
             if status.get("capacity_unreachable") and not stopped:
                 return attempts, None, "capacity-unreachable"
-            error_class = "stopped" if stopped else "budget_exceeded"
+            error_class = ("stopped" if stopped else "fenced" if status.get("fleet_admission_rejected")
+                           else "budget_exceeded")
             attempts.append({"backend": backend, "model": decision.get("model"), "effort": decision.get("effort"),
-                             "rc": 130 if stopped else 124, "seconds": 0, "error_class": error_class,
+                             "rc": 130 if stopped else 1 if error_class == "fenced" else 124,
+                             "seconds": 0, "error_class": error_class,
                              "meta": {"usage": {}}, "events": event_file, "error_tail": None,
                              "quota_before": before})
             return attempts, None, error_class
@@ -4709,10 +4825,14 @@ def run_executor_with_rate_limit(backend, decision, state, prompt, wd, rdir, bud
         error_class = executor_error_class(rc, final, err_text, backend)
         reservation_active = os.path.realpath(rdir) in _FLEET_RESERVATIONS
         boundary_safe = executor_boundary_empty(rdir, boundary)
-        # run_proc has reaped a normal 403 or reported early-result exit.
-        if boundary_safe and (error_class in (None, "rate_limit", "risk_blocked") or (
-                backend == "agy" and rc == 1 and (error_class == "upstream_forbidden"
-                                                   or (meta or {}).get("finished_reason")))):
+        # cmd_run keeps the lease (and renewal) through finalization and verify.
+        # Preserve the descendant proof requirement when releasing after writeback.
+        release_ready = boundary_safe and (error_class in (None, "rate_limit", "risk_blocked") or (
+            backend == "agy" and rc == 1 and (error_class == "upstream_forbidden"
+                                               or (meta or {}).get("finished_reason"))))
+        if reservation_active:
+            set_status(rdir, fleet_release_ready=release_ready)
+        if release_ready and not defer_fleet_release:
             release_fleet_slot(rdir)
         set_status(rdir, state="routing", concurrency_keys=[])
         attempt = {"backend": backend, "model": decision.get("model"), "effort": decision.get("effort"),
@@ -4748,6 +4868,8 @@ def run_executor_with_rate_limit(backend, decision, state, prompt, wd, rdir, bud
             attempts[-1]["error_class"] = "stopped" if stopped else "budget_exceeded"
             attempts[-1]["rc"] = 130 if stopped else 124
             return attempts, None, attempts[-1]["error_class"]
+        if defer_fleet_release and release_ready:
+            release_fleet_slot(rdir)
         retries += 1
         continuation = True
         current_prompt = RATE_LIMIT_CONTINUE_PROMPT
@@ -6256,7 +6378,8 @@ def cmd_run(args, policy):
         b = decision["backend"]
         tried.append(b)
         current_attempts, final, err_class = run_executor_with_rate_limit(
-            b, decision, st, prompt, ws["path"], rdir, deadline, policy, first_attempt=len(attempts) + 1)
+            b, decision, st, prompt, ws["path"], rdir, deadline, policy, first_attempt=len(attempts) + 1,
+            defer_fleet_release=True)
         deadline = (jload(f"{rdir}/status.json", {}) or {}).get("deadline", deadline)
         attempts.extend(current_attempts)
         if err_class == "capacity-unreachable":
@@ -6298,6 +6421,11 @@ def cmd_run(args, policy):
             git(["reset", "-q", "--hard"], ws["root"])
             git(["clean", "-qfd"], ws["root"])
         decision = nxt
+    # Keep the executed run's identity even if a concurrent release removes the
+    # local reservation record during finalization. Missing ownership must fail.
+    saved_reservation = jload(f"{rdir}/fleet-reservation.json", None)
+    writeback_reservation = ((saved_reservation["command"], saved_reservation["payload"])
+                             if saved_reservation else None)
     set_status(rdir, state="finalizing")
     st_after = probe(policy) if decision["backend"] == "codex" else st
     attempts[-1]["quota_after"] = quota_used(st_after, decision)
@@ -6414,7 +6542,14 @@ def cmd_run(args, policy):
             "evalid_receipt": {"status": "INFRA" if evidence_error else "COLLECTED",
                                "reason": evidence_error}} if role_info else {}),
     }
-    jsave(f"{rdir}/result.json", out)
+    # This is the result publication boundary: all workspace/verify work is
+    # complete, and our lease has not yet been voluntarily released.
+    fence_rejected = publish_fleet_result(rdir, out, attempts, writeback_reservation)
+    status = out["status"]
+    if fence_rejected:
+        pass_fields.update(exec_pass=False, exec_pass_reason="fenced")
+    if (jload(f"{rdir}/status.json", {}) or {}).get("fleet_release_ready"):
+        release_fleet_slot(rdir)
     append_ledger({"id": rid, "ts": NOW(), "title": title, "profile": prof, "status": status, "scope": scope,
                    "backend": decision["backend"], "model": decision["model"], "effort": decision.get("effort"),
                    "tier": decision.get("tier"), "attempts": [{k: a[k] for k in a if k != "error_tail"} for a in attempts],
@@ -9991,6 +10126,7 @@ def lane_note_stream_retry(rdir, event_file, retries, max_retries, error_text, w
 def lane_finalize_run(lane, spec, ws, final, usage, error_class, rc, event_file, attempts=None,
                       preserve_workspace=False):
     rid, rdir = spec["run_id"], os.path.join(RUNS, spec["run_id"])
+    writeback_reservation = spec.get("_fleet_reservation") or _FLEET_RESERVATIONS.get(os.path.realpath(rdir))
     title = spec.get("title") or spec["task"].strip().splitlines()[0][:72]
     stopped = bool(spec.get("stop_requested"))
     budget_hit = error_class == "budget_exceeded"
@@ -10133,7 +10269,17 @@ def lane_finalize_run(lane, spec, ws, final, usage, error_class, rc, event_file,
         if evidence_error:
             role_pass.update(exec_pass=False, exec_pass_reason="role_evidence_infra")
         out.update(role_pass)
-    jsave(os.path.join(rdir, "result.json"), out)
+    # Failures before execution have no result from a reservation holder.
+    if out["status"] in ("done", "partial") or spec.get("execution_started") or writeback_reservation or (
+            jload(os.path.join(rdir, "status.json"), {}) or {}).get("fleet_admission_rejected"):
+        publish_fleet_result(rdir, out, attempts, writeback_reservation)
+        status, error_class = out["status"], out["error_class"]
+    else:
+        jsave(os.path.join(rdir, "result.json"), out)
+    # The descendant proof permits release only after the fence was checked,
+    # including when the coordinator rejected ownership of this result.
+    if (jload(os.path.join(rdir, "status.json"), {}) or {}).get("fleet_release_ready"):
+        release_fleet_slot(rdir)
     changed = changed_paths(ws.get("repo") or ws.get("root"), ws.get("base"), fin.get("commit"),
                             (final or {}).get("files_changed"))
     read_only = spec.get("read_only") or spec.get("card_type") in READ_ONLY_CARD_TYPES
@@ -10141,6 +10287,8 @@ def lane_finalize_run(lane, spec, ws, final, usage, error_class, rc, event_file,
                                    bool(spec.get("verify")), verify)
     if spec.get("evalid_role"):
         pass_fields = role_pass
+    if out.get("fence_rejected"):
+        pass_fields.update(exec_pass=False, exec_pass_reason="fenced")
     append_ledger({"id": rid, "ts": NOW(), "title": title, "status": status, "lane": lane["name"],
                    "scope": spec.get("scope", "repo"),
                    "backend": lane["backend"], "model": model, "effort": lane.get("effort"),
@@ -10274,6 +10422,7 @@ def lane_do_run(lane, spec, child, server, current):
                     spec["queued_seconds"] = spec.get("queued_seconds", 0) + max(0, NOW() - queued_from)
                     set_status(rdir, queued_seconds=round(spec["queued_seconds"], 3))
                     error_class = ("stopped" if spec.get("abort_requested") or spec.get("down_requested") else
+                                   "fenced" if status.get("fleet_admission_rejected") else
                                    "exec_error" if not child.alive() else "budget_exceeded")
                     rc, final, usage, error_tail = (130 if error_class == "stopped" else 124 if error_class == "budget_exceeded" else 1), None, {}, None
                     evp = spec.get("_event_file") or os.path.join(rdir, f"events.{attempt_number}.{lane['backend']}.jsonl")
@@ -10283,6 +10432,8 @@ def lane_do_run(lane, spec, child, server, current):
                                      "events": evp, "error_tail": error_tail})
                     break
                 started = NOW()
+                spec["_fleet_reservation"] = _FLEET_RESERVATIONS.get(os.path.realpath(rdir))
+                set_status(rdir, fleet_release_ready=False)
                 queued_from = spec.get("queued_at", queue_start) if first_start else queue_start
                 spec["queued_seconds"] = spec.get("queued_seconds", 0) + max(0, started - queued_from)
                 if first_start:
@@ -10306,19 +10457,21 @@ def lane_do_run(lane, spec, child, server, current):
                         or (lane["backend"] == "agy" and spec.get("_agy_finished_early"))):
                     child.close()
                 stopped_early = lane["backend"] == "agy" and spec.get("_agy_finished_early")
+                release_ready = False
                 if (not stopped_early or not child.alive()) and (error_class in (None, "rate_limit")
                         or spec.get("_turn_completed")
                         or (error_class == "upstream_forbidden" and lane["backend"] == "agy" and not child.alive())
                         or (error_class == "executor_start_failed" and lane_headless(lane) and not child.alive())):
                     if executor_boundary_empty(rdir, getattr(child, "boundary", None)):
-                        release_fleet_slot(rdir)
+                        release_ready = True
+                        set_status(rdir, fleet_release_ready=True)
                 elif os.path.realpath(rdir) in _FLEET_RESERVATIONS:
                     set_status(rdir, fleet_reservation_error="retained after abnormal executor exit; inspect descendants")
                 attempts.append({"backend": attempt_lane["backend"], "model": model,
                                  "effort": attempt_lane.get("effort"), "rc": rc,
                                  "seconds": round(NOW() - started, 3), "error_class": error_class,
                                  "meta": {"usage": usage}, "events": evp, "error_tail": error_tail})
-                if os.path.realpath(rdir) in _FLEET_RESERVATIONS:
+                if os.path.realpath(rdir) in _FLEET_RESERVATIONS and not release_ready:
                     break
                 if allow_fallback and error_class == "exec_error" and MODEL_UNAVAILABLE_RE.search(error_tail or ""):
                     error_class = attempts[-1]["error_class"] = "model_unavailable"
@@ -10334,6 +10487,8 @@ def lane_do_run(lane, spec, child, server, current):
                 attempts[-1]["error_class"] = error_class
                 attempts[-1]["error_tail"] = error_tail
                 if action == "retry":
+                    if release_ready:
+                        release_fleet_slot(rdir)
                     stream_retries += 1
                     wait_seconds = pi_stream_retry_delay(stream_retries)
                     lane_note_stream_retry(rdir, evp, stream_retries, pi_stream_retry_max(),
@@ -10349,9 +10504,11 @@ def lane_do_run(lane, spec, child, server, current):
                 # only after the old request released its slot and left no edits.
                 if (error_class == "upstream_forbidden" and lane["backend"] == "agy" and not forbidden_retried
                         and not spec.get("abort_requested") and NOW() + 10 < deadline
-                        and os.path.realpath(rdir) not in _FLEET_RESERVATIONS
+                        and (release_ready or os.path.realpath(rdir) not in _FLEET_RESERVATIONS)
                         and not git(["status", "--porcelain"], ws["root"])[1].strip()):
                     forbidden_retried = True
+                    if release_ready:
+                        release_fleet_slot(rdir)
                     child.proc = None
                     turn = {}
                     continuation, retry_prompt = False, prompt
@@ -10375,6 +10532,8 @@ def lane_do_run(lane, spec, child, server, current):
                 lane_record_event(next_event if can_retry else evp, rate_event)
                 if not can_retry:
                     break
+                if release_ready:
+                    release_fleet_slot(rdir)
                 if lane_headless(lane):
                     child.proc = None
                 set_status(os.path.join(RUNS, rid), state="queued", queue_reason="rate limited", events=next_event,
@@ -10394,6 +10553,8 @@ def lane_do_run(lane, spec, child, server, current):
             trip_breaker(f"{attempt_lane['backend']}/{model}", load_policy(), error_tail or "model unavailable")
             if number == len(models) or spec.get("abort_requested"):
                 break
+            if release_ready:
+                release_fleet_slot(rdir)
         out = lane_finalize_run(attempt_lane, spec, ws, final, usage, error_class, rc, evp,
                                 attempts=attempts)
         return out

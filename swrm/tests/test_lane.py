@@ -2217,6 +2217,55 @@ class AgyStartupRegressionTests(unittest.TestCase):
         self.assert_start_crash_releases_empty_fleet_reservation(
             {"name": "L1", "backend": "cursor", "mode": "headless", "model": "test"})
 
+    def test_finalize_releases_ready_reservation_after_fence_verdict(self):
+        xs, mock = self.xs, self.mock
+        for accepted, ready in ((True, True), (False, True), (False, False)):
+            with self.subTest(accepted=accepted, ready=ready):
+                rid = f"finalize-{accepted}-{ready}"
+                rdir = os.path.join(self.tmp.name, rid)
+                os.mkdir(rdir)
+                reservation = (["guard"], {"run_id": rid, "token": "a" * 32, "fence": 7})
+                spec = {"run_id": rid, "task": "task", "started": 100, "budget_minutes": 1,
+                        "_fleet_reservation": reservation}
+                ws = {"repo": self.tmp.name, "root": self.tmp.name, "path": self.tmp.name}
+                answer = ({"ok": True, "valid": True, "fence": 7} if accepted else
+                          {"ok": False, "reason": "expired"})
+                calls = []
+
+                def validate(command, payload):
+                    self.assertEqual((command, payload), (["guard"], {
+                        "op": "validate", "run_id": rid, "token": "a" * 32, "fence": 7}))
+                    calls.append("validate")
+                    return (0 if accepted else 1), answer
+
+                def release(path):
+                    self.assertEqual(path, rdir)
+                    self.assertEqual(calls, ["validate"])
+                    result = xs.jload(os.path.join(rdir, "result.json"), {})
+                    self.assertEqual(result["status"], "failed" if accepted else "fenced")
+                    calls.append("release")
+
+                with mock.patch.object(xs, "RUNS", self.tmp.name), \
+                     mock.patch.object(xs, "git", return_value=(0, "", "")), \
+                     mock.patch.object(xs, "finalize_workspace", return_value={}), \
+                     mock.patch.object(xs, "changed_paths", return_value=[]), \
+                     mock.patch.object(xs, "append_ledger"), \
+                     mock.patch.object(xs, "cleanup_executor_tmp"), \
+                     mock.patch.object(xs, "fleet_guard_answer", side_effect=validate) as verdict, \
+                     mock.patch.object(xs, "release_fleet_slot", side_effect=release) as released:
+                    xs.set_status(rdir, fleet_release_ready=ready)
+                    result = xs.lane_finalize_run(
+                        self.lane, spec, ws, None, {}, "executor_start_failed", 1,
+                        os.path.join(rdir, "events.jsonl"))
+                verdict.assert_called_once()
+                if ready:
+                    released.assert_called_once_with(rdir)
+                else:
+                    released.assert_not_called()
+                if not accepted:
+                    self.assertEqual(result["fence_rejected"], "expired")
+                    self.assertIn("FENCE_REJECTED", pathlib.Path(rdir, "events.jsonl").read_text())
+
     def assert_start_crash_releases_empty_fleet_reservation(self, lane):
         xs, mock = self.xs, self.mock
         spec = {"run_id": "startup", "task": "task", "started": 100, "budget_minutes": 1}
@@ -2236,7 +2285,7 @@ class AgyStartupRegressionTests(unittest.TestCase):
              mock.patch.object(xs, "add_patterns_to_prompt", side_effect=lambda p, *a: (p, [])), \
              mock.patch.object(xs, "load_policy", return_value={}), \
              mock.patch.object(xs, "NOW", return_value=100), \
-             mock.patch.object(xs, "set_status"), \
+             mock.patch.object(xs, "set_status") as status, \
              mock.patch.object(xs, "reserve_provider_slot", return_value=True), \
              mock.patch.object(xs, "lane_run_turn", side_effect=lambda *a, **k: turn_ran.append(1) or (
                  None, {}, "executor_start_failed", 1, "events", "two crashes")) as run_turn, \
@@ -2247,8 +2296,10 @@ class AgyStartupRegressionTests(unittest.TestCase):
         run_turn.assert_called_once()
         finalize.assert_called_once()
         self.assertEqual(finalize.call_args.args[5], "executor_start_failed")
-        # Released after the failed turn, not by the pre-admission shortcut.
-        release.assert_called_once_with(rdir)
+        # The finalizer owns release, after validating the still-held fence.
+        self.assertTrue(any(call.kwargs.get("fleet_release_ready") is True
+                            for call in status.call_args_list))
+        release.assert_not_called()
 
 
 if __name__ == "__main__":

@@ -217,7 +217,22 @@ class ProcessBoundaryTests(unittest.TestCase):
                 if proof is not None:
                     child.boundary.finish.return_value = proof
                 rdir = os.path.realpath(os.path.join(tmp, "run"))
-                xs._FLEET_RESERVATIONS[rdir] = ([], {})
+                xs._FLEET_RESERVATIONS[rdir] = (["guard"], {
+                    "run_id": "run", "token": "a" * 32, "fence": 1})
+                finalize = xs.lane_finalize_run
+
+                def finalize_after_boundary(*args, **kwargs):
+                    # The lane only records readiness; finalization owns release.
+                    release.assert_not_called()
+                    self.assertEqual(xs.jload(os.path.join(rdir, "status.json"), {})[
+                        "fleet_release_ready"], proof == (True, []))
+                    return finalize(*args, **kwargs)
+
+                def release_after_publication(path):
+                    self.assertEqual(path, rdir)
+                    verdict.assert_called_once()
+                    self.assertTrue(os.path.isfile(os.path.join(rdir, "result.json")))
+
                 try:
                     with mock.patch.object(xs, "RUNS", tmp), \
                          mock.patch.object(xs, "lane_prepare_workspace", return_value=workspace), \
@@ -227,9 +242,19 @@ class ProcessBoundaryTests(unittest.TestCase):
                          mock.patch.object(xs, "reserve_provider_slot", return_value=True), \
                          mock.patch.object(xs, "lane_control_messages"), \
                          mock.patch.object(xs, "lane_run_turn", return_value=({}, {}, None, 0, "events", None)), \
-                         mock.patch.object(xs, "lane_finalize_run"), \
-                         mock.patch.object(xs, "release_fleet_slot") as release:
+                         mock.patch.object(xs, "git", return_value=(0, "", "")), \
+                         mock.patch.object(xs, "finalize_workspace", return_value={}), \
+                         mock.patch.object(xs, "changed_paths", return_value=[]), \
+                         mock.patch.object(xs, "append_ledger"), \
+                         mock.patch.object(xs, "cleanup_executor_tmp"), \
+                         mock.patch.object(xs, "fleet_guard_answer", return_value=(
+                             0, {"ok": True, "valid": True, "fence": 1})) as verdict, \
+                         mock.patch.object(xs, "lane_finalize_run", side_effect=finalize_after_boundary) as finalized, \
+                         mock.patch.object(xs, "release_fleet_slot", side_effect=release_after_publication) as release:
                         xs.lane_do_run(lane, spec, child, None, {})
+                        finalized.assert_called_once()
+                        verdict.assert_called_once_with(["guard"], {
+                            "op": "validate", "run_id": "run", "token": "a" * 32, "fence": 1})
                         self.assertEqual(release.call_count, int(proof == (True, [])))
                 finally:
                     xs._FLEET_RESERVATIONS.pop(rdir, None)
