@@ -223,6 +223,26 @@ class FleetFencingTests(unittest.TestCase):
 
         self.assert_fenced_writeback(*self.dispatch(verify_hook=expire), reason="expired")
 
+    def test_request_reclaim_during_verify_rejects_old_holder_at_writeback(self):
+        def reclaim(run_dir):
+            saved = self.reservation_of(run_dir)
+            renewal = xs._FLEET_RENEWALS.pop(os.path.realpath(run_dir))
+            renewal[0].set()
+            renewal[1].join(2)
+            with sqlite3.connect(self.capacity / "capacity.sqlite") as db:
+                db.execute("UPDATE reservations SET lease_expires=0 WHERE token=?", (saved["token"],))
+            # A capacity request reclaims the expired lease without boot proof.
+            reply = self.coordinator(op="status")
+            self.assertEqual(reply["reclaimed"], 1)
+            self.assertEqual(reply["reservations"], [])
+            refused = self.coordinator(op="validate", run_id=saved["run_id"],
+                                       token=saved["token"], fence=saved["fence"])
+            self.assertFalse(refused["ok"], refused)
+            self.assertEqual(refused["reason"], "missing")
+
+        # Check result/status/ledger refusal and the durable FENCE_REJECTED event.
+        self.assert_fenced_writeback(*self.dispatch(verify_hook=reclaim))
+
     def test_recovery_and_reissue_during_verify_rejects_old_holder(self):
         boot = self.root / "boot"
         boot.write_text("11111111-1111-1111-1111-111111111111")

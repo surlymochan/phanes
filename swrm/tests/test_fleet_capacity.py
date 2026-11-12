@@ -1,9 +1,16 @@
-"""Cross-host admission is atomic and uncertain reservations are never expired."""
+"""Cross-host admission is atomic and an expired lease frees its slot (Refs #2160).
+
+The admission of a run is atomic: two runs never share one slot.  A
+reservation is a lease, so a run which crashed, was killed or whose release
+never reached the coordinator gives its slot back with the lease instead of
+holding it forever (Refs #2160, #1792).
+"""
 import concurrent.futures
 import json
 import os
 import pathlib
 import signal
+import sqlite3
 import subprocess
 import sys
 import tempfile
@@ -54,9 +61,17 @@ class FleetCapacityTests(unittest.TestCase):
         return json.loads(p.stdout)
 
     def expire(self, token):
+        """Let the lease of a reservation run out.
+
+        The lease runs out *now*: since #2160 the coordinator reclaims a lease
+        which ran out before the grace period, so a lease which expired long
+        ago would be gone before the explicit recovery of this suite could
+        prove the reboot of its owner.  The reclaim of an expired lease has
+        its own suite (``FleetCapacityTTLReclaimTests``).
+        """
         import sqlite3
         db = sqlite3.connect(pathlib.Path(self.temp.name, 'capacity.sqlite'))
-        db.execute('UPDATE reservations SET lease_expires=0 WHERE token=?', (token,))
+        db.execute('UPDATE reservations SET lease_expires=? WHERE token=?', (time.time(), token))
         db.commit()
         db.close()
 
@@ -403,6 +418,9 @@ class FleetCapacityTests(unittest.TestCase):
             self.assertFalse(self.call('worker', op='attest_boot', boot_id=fake_boot)['ok'])
             self.assertFalse(self.call('broker', op='recover', host='worker',
                                        boot_id=fake_boot, **payload)['ok'])
+            # The lease of the reservation just ran out: it waits for the grace
+            # period of the coordinator, so the slot still belongs to it
+            # (Refs #2160).
             self.assertEqual(self.call('broker', op='acquire', token='3' * 32,
                                        run_id='overlap', backend='cursor')['blocked'], ['cursor'])
             self.assertIsNone(process.poll())
@@ -445,8 +463,10 @@ class FleetCapacityTests(unittest.TestCase):
             db.execute('CREATE TABLE reservations (token TEXT PRIMARY KEY, host TEXT NOT NULL, '
                        'run_id TEXT NOT NULL, backend TEXT NOT NULL, provider TEXT, '
                        'created REAL NOT NULL, lease_expires REAL, boot_id TEXT)')
+            # Keep the expired lease inside grace to exercise boot evidence,
+            # rather than the independent TTL-only reclaim.
             db.execute('INSERT INTO reservations VALUES (?,?,?,?,?,?,?,?)',
-                       (payload['token'], 'worker', payload['run_id'], 'cursor', None, 1, 0, BOOT))
+                       (payload['token'], 'worker', payload['run_id'], 'cursor', None, 1, time.time(), BOOT))
             db.execute('CREATE TABLE host_boots (host TEXT, boot_id TEXT, retired INTEGER)')
             db.execute('INSERT INTO host_boots VALUES (?,?,?)', ('worker', BOOT, 1))
             db.execute('INSERT INTO host_boots VALUES (?,?,?)', ('worker', NEXT_BOOT, 0))
@@ -503,7 +523,8 @@ class FleetCapacityTests(unittest.TestCase):
 
     def test_legacy_reservations_migrate_to_conservative_lease(self):
         import sqlite3
-        created = 1_800_000_000.0
+        created = time.time() - 10000
+        before = time.time()
         db = sqlite3.connect(pathlib.Path(self.temp.name, 'capacity.sqlite'))
         db.execute('CREATE TABLE reservations (token TEXT PRIMARY KEY, host TEXT NOT NULL, run_id TEXT NOT NULL, '
                    'backend TEXT NOT NULL, provider TEXT, created REAL NOT NULL)')
@@ -513,8 +534,10 @@ class FleetCapacityTests(unittest.TestCase):
         db.close()
         status = self.call('broker', op='status')
         row = status['reservations'][0]
-        self.assertEqual(row['lease_expires'], created + 300)
-        self.assertEqual(self.call('broker', op='status')['reservations'][0]['lease_expires'], created + 300)
+        self.assertGreaterEqual(row['lease_expires'], before + 300)
+        self.assertLessEqual(row['lease_expires'], time.time() + 300)
+        self.assertEqual(self.call('broker', op='status')['reservations'][0]['lease_expires'],
+                         row['lease_expires'])
 
     def test_host_limit_is_shared_across_backend_types(self):
         first = dict(op='acquire', token='1' * 32, run_id='one', backend='codex', provider=None)
@@ -585,6 +608,670 @@ class FleetCapacityTests(unittest.TestCase):
         self.assertTrue(self.call('broker', op='status')['reservations'])
         with mock.patch.dict(os.environ, {'OPENSWARM_FLEET_CAPACITY_DIR': self.temp.name}):
             xs.release_fleet_slot(rdir)
+
+# The grace period of the reclaim: the coordinator may reclaim a lease whose
+# expiry lies before "now - grace".  The grace is configurable; the primary
+# name of the knob comes first, the aliases keep the contract of this suite
+# readable for a coordinator which reads one of them.
+GRACE_ENV_NAMES = ('OPENSWARM_FLEET_CAPACITY_GRACE_SECONDS',
+                    'OPENSWARM_FLEET_CAPACITY_RECLAIM_GRACE_SECONDS',
+                    'OPENSWARM_FLEET_CAPACITY_TTL_GRACE_SECONDS',
+                    'OPENSWARM_FLEET_LEASE_GRACE_SECONDS')
+
+# The tables of the coordinator database which are not the audit trail.
+KNOWN_TABLES = ('reservations', 'fence_counter', 'verified_host_boots')
+
+
+def grace_env(seconds):
+    """The environment of a coordinator whose grace period is `seconds`."""
+    return {name: str(seconds) for name in GRACE_ENV_NAMES}
+
+
+def numbers(payload):
+    """Every integer of a nested answer (a negative count is a bug)."""
+    if isinstance(payload, bool):
+        return
+    if isinstance(payload, int):
+        yield payload
+    elif isinstance(payload, dict):
+        for value in payload.values():
+            yield from numbers(value)
+    elif isinstance(payload, (list, tuple)):
+        for value in payload:
+            yield from numbers(value)
+
+
+class SafeBoundary:
+    """A boundary which proves that the executor left no descendants behind."""
+
+    def finish(self):
+        return True, None
+
+    def attach_current_process(self):
+        pass
+
+
+class FleetCapacityTTLReclaimTests(unittest.TestCase):
+    """An expired lease frees its slot without any terminal path (Refs #2160).
+
+    The coordinator of ``swrm/bin/fleet-capacity`` used to keep a reservation
+    until it was released explicitly: a run which crashed, was killed or whose
+    release never reached the coordinator held its slot forever (the ghost
+    reservations of #1792).  Since the fencing token of #2158 is in place, the
+    coordinator may reclaim an expired lease without any boot evidence: the
+    fence of the reclaimed reservation refuses the write-back of the old run.
+
+    This suite is the contract of that reclaim:
+
+    * the reclaim needs no boot evidence and no terminal path of a run;
+    * every request of the coordinator cleans the expired leases up on the way,
+      and ``--sweep-once`` reclaims them without any request at all (a janitor
+      or a timer may call it);
+    * the reclaim of a reservation invalidates its fence;
+    * the reclaim is written to the audit trail of the coordinator in the same
+      transaction: a failing audit write rolls the whole reclaim back;
+    * a lease which is renewed is never reclaimed and a lease inside the grace
+      period of the coordinator waits;
+    * the reclaim and the explicit release of one reservation never count
+      twice and never produce a negative count;
+    * a run which lost its lease stops its executor and leaves a trace.
+
+    The mapping of the blockers of the old PR #1808 (issue #1792) to the
+    contract of this suite and to its tests:
+
+    | Blocker | Contract | Test |
+    | --- | --- | --- |
+    | B1 (the sweep of the expired leases was not wired into the coordinator) | the coordinator reclaims an expired lease without any request and audits the reclaim | ``test_the_sweep_reclaims_an_expired_lease_without_any_request``, ``test_a_request_reclaims_the_expired_leases_of_the_other_runs`` |
+    | B2 (the executor of a lost lease kept running after the reclaim) | a run which cannot prove its lease stops its executor, the write-back of the old run is refused | ``test_a_run_which_lost_its_lease_stops_its_executor``, ``test_a_run_whose_lease_was_reclaimed_cannot_write_its_result_back`` |
+    | the acceptance of the card (a killed run gives its slot back) | the slot of a run which stopped renewing comes back after the TTL and the grace | ``test_a_killed_run_gives_its_slot_back_after_its_lease_expired`` |
+    | the migration protection of a live run | a renewal pushes the expiry of the lease | ``test_a_renewed_lease_is_not_reclaimed`` |
+    | the three terminal paths of a run | the reclaim never depends on a terminal path | ``test_a_rebase_run_gives_its_slot_back_with_the_lease``, ``test_an_exec_error_run_gives_its_slot_back_with_the_lease``, ``test_a_budget_exceeded_run_gives_its_slot_back_with_the_lease`` |
+    | the audit of the reclaim | the audit record is written in the same transaction | ``test_a_failing_audit_rolls_the_reclaim_back`` |
+    | the race of the reclaim and the release | one reservation is reclaimed at most once | ``test_a_reservation_is_never_reclaimed_twice``, ``test_the_reclaim_and_the_release_of_one_reservation_never_count_twice`` |
+    | the fence of a reclaimed reservation | the reclaim invalidates the fence | ``test_the_reclaim_invalidates_the_fence_of_the_reservation`` |
+    | the grace period of the reclaim | the grace is configurable, a lease inside it waits | ``test_a_lease_inside_the_grace_period_is_not_reclaimed`` |
+    | the trace of a lost lease | a run which lost its lease leaves a trace | ``test_a_run_which_lost_its_lease_leaves_a_trace`` |
+    """
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory(dir=HERE)
+        self.addCleanup(self.temp.cleanup)
+        self.root = pathlib.Path(self.temp.name)
+        self.runs = self.root / 'runs'
+        self.runs.mkdir()
+        self.env = dict(os.environ, OPENSWARM_FLEET_CAPACITY_DIR=self.temp.name)
+        self.db_path = self.root / 'capacity.sqlite'
+        # The coordinator reads the kernel boot id over its own trusted channel.
+        self.boot_files = {}
+        probes = {}
+        for host in ('broker', 'worker', 'local'):
+            path = pathlib.Path(self.temp.name, host + '.boot')
+            path.write_text(BOOT)
+            self.boot_files[host] = path
+            probes[host] = [sys.executable, '-c',
+                            'import pathlib,sys; print(pathlib.Path(sys.argv[1]).read_text())', str(path)]
+        self.probe_config = pathlib.Path(self.temp.name, 'boot-probes.json')
+        self.probe_config.write_text(json.dumps(probes))
+        # The client keeps its own state inside the fixture, never in the home.
+        for name, value in (('DATA', str(self.root / 'data')),
+                            ('RUNS', str(self.runs))):
+            patch = mock.patch.object(xs, name, value)
+            patch.start()
+            self.addCleanup(patch.stop)
+
+    # ------------------------------------------------------------- coordinator
+
+    def ask(self, authenticated_host, **payload):
+        """One request to the coordinator."""
+        if payload.get('op') == 'acquire':
+            payload.setdefault('boot_id', BOOT)
+        argv = [str(BIN), authenticated_host]
+        if os.name == "nt":  # Windows cannot CreateProcess a shebang script (WinError 193)
+            argv = [sys.executable, *argv]
+        process = subprocess.run(argv, input=json.dumps(payload), text=True,
+                                 capture_output=True, env=self.env, timeout=30)
+        try:
+            return json.loads(process.stdout)
+        except ValueError:
+            return {'ok': False, 'error': (process.stderr or process.stdout or 'no answer')[:300]}
+
+    def sweep(self):
+        """Reclaim the expired leases without any request (the janitor entry point)."""
+        attempts = []
+        for argv in ([BIN, '--sweep-once'], [BIN, 'broker', '--sweep-once'],
+                     [BIN, '--sweep-once', 'broker']):
+            if os.name == "nt":
+                argv = [sys.executable, *argv]
+            process = subprocess.run(argv, input='', text=True, capture_output=True,
+                                     env=self.env, timeout=30)
+            attempts.append((' '.join(argv[1:]), process.returncode,
+                             process.stdout.strip()[:200], process.stderr.strip()[:200]))
+            if process.returncode != 0:
+                continue
+            try:
+                answer = json.loads(process.stdout)
+            except ValueError:
+                answer = {'ok': True}
+            if answer.get('ok', True):
+                return answer
+        self.fail('the coordinator offers no --sweep-once which reclaims the expired leases '
+                  'without a request (Refs #2160): %r' % (attempts,))
+
+    def rows(self):
+        """Every reservation of the coordinator database."""
+        with sqlite3.connect(self.db_path) as db:
+            cursor = db.execute('SELECT * FROM reservations')
+            names = [column[0] for column in cursor.description]
+            return [dict(zip(names, row)) for row in cursor.fetchall()]
+
+    def expire(self, token):
+        """Let the lease of a reservation run out."""
+        with sqlite3.connect(self.db_path) as db:
+            db.execute('UPDATE reservations SET lease_expires=0 WHERE token=?', (token,))
+
+    def audit_tables(self):
+        """The audit tables of the coordinator database."""
+        with sqlite3.connect(self.db_path) as db:
+            tables = [row[0] for row in db.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' "
+                "AND name NOT LIKE 'sqlite_%'")]
+        tables = [name for name in tables if name not in KNOWN_TABLES]
+        preferred = [name for name in tables
+                     if any(word in name.lower() for word in ('audit', 'trail', 'log', 'event'))]
+        return preferred or tables
+
+    def audit_rows(self):
+        """Every audit record of the coordinator database."""
+        records = []
+        with sqlite3.connect(self.db_path) as db:
+            for name in self.audit_tables():
+                cursor = db.execute('SELECT * FROM %s' % name)
+                names = [column[0] for column in cursor.description]
+                for row in cursor.fetchall():
+                    records.append(dict(zip(names, row)))
+        return records
+
+    # ------------------------------------------------------------------ cases
+
+    # Review 1 mapping (Refs #2160):
+    # BLOCKER 1 -> swrm/bin/fleet-capacity:220 (migrate_leases), :263 (sweep_once)
+    # -> test_sweep_migrates_old_rows_once_and_preserves_renewed_leases and
+    # FleetCapacityTests.test_legacy_reservations_migrate_to_conservative_lease.
+    # BLOCKER 2 -> swrm/bin/fleet-capacity:379 (request maintenance)
+    # -> test_every_capacity_request_reclaims_and_audits_other_expired_leases,
+    # test_request_audit_failure_rolls_back_migration_and_reclaim.
+    # Result: migration protects old runs, all capacity operations reclaim with
+    # atomic audit. The original 16 TTL acceptance tests stay intact.
+    def test_sweep_migrates_old_rows_once_and_preserves_renewed_leases(self):
+        # Start with the actual pre-lease schema, not just a NULL in a new DB.
+        with sqlite3.connect(self.db_path) as db:
+            db.execute('CREATE TABLE reservations (token TEXT PRIMARY KEY, host TEXT NOT NULL, '
+                       'run_id TEXT NOT NULL, backend TEXT NOT NULL, provider TEXT, created REAL NOT NULL)')
+            db.execute('INSERT INTO reservations VALUES (?,?,?,?,?,?)',
+                       ('e' * 32, 'worker', 'legacy', 'cursor', None, time.time() - 10000))
+        before = time.time()
+        self.assertEqual(self.sweep()['count'], 0)
+        expiry = self.rows()[0]['lease_expires']
+        self.assertGreaterEqual(expiry, before + 300)
+        self.assertLessEqual(expiry, time.time() + 300)
+        self.sweep()
+        self.assertEqual(self.rows()[0]['lease_expires'], expiry)
+        self.assertEqual(self.audit_rows(), [])
+        # A new run coexists with the migrated one, and a renewal survives a
+        # sweep which reclaims only the expired legacy row.
+        self.assertTrue(self.ask('local', op='acquire', token='f' * 32,
+                                 run_id='new', backend='codex')['admitted'])
+        self.assertTrue(self.ask('local', op='renew', token='f' * 32, run_id='new')['ok'])
+        self.expire('e' * 32)
+        self.assertEqual(self.sweep()['count'], 1)
+        self.assertEqual([row['run_id'] for row in self.rows()], ['new'])
+        self.assertEqual(len(self.audit_rows()), 1)
+        self.sweep()
+        self.assertEqual(len(self.audit_rows()), 1)
+
+    def test_every_capacity_request_reclaims_and_audits_other_expired_leases(self):
+        requests = [
+            ('broker', dict(op='status')),
+            ('local', dict(op='release', token='f' * 32, run_id='absent')),
+            ('broker', dict(op='recover', host='worker', token='f' * 32, run_id='absent')),
+            ('worker', dict(op='attest_boot', boot_id=BOOT)),
+            ('local', dict(op='acquire', token='f' * 32, run_id='live', backend='codex')),
+            ('local', dict(op='renew', token='f' * 32, run_id='live')),
+        ]
+        for index, (host, request) in enumerate(requests):
+            with self.subTest(op=request['op']):
+                token = '%032x' % (index + 1)
+                run_id = 'ghost-%d' % index
+                self.assertTrue(self.ask('worker', op='acquire', token=token,
+                                         run_id=run_id, backend='cursor')['admitted'])
+                self.expire(token)
+                answer = self.ask(host, **request)
+                self.assertTrue(answer['ok'], answer)
+                self.assertEqual(answer['reclaimed'], 1)
+                self.assertNotIn(run_id, [row['run_id'] for row in self.rows()])
+                records = [row for row in self.audit_rows() if row['event'] == 'lease-expired']
+                self.assertEqual(len(records), index + 1)
+                self.assertEqual(json.loads(records[-1]['entry'])['run_id'], run_id)
+
+    def test_request_audit_failure_rolls_back_migration_and_reclaim(self):
+        self.assertTrue(self.ask('worker', op='acquire', token='a' * 32,
+                                 run_id='ghost', backend='cursor')['admitted'])
+        self.expire('a' * 32)
+        with sqlite3.connect(self.db_path) as db:
+            db.execute('INSERT INTO reservations (token,host,run_id,backend,created) VALUES (?,?,?,?,?)',
+                       ('b' * 32, 'local', 'legacy', 'codex', time.time() - 10000))
+            db.execute("CREATE TRIGGER reject_audit BEFORE INSERT ON lease_audit "
+                       "BEGIN SELECT RAISE(ABORT, 'audit unavailable'); END")
+        answer = self.ask('broker', op='status')
+        self.assertFalse(answer['ok'], answer)
+        rows = {row['run_id']: row for row in self.rows()}
+        self.assertEqual(set(rows), {'ghost', 'legacy'})
+        self.assertEqual(rows['ghost']['lease_expires'], 0)
+        self.assertIsNone(rows['legacy']['lease_expires'])
+        self.assertEqual(self.audit_rows(), [])
+
+    def test_an_expired_lease_is_reclaimed_without_any_boot_evidence(self):
+        token = 'a' * 32
+        self.assertTrue(self.ask('worker', op='acquire', token=token, run_id='ghost',
+                                 backend='cursor', provider=None)['admitted'])
+        # The boot evidence of the owner is gone: the reclaim of an expired
+        # lease must not need it (Refs #2160).
+        self.probe_config.unlink()
+        self.expire(token)
+        self.sweep()
+        self.assertEqual(self.rows(), [], 'the expired lease still holds the slot')
+
+    def test_a_request_reclaims_the_expired_leases_of_the_other_runs(self):
+        token = 'a' * 32
+        self.assertTrue(self.ask('worker', op='acquire', token=token, run_id='ghost',
+                                 backend='cursor', provider=None)['admitted'])
+        self.expire(token)
+        # The next request of the coordinator cleans the expired leases up on
+        # the way, so the slot of the ghost is free again (one cursor only).
+        answer = self.ask('broker', op='acquire', token='b' * 32, run_id='fresh',
+                          backend='cursor', provider=None)
+        self.assertTrue(answer.get('admitted'), answer)
+        self.assertEqual([row['token'] for row in self.rows()], ['b' * 32])
+
+    def test_a_killed_run_gives_its_slot_back_after_its_lease_expired(self):
+        # A short lease and no grace: the slot of a run which stopped renewing
+        # comes back with its lease, without any release of the run.
+        self.env['OPENSWARM_FLEET_CAPACITY_TTL_SECONDS'] = '1'
+        self.env.update(grace_env(0))
+        token = 'a' * 32
+        acquired = self.ask('worker', op='acquire', token=token, run_id='killed',
+                             backend='cursor', provider=None)
+        self.assertTrue(acquired['admitted'], acquired)
+        fence = acquired.get('fence')
+        # While the lease is alive the slot belongs to the run.
+        blocked = self.ask('broker', op='acquire', token='b' * 32, run_id='fresh',
+                           backend='cursor', provider=None)
+        self.assertEqual(blocked.get('blocked'), ['cursor'])
+        # The run is killed: it stops renewing its lease.
+        time.sleep(1.3)
+        self.sweep()
+        self.assertEqual(self.rows(), [], 'the killed run still holds the slot')
+        # The next run takes the slot of the killed run.
+        answer = self.ask('broker', op='acquire', token='b' * 32, run_id='fresh',
+                          backend='cursor', provider=None)
+        self.assertTrue(answer.get('admitted'), answer)
+        # The write-back of the killed run is refused: its fence is gone.
+        refused = self.ask('worker', op='validate', run_id='killed', token=token, fence=fence)
+        self.assertFalse(refused.get('ok'), refused)
+
+    def test_the_sweep_reclaims_an_expired_lease_without_any_request(self):
+        token = 'a' * 32
+        self.assertTrue(self.ask('worker', op='acquire', token=token, run_id='ghost',
+                                 backend='cursor', provider=None)['admitted'])
+        self.expire(token)
+        before = len(self.audit_rows())
+        self.sweep()
+        # The database itself shows the reclaim: no request was needed.
+        self.assertEqual(self.rows(), [], 'the expired lease still holds the slot')
+        records = self.audit_rows()
+        self.assertEqual(len(records) - before, 1,
+                         'the reclaim left no audit record (Refs #2160): %r' % (records,))
+        self.assertTrue(any('ghost' in json.dumps(record, default=str) for record in records),
+                        'the audit record does not name the reclaimed run: %r' % (records,))
+
+    def test_the_reclaim_invalidates_the_fence_of_the_reservation(self):
+        token = 'a' * 32
+        acquired = self.ask('worker', op='acquire', token=token, run_id='ghost',
+                            backend='cursor', provider=None)
+        fence = acquired.get('fence')
+        self.assertIsInstance(fence, int)
+        self.expire(token)
+        self.sweep()
+        refused = self.ask('worker', op='validate', run_id='ghost', token=token, fence=fence)
+        self.assertFalse(refused.get('ok'), refused)
+        # The fence of a reclaimed reservation is never handed out again.
+        fresh = self.ask('worker', op='acquire', token='b' * 32, run_id='ghost',
+                         backend='cursor', provider=None)
+        self.assertTrue(fresh.get('admitted'), fresh)
+        self.assertGreater(fresh['fence'], fence)
+
+    def test_a_renewed_lease_is_not_reclaimed(self):
+        token = 'a' * 32
+        self.assertTrue(self.ask('worker', op='acquire', token=token, run_id='alive',
+                                 backend='cursor', provider=None)['admitted'])
+        renewed = self.ask('worker', op='renew', token=token, run_id='alive')
+        self.assertTrue(renewed.get('ok'), renewed)
+        self.sweep()
+        self.assertEqual([row['token'] for row in self.rows()], [token],
+                         'a lease which was renewed was reclaimed')
+
+    def test_a_reservation_is_never_reclaimed_twice(self):
+        token = 'a' * 32
+        self.assertTrue(self.ask('worker', op='acquire', token=token, run_id='ghost',
+                                 backend='cursor', provider=None)['admitted'])
+        self.expire(token)
+        before = len(self.audit_rows())
+        self.sweep()
+        self.assertEqual(len(self.audit_rows()) - before, 1,
+                         'the reclaim left no audit record (Refs #2160)')
+        self.sweep()
+        self.assertEqual(len(self.audit_rows()) - before, 1,
+                         'the same reservation was reclaimed twice')
+        self.assertEqual(self.rows(), [])
+
+    def test_the_reclaim_and_the_release_of_one_reservation_never_count_twice(self):
+        token = 'a' * 32
+        self.assertTrue(self.ask('worker', op='acquire', token=token, run_id='ghost',
+                                 backend='cursor', provider=None)['admitted'])
+        self.expire(token)
+        before = len(self.audit_rows())
+        answers = []
+
+        def release():
+            answers.append(self.ask('worker', op='release', token=token, run_id='ghost'))
+
+        def sweep():
+            answers.append(self.sweep())
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=4) as pool:
+            list(pool.map(lambda job: job(), [release, sweep, sweep]))
+        self.assertEqual(self.rows(), [], 'the reservation survived the race')
+        self.assertLessEqual(len(self.audit_rows()) - before, 1,
+                             'the reservation was reclaimed more than once')
+        for answer in answers:
+            for number in numbers(answer):
+                self.assertGreaterEqual(number, 0, 'a negative count: %r' % (answer,))
+
+    def test_a_failing_audit_rolls_the_reclaim_back(self):
+        token = 'a' * 32
+        self.assertTrue(self.ask('worker', op='acquire', token=token, run_id='first',
+                                 backend='cursor', provider=None)['admitted'])
+        self.expire(token)
+        self.sweep()
+        tables = self.audit_tables()
+        self.assertTrue(tables, 'the coordinator wrote no audit trail (Refs #2160)')
+        second = 'b' * 32
+        self.assertTrue(self.ask('worker', op='acquire', token=second, run_id='second',
+                                 backend='cursor', provider=None)['admitted'])
+        self.expire(second)
+        # The audit of the reclaim cannot be written: the reclaim must not
+        # survive it (a reclaim without an audit record is not allowed).
+        for table in tables:
+            with sqlite3.connect(self.db_path) as db:
+                db.execute("CREATE TRIGGER poison_audit_%s BEFORE INSERT ON %s "
+                           "BEGIN SELECT RAISE(ABORT, 'audit write failed'); END" % (table, table))
+        self.ask('broker', op='status')
+        self.assertTrue(any(row['token'] == second for row in self.rows()),
+                        'the reservation was reclaimed although the audit write failed')
+
+    def test_a_lease_inside_the_grace_period_is_not_reclaimed(self):
+        self.env.update(grace_env(3600))
+        token = 'a' * 32
+        self.assertTrue(self.ask('worker', op='acquire', token=token, run_id='grace',
+                                 backend='cursor', provider=None)['admitted'])
+        # The lease ran out a moment ago: the grace period is still running.
+        with sqlite3.connect(self.db_path) as db:
+            db.execute('UPDATE reservations SET lease_expires=? WHERE token=?', (time.time(), token))
+        self.sweep()
+        self.assertEqual([row['token'] for row in self.rows()], [token],
+                         'a lease inside the grace period was reclaimed')
+        # After the grace period the very same lease is reclaimed.
+        self.env.update(grace_env(0))
+        with sqlite3.connect(self.db_path) as db:
+            db.execute('UPDATE reservations SET lease_expires=? WHERE token=?',
+                       (time.time() - 1, token))
+        self.sweep()
+        self.assertEqual(self.rows(), [], 'the lease was not reclaimed after the grace period')
+
+    # ------------------------------------------------------------------ client
+
+    def guard(self):
+        """The guard configuration of the client: the real coordinator."""
+        path = self.root / 'guard.json'
+        path.write_text(json.dumps({'command': [sys.executable, str(BIN), 'broker']}))
+        return path
+
+    def test_a_run_whose_lease_was_reclaimed_cannot_write_its_result_back(self):
+        rdir = self.runs / 'fenced'
+        rdir.mkdir()
+        token = 'f' * 32
+        acquired = self.ask('worker', op='acquire', token=token, run_id='fenced',
+                            backend='cursor', provider=None)
+        fence = acquired.get('fence')
+        self.assertIsInstance(fence, int)
+        payload = {'op': 'acquire', 'token': token, 'run_id': 'fenced', 'backend': 'cursor',
+                   'provider': None, 'fence': fence}
+        # The lease runs out and the coordinator reclaims the reservation.
+        self.expire(token)
+        self.sweep()
+        self.assertEqual(self.rows(), [], 'the expired lease was not reclaimed')
+        # The run tries to write its result back: the fence refuses it.
+        command = [sys.executable, str(BIN), 'worker']
+        with mock.patch.dict(os.environ, {'OPENSWARM_FLEET_CAPACITY_DIR': self.temp.name}):
+            out = {'status': 'done'}
+            reason = xs.publish_fleet_result(str(rdir), out, [], (command, payload))
+        self.assertIn(reason, ('missing', 'token_mismatch', 'fence_mismatch', 'expired'), out)
+        self.assertEqual(out.get('status'), 'fenced')
+        self.assertEqual(out.get('error_class'), 'fenced')
+
+    def lost_lease_client(self):
+        """A run whose lease is lost: the renewal fails, the fence is gone."""
+        rdir = self.runs / 'lost-lease'
+        rdir.mkdir()
+        child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(300)'],
+                                 start_new_session=True)
+        self.addCleanup(self.kill_child, child)
+        xs.set_status(str(rdir), executor_pid=child.pid)
+
+        def answer(_command, payload):
+            op = payload.get('op')
+            if op == 'acquire':
+                return 0, {'ok': True, 'admitted': True, 'fence': 7,
+                           'lease_expires': time.time() + 0.3, 'lease_ttl_seconds': 0.3}
+            if op == 'renew':
+                return 1, {'ok': False,
+                           'error': 'reservation owner mismatch or reservation missing'}
+            if op == 'validate':
+                return 0, {'ok': False, 'valid': False, 'reason': 'missing', 'error': 'missing'}
+            raise AssertionError('unexpected coordinator request: %r' % (payload,))
+
+        def call(command, payload):
+            code, body = answer(command, payload)
+            if code != 0 or body.get('ok') is not True:
+                raise RuntimeError('fleet capacity coordinator unavailable: %s'
+                                   % (body.get('error') or body.get('reason')
+                                      or 'coordinator rejected request'))
+            return body
+
+        # The heartbeat of the lease outlives the call which started it, so the
+        # stubs stay in place until the end of the test.
+        for patcher in (mock.patch.object(xs, 'fleet_guard_command', return_value=['guard']),
+                        mock.patch.object(xs, 'fleet_guard_answer', side_effect=answer),
+                        mock.patch.object(xs, 'fleet_guard_call', side_effect=call)):
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        admitted = xs.reserve_provider_slot(str(rdir), 'codex', None,
+                                            {'concurrency': {'total': 8}})
+        self.assertTrue(admitted, 'the run did not get its slot')
+        return rdir, child
+
+    def kill_child(self, child):
+        """Stop the executor of the fixture."""
+        if child.poll() is None:
+            try:
+                os.killpg(os.getpgid(child.pid), signal.SIGKILL)
+            except OSError:
+                pass
+            try:
+                child.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                pass
+
+    def stop_renewal(self, rdir):
+        """Stop the heartbeat of a run: the lease is not renewed any more."""
+        renewal = xs._FLEET_RENEWALS.pop(os.path.realpath(str(rdir)), None)
+        if renewal:
+            renewal[0].set()
+            renewal[1].join(5)
+
+    def lease_lost_trace(self, rdir):
+        """Whether the loss of the lease left a trace in the run."""
+        try:
+            status = json.loads((pathlib.Path(rdir) / 'status.json').read_text())
+        except (OSError, ValueError):
+            status = {}
+        for key, value in status.items():
+            name = key.lower()
+            if 'lost' in name:
+                return True
+            if 'lease' in name and isinstance(value, str) and any(
+                    word in value.lower()
+                    for word in ('lost', 'expired', 'reclaim', 'missing', 'fenced')):
+                return True
+        for path in sorted(pathlib.Path(rdir).glob('*.jsonl')):
+            text = path.read_text(errors='replace').lower()
+            if 'lease' in text and any(word in text for word in ('lost', 'expired', 'reclaim')):
+                return True
+        return False
+
+    def test_a_run_which_lost_its_lease_stops_its_executor(self):
+        rdir, child = self.lost_lease_client()
+        try:
+            deadline = time.monotonic() + 20
+            while time.monotonic() < deadline and child.poll() is None:
+                time.sleep(0.05)
+            self.assertIsNotNone(child.poll(),
+                                 'the executor of the run kept running after its lease was lost')
+        finally:
+            self.stop_renewal(rdir)
+            xs._FLEET_RESERVATIONS.pop(os.path.realpath(str(rdir)), None)
+
+    def test_a_run_which_lost_its_lease_leaves_a_trace(self):
+        rdir, child = self.lost_lease_client()
+        try:
+            deadline = time.monotonic() + 20
+            while time.monotonic() < deadline and not self.lease_lost_trace(rdir):
+                time.sleep(0.05)
+            self.assertTrue(self.lease_lost_trace(rdir),
+                            'the loss of the lease left no trace in the run')
+        finally:
+            self.stop_renewal(rdir)
+            xs._FLEET_RESERVATIONS.pop(os.path.realpath(str(rdir)), None)
+
+    # ------------------------------------------------------- the terminal paths
+
+    def run_to_terminal_state(self, rdir, rc, executor=None):
+        """Run the executor of a run to its terminal state (the real client path)."""
+        def failed_executor(_decision, _state, _prompt, _wd, _rdir, _timeout, _event_file):
+            return rc, None, {}, 'the executor failed' if rc else ''
+
+        env = {'OPENSWARM_FLEET_GUARD_CONFIG': str(self.guard()),
+               'OPENSWARM_FLEET_CAPACITY_DIR': self.temp.name}
+        with mock.patch.dict(os.environ, env), \
+                mock.patch.dict(xs.EXECUTORS, {'pi': executor or failed_executor}), \
+                mock.patch.object(xs.procboundary.CgroupBoundary, 'create',
+                                  return_value=SafeBoundary()), \
+                mock.patch.object(xs, 'start_fleet_release_worker'):
+            return xs.run_executor_with_rate_limit(
+                'pi', {'backend': 'pi', 'model': 'fake'}, {}, 'task', str(self.root),
+                str(rdir), xs.NOW() + 30, {'concurrency': {'total': 8}}, defer_fleet_release=True)
+
+    def rebase_workspace(self, rdir):
+        """Prepare diverged branches which conflict when the executor rebases."""
+        repo = rdir / 'repo'
+        repo.mkdir()
+
+        def git(*args):
+            return subprocess.check_output(['git', '-C', str(repo), *args], text=True).strip()
+
+        git('init', '-q')
+        git('config', 'user.name', 'test')
+        git('config', 'user.email', 'test@test')
+        git('checkout', '-q', '-b', 'base')
+        (repo / 'file').write_text('base\n')
+        git('add', 'file')
+        git('commit', '-qm', 'base')
+        git('checkout', '-q', '-b', 'swrm/run')
+        (repo / 'file').write_text('work\n')
+        git('commit', '-qam', 'work')
+        git('checkout', '-q', 'base')
+        (repo / 'file').write_text('upstream\n')
+        git('commit', '-qam', 'upstream')
+        git('checkout', '-q', 'swrm/run')
+        return repo
+
+    def test_a_rebase_run_gives_its_slot_back_with_the_lease(self):
+        self.check_terminal_path('rebase')
+
+    def test_an_exec_error_run_gives_its_slot_back_with_the_lease(self):
+        self.check_terminal_path('exec_error')
+
+    def test_a_budget_exceeded_run_gives_its_slot_back_with_the_lease(self):
+        self.check_terminal_path('budget_exceeded')
+
+    def check_terminal_path(self, kind):
+        """The slot of a run which ended in `kind` comes back with the lease."""
+        rdir = self.runs / kind
+        rdir.mkdir()
+        self.addCleanup(xs._FLEET_RESERVATIONS.pop, os.path.realpath(str(rdir)), None)
+        self.addCleanup(self.stop_renewal, rdir)
+        if kind == 'rebase':
+            repo = self.rebase_workspace(rdir)
+
+            def executor(_decision, _state, _prompt, _wd, _rdir, _timeout, _event_file):
+                # The client must have acquired capacity before trying the rebase.
+                self.assertEqual([row['run_id'] for row in self.rows()], [kind])
+                process = subprocess.run(['git', '-C', str(repo), 'rebase', 'base'],
+                                         text=True, capture_output=True, timeout=_timeout)
+                return process.returncode, None, {}, process.stdout + process.stderr
+
+            attempts, final, error = self.run_to_terminal_state(rdir, None, executor)
+            # swrm has no dedicated rebase/base-drift terminal class. A rebase
+            # conflict terminates through executor_error_class as exec_error.
+            self.assertEqual(error, 'exec_error')
+            self.assertIsNone(final)
+            self.assertEqual(len(attempts), 1)
+            self.assertEqual(attempts[0]['rc'], 1)
+            self.assertEqual(attempts[0]['error_class'], 'exec_error')
+            self.assertIn('CONFLICT', attempts[0]['error_tail'])
+            self.assertTrue((repo / '.git' / 'rebase-merge').is_dir())
+        else:
+            rc = 1 if kind == 'exec_error' else 124
+            attempts, final, error = self.run_to_terminal_state(rdir, rc)
+            self.assertEqual(error, kind)
+        rows = [row for row in self.rows() if row['run_id'] == kind]
+        self.assertEqual(len(rows), 1, 'the terminal run did not retain its slot')
+        token = rows[0]['token']
+        reservation = xs._FLEET_RESERVATIONS[os.path.realpath(str(rdir))]
+        self.stop_renewal(rdir)
+        # The release of the run never reached the coordinator (the supervisor
+        # died with the run): the lease has to free the slot.
+        self.expire(token)
+        self.assertEqual(self.sweep()['count'], 1)
+        self.assertEqual([row for row in self.rows() if row['run_id'] == kind], [],
+                         'the slot of the %s run was not reclaimed by its lease' % kind)
+        with mock.patch.dict(os.environ, {'OPENSWARM_FLEET_CAPACITY_DIR': self.temp.name}):
+            out = {'status': 'done'}
+            reason = xs.publish_fleet_result(str(rdir), out, [], reservation)
+        self.assertEqual(reason, 'missing')
+        self.assertEqual(out['status'], 'fenced')
+        self.assertEqual(out['error_class'], 'fenced')
+
 
 if __name__ == '__main__':
     unittest.main()
