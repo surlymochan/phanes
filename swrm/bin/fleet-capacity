@@ -1,5 +1,27 @@
 #!/usr/bin/env python3
-"""Atomic fleet admission; a lease timeout alone never proves executor death.
+"""Atomic fleet admission; an expired lease is reclaimed and its fence refuses the old run.
+
+A reservation is a lease: the owning host renews it while its run lives.  When
+the lease ran out (lease_expires before the current time minus the grace
+period) the coordinator reclaims the reservation without any boot evidence:
+the fencing token of the reservation refuses the write-back of the old run, so
+a crashed, killed or lost run cannot hold a slot forever (Refs #2160, #1792).
+
+The reclaim:
+* needs no boot evidence and no terminal path of a run: rebase, exec_error and
+  budget_exceeded all give their slot back with the lease;
+* invalidates the fence of the reservation (the fence counter never hands the
+  same fence out twice);
+* writes its audit record in the same transaction: a failing audit write rolls
+  the whole reclaim back, a reclaim without an audit record never happens;
+* waits for the grace period (OPENSWARM_FLEET_CAPACITY_GRACE_SECONDS), so a
+  slow renewal or a clock skew does not cost a live run its slot.
+
+Every request which manages the capacity (acquire, renew) reclaims the expired
+leases on the way, and "fleet-capacity --sweep-once" reclaims them without any
+request at all (a janitor or a timer may call it).  The read-only observations
+(status, validate) and the single reservation operations (release, recover,
+attest_boot) never change the state of the coordinator on their own.
 
 Recovery protocol (over the existing forced-command authenticated transport):
 * The coordinator administrator can install boot-probes.json beside this DB:
@@ -20,11 +42,12 @@ Recovery protocol (over the existing forced-command authenticated transport):
   "run_id":"<status run_id>","recovery_id":"<status recovery_id>"}.
   Both TTL expiry and independently observed owner reboot are required atomically.
 
-A supervisor crash or network partition on the same boot retains capacity until
-normal boundary-checked release or owner reboot. Rows without boot evidence
-(including legacy rows or owners without probes) require normal owner release.
-Probe failures retain capacity; client assertions and old self-reported boot
-records cannot make a reservation recoverable.
+The boot probes keep the explicit recovery of a reservation whose owner rebooted
+while its run was alive: it needs the expiry of the lease and the observed
+reboot of the owner, atomically.  Probe failures retain capacity; client
+assertions and old self-reported boot records cannot make a reservation
+recoverable.  The lease of a run which never renews it does not need any of
+this: the coordinator reclaims it on its own.
 
 Fencing: every reservation carries a monotonically increasing fence handed out
 by the coordinator. {"op":"validate","run_id","token","fence"} is read-only: it
@@ -117,9 +140,141 @@ if not math.isfinite(LEASE_TTL) or LEASE_TTL <= 0:
     sys.exit('invalid fleet capacity lease TTL')
 LIMITS = {'total': 8, 'host:broker': 2, 'host:worker': 2, 'host:local': 2,
           'codex': 1, 'pi': 1, 'cursor': 1, 'agy': 1, 'copilot': 1, 'minimax-cn': 1}
-if len(sys.argv) != 2 or sys.argv[1] not in ('broker', 'worker', 'local'):
+# The grace period of the reclaim of an expired lease.  The primary name comes
+# first, the aliases keep the knob of the older deployments readable.
+GRACE_ENV_NAMES = ('OPENSWARM_FLEET_CAPACITY_GRACE_SECONDS',
+                    'OPENSWARM_FLEET_CAPACITY_RECLAIM_GRACE_SECONDS',
+                    'OPENSWARM_FLEET_CAPACITY_TTL_GRACE_SECONDS',
+                    'OPENSWARM_FLEET_LEASE_GRACE_SECONDS')
+# The default grace covers a slow renewal of the owner and a clock skew: a
+# lease which ran out waits for it before the coordinator takes the slot back.
+DEFAULT_RECLAIM_GRACE = 60.0
+# "fleet-capacity --sweep-once" reclaims the expired leases without any
+# request: the janitor (or a timer) of the coordinator calls it.
+SWEEP_FLAG = '--sweep-once'
+
+
+def reclaim_grace():
+    """The grace period of the reclaim: the first configured name wins."""
+    for name in GRACE_ENV_NAMES:
+        raw = os.environ.get(name)
+        if not raw:
+            continue
+        try:
+            value = float(raw)
+        except ValueError:
+            sys.exit('invalid fleet capacity reclaim grace')
+        if not math.isfinite(value) or value < 0:
+            sys.exit('invalid fleet capacity reclaim grace')
+        return value
+    return DEFAULT_RECLAIM_GRACE
+
+
+def coordinator_root():
+    """The directory of the coordinator database."""
+    return Path(os.environ.get('OPENSWARM_FLEET_CAPACITY_DIR') or
+                (Path(_home()) / '.claude/swrm-fleet-capacity'))
+
+
+def open_coordinator(root):
+    """Open the coordinator database."""
+    root.mkdir(mode=0o700, parents=True, exist_ok=True)
+    db = sqlite3.connect(str(root / 'capacity.sqlite'), timeout=10, isolation_level=None)
+    os.chmod(root / 'capacity.sqlite', 0o600)
+    db.execute('PRAGMA busy_timeout=10000')
+    return db
+
+
+def prepare_schema(db):
+    """Create the tables of the coordinator and migrate the older ones."""
+    db.execute('CREATE TABLE IF NOT EXISTS reservations (token TEXT PRIMARY KEY, host TEXT NOT NULL, run_id TEXT NOT NULL, backend TEXT NOT NULL, provider TEXT, created REAL NOT NULL, lease_expires REAL, fence INTEGER NOT NULL DEFAULT 0)')
+    columns = {row[1] for row in db.execute('PRAGMA table_info(reservations)')}
+    if 'lease_expires' not in columns:
+        db.execute('ALTER TABLE reservations ADD COLUMN lease_expires REAL')
+    # Fencing tokens are monotonic; rows migrated from an older database count as 0.
+    if 'fence' not in columns:
+        db.execute('ALTER TABLE reservations ADD COLUMN fence INTEGER NOT NULL DEFAULT 0')
+    db.execute('CREATE TABLE IF NOT EXISTS fence_counter (id INTEGER PRIMARY KEY, value INTEGER NOT NULL)')
+    # Deliberately do not migrate self-reported boot_id / host_boots evidence.
+    # A prior client may have forged both; those reservations stay unrecoverable.
+    if 'verified_boot_id' not in columns:
+        db.execute('ALTER TABLE reservations ADD COLUMN verified_boot_id TEXT')
+    db.execute('CREATE TABLE IF NOT EXISTS verified_host_boots (host TEXT NOT NULL, boot_id TEXT NOT NULL, '
+               'retired INTEGER NOT NULL, PRIMARY KEY(host,boot_id))')
+    # The audit trail of the lease actions.  It holds the records of the
+    # committed transactions, so a reclaim which cannot be audited never
+    # happens (Refs #2160).
+    db.execute('CREATE TABLE IF NOT EXISTS lease_audit (id INTEGER PRIMARY KEY AUTOINCREMENT, '
+               'at REAL NOT NULL, event TEXT NOT NULL, entry TEXT NOT NULL)')
+
+
+def lease_audit(db, event, **fields):
+    """Record one lease action in the audit trail of the coordinator.
+
+    The record is written in the same transaction as the change it describes:
+    a rolled back transaction leaves no audit record, and a committed change
+    always has one.
+    """
+    entry = {'at': round(time.time(), 3), 'event': event}
+    entry.update(fields)
+    db.execute('INSERT INTO lease_audit (at,event,entry) VALUES (?,?,?)',
+               (entry['at'], event, json.dumps(entry, separators=(',', ':'), ensure_ascii=False)))
+    return entry
+
+
+def reclaim_expired(db, now, grace):
+    """Reclaim every lease which ran out before the grace period.
+
+    The reclaim does not depend on any boot evidence and on any terminal path
+    of a run: the fence of the reclaimed reservation refuses the write-back of
+    the old run.  The audit record belongs to the same transaction: a failing
+    audit write rolls the whole reclaim back.
+    """
+    rows = db.execute('SELECT token,host,run_id,backend,provider,created,lease_expires,fence '
+                      'FROM reservations WHERE lease_expires IS NOT NULL AND lease_expires < ?',
+                      (now - grace,)).fetchall()
+    reclaimed = []
+    for row in rows:
+        db.execute('DELETE FROM reservations WHERE token=?', (row[0],))
+        reclaimed.append(lease_audit(db, 'lease-expired', host=row[1], run_id=row[2], backend=row[3],
+                                     provider=row[4], created=row[5], lease_expires=row[6], fence=row[7]))
+    return reclaimed
+
+
+def sweep_once(root):
+    """Reclaim the expired leases of the coordinator without any request.
+
+    The janitor (or a timer) of the coordinator calls it: a crashed run loses
+    its slot within its TTL even when no client asks the coordinator for
+    anything (B1).
+    """
+    db = open_coordinator(root)
+    try:
+        db.execute('BEGIN IMMEDIATE')
+        try:
+            prepare_schema(db)
+            reclaimed = reclaim_expired(db, time.time(), reclaim_grace())
+            db.execute('COMMIT')
+        except Exception:
+            db.execute('ROLLBACK')
+            raise
+    finally:
+        db.close()
+    print(json.dumps({'ok': True, 'reclaimed': reclaimed, 'count': len(reclaimed)},
+                     separators=(',', ':')))
+    return 0
+
+
+sweep_requested = SWEEP_FLAG in sys.argv[1:]
+host_args = [arg for arg in sys.argv[1:] if arg != SWEEP_FLAG]
+if len(host_args) > 1 or (host_args and host_args[0] not in ('broker', 'worker', 'local')):
     sys.exit('invalid authenticated host')
-host = sys.argv[1]
+host = host_args[0] if host_args else None
+if host is None and not sweep_requested:
+    sys.exit('invalid authenticated host')
+if sweep_requested:
+    # The janitor entry point: no request, no authenticated host, no stdin.
+    sys.exit(sweep_once(coordinator_root()))
 try:
     request = json.load(sys.stdin)
     op = request.get('op')
@@ -174,27 +329,10 @@ try:
         sys.exit(0 if process.returncode == 0 else 1)
     if op not in ('acquire', 'release', 'status', 'recover', 'renew', 'attest_boot', 'validate'):
         raise ValueError('invalid operation')
-    root = Path(os.environ.get('OPENSWARM_FLEET_CAPACITY_DIR') or
-                (Path(_home()) / '.claude/swrm-fleet-capacity'))
-    root.mkdir(mode=0o700, parents=True, exist_ok=True)
-    db = sqlite3.connect(str(root / 'capacity.sqlite'), timeout=10, isolation_level=None)
-    os.chmod(root / 'capacity.sqlite', 0o600)
-    db.execute('PRAGMA busy_timeout=10000')
+    root = coordinator_root()
+    db = open_coordinator(root)
     db.execute('BEGIN IMMEDIATE')
-    db.execute('CREATE TABLE IF NOT EXISTS reservations (token TEXT PRIMARY KEY, host TEXT NOT NULL, run_id TEXT NOT NULL, backend TEXT NOT NULL, provider TEXT, created REAL NOT NULL, lease_expires REAL, fence INTEGER NOT NULL DEFAULT 0)')
-    columns = {row[1] for row in db.execute('PRAGMA table_info(reservations)')}
-    if 'lease_expires' not in columns:
-        db.execute('ALTER TABLE reservations ADD COLUMN lease_expires REAL')
-    # Fencing tokens are monotonic; rows migrated from an older database count as 0.
-    if 'fence' not in columns:
-        db.execute('ALTER TABLE reservations ADD COLUMN fence INTEGER NOT NULL DEFAULT 0')
-    db.execute('CREATE TABLE IF NOT EXISTS fence_counter (id INTEGER PRIMARY KEY, value INTEGER NOT NULL)')
-    # Deliberately do not migrate self-reported boot_id / host_boots evidence.
-    # A prior client may have forged both; those reservations stay unrecoverable.
-    if 'verified_boot_id' not in columns:
-        db.execute('ALTER TABLE reservations ADD COLUMN verified_boot_id TEXT')
-    db.execute('CREATE TABLE IF NOT EXISTS verified_host_boots (host TEXT NOT NULL, boot_id TEXT NOT NULL, '
-               'retired INTEGER NOT NULL, PRIMARY KEY(host,boot_id))')
+    prepare_schema(db)
     claimed_boot = request.get('boot_id')
     if claimed_boot is not None and (not isinstance(claimed_boot, str) or
                                     not re.fullmatch(r'[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}', claimed_boot)):
@@ -215,6 +353,14 @@ try:
         # A fence check is read-only: it never migrates or renews a reservation.
         db.execute('UPDATE reservations SET lease_expires=CASE WHEN created>0 THEN created+? ELSE ? END '
                    'WHERE lease_expires IS NULL', (LEASE_TTL, now + LEASE_TTL))
+    reclaimed = []
+    if op in ('acquire', 'renew'):
+        # A request which manages the capacity reclaims the expired leases on
+        # the way: a slot which a lost run still holds is never handed out
+        # again.  The read-only observations (status, validate) and the single
+        # reservation operations (release, recover, attest_boot) never change
+        # the state of the coordinator on their own.
+        reclaimed = reclaim_expired(db, now, reclaim_grace())
     if op == 'attest_boot':
         out = {'ok': True}
     elif op == 'status':
@@ -312,7 +458,12 @@ try:
         if op == 'release':
             if old and (old[0] != host or old[1] != run_id):
                 raise ValueError('reservation owner mismatch')
-            db.execute('DELETE FROM reservations WHERE token=? AND host=? AND run_id=?', (token,host,run_id))
+            count = db.execute('DELETE FROM reservations WHERE token=? AND host=? AND run_id=?',
+                               (token, host, run_id)).rowcount
+            if count:
+                # The release of a reservation is audited in the same
+                # transaction: a slot which is given back is never invisible.
+                lease_audit(db, 'released', host=host, run_id=run_id, backend=old[2], provider=old[3])
             out = {'ok': True, 'released': bool(old)}
         else:
             backend, provider = request.get('backend'), request.get('provider')
@@ -347,6 +498,8 @@ try:
                                (token,host,run_id,backend,provider,now,now + LEASE_TTL,boot_id,fence))
                     out = {'ok': True, 'admitted': True, 'fence': fence, 'lease_expires': now + LEASE_TTL,
                            'lease_ttl_seconds': LEASE_TTL}
+    if reclaimed:
+        out['reclaimed'] = len(reclaimed)
     db.execute('COMMIT')
     print(json.dumps(out, separators=(',',':')))
     sys.exit(0 if out.get('ok', True) else 1)
