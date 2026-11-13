@@ -52,4 +52,41 @@ class Tests(unittest.TestCase):
     reply=json.loads(left.recv(4096));self.assertEqual(reply['error'],'budget_exceeded_daily')
     db=xs.assignment_key_db();self.assertEqual(db.execute('SELECT count(*) FROM assignments').fetchone()[0],0);db.close()
    left.close()
+ def test_budget_rejection_rechecks_key_after_concurrent_acceptance(self):
+  ops=[]
+  def call(name,req):
+   ops.append(req['op'])
+   if req['op']=='ping':return {'ok':True,'capabilities':{'durable_assignment_keys':1}}
+   if ops.count('assignment_lookup')==1:return {'ok':True,'found':False}
+   return {'ok':True,'found':True,'id':'first-run','reused':True,'assigned':True}
+  out=io.StringIO()
+  with mock.patch.object(xs,'validate_card_type'),mock.patch.object(xs,'load_policy',return_value={'run':{'timeout_seconds':300}}),mock.patch.object(xs,'lanes_by_name',return_value=[{'name':'L1','backend':'codex'}]),mock.patch.object(xs,'lane_call',side_effect=call),mock.patch.object(xs,'check_budget',side_effect=xs.BudgetExceeded({'scope':'daily'})),contextlib.redirect_stdout(out):xs.cmd_lane_assign(self.args)
+  import json
+  self.assertEqual(json.loads(out.getvalue())['id'],'first-run')
+  self.assertEqual(ops,['ping','assignment_lookup','assignment_lookup'])
+ def test_same_key_concurrent_budget_interleaving_returns_one_run(self):
+  import threading
+  barrier=threading.Barrier(2);accepted=threading.Event();guard=threading.Lock();counts={};ops=[];errors=[]
+  def call(name,req):
+   op=req['op'];thread=threading.current_thread().name
+   with guard:
+    ops.append(op);counts[thread]=counts.get(thread,0)+(op=='assignment_lookup');n=counts[thread]
+   if op=='ping':return {'ok':True,'capabilities':{'durable_assignment_keys':1}}
+   if op=='assignment_lookup' and n==1:
+    barrier.wait(timeout=5);return {'ok':True,'found':False}
+   if op=='assignment_lookup':return {'ok':True,'found':True,'id':'first-run','reused':True,'assigned':True}
+   if op=='assign_keyed':accepted.set();return {'ok':True,'id':'first-run','assigned':True}
+   raise AssertionError(op)
+  def budget(*args):
+   if threading.current_thread().name=='second':
+    assert accepted.wait(5);raise xs.BudgetExceeded({'scope':'daily'})
+  def run():
+   try:xs.cmd_lane_assign(self.args)
+   except BaseException as exc:errors.append(exc)
+  with mock.patch.object(xs,'validate_card_type'),mock.patch.object(xs,'load_policy',return_value={'run':{'timeout_seconds':300}}),mock.patch.object(xs,'lanes_by_name',return_value=[{'name':'L1','backend':'codex'}]),mock.patch.object(xs,'lane_call',side_effect=call),mock.patch.object(xs,'check_budget',side_effect=budget),contextlib.redirect_stdout(io.StringIO()):
+   threads=[threading.Thread(target=run,name=n) for n in ('first','second')]
+   for t in threads:t.start()
+   for t in threads:t.join(10)
+  self.assertFalse(errors);self.assertFalse(any(t.is_alive() for t in threads))
+  self.assertEqual(ops.count('assign_keyed'),1);self.assertEqual(ops.count('assignment_lookup'),3)
 if __name__=='__main__':unittest.main()

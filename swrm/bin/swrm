@@ -11184,6 +11184,22 @@ def cmd_lane_assign(args):
     try:
         check_budget(load_policy(), [(lane["backend"], budget)])
     except BudgetExceeded as error:
+        # Another request with the same key may have been accepted after the
+        # initial lookup and filled the budget. Return that outcome first.
+        if request["idempotency_key"]:
+            lookup = lane_call(lane["name"], {"op": "assignment_lookup", "assignment": request})
+            if lookup.get("found"):
+                previous_id = lookup.get("id")
+                if previous_id:
+                    lookup.update({"lane": lane["name"], "watch": f"swrm watch {previous_id}",
+                                   "result": os.path.join(RUNS, previous_id, "result.json")})
+                print(json.dumps(lookup, indent=2, ensure_ascii=False))
+                if not lookup.get("ok"):
+                    sys.exit(1)
+                return
+            if not lookup.get("ok"):
+                print(json.dumps(lookup, ensure_ascii=False))
+                sys.exit(1)
         budget_error(error)
     response = lane_call(lane["name"], request)
     if response.get("ok"):
