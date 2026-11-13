@@ -79,4 +79,11 @@ os.kill(os.getpid(),signal.SIGKILL)
   args=('fleet','exec','local-test','--','lane','assign','L1','--prompt','LANE_TEST_WAIT fleet integration','--idempotency-key','dispatch/fleet/build')
   one=json.loads(self.cli(*args,timeout=30).stdout);two=json.loads(self.cli(*args,timeout=30).stdout)
   self.assertEqual(one['id'],two['id']);self.assertTrue(two['reused'])
+# Reuse the existing lane fixture without collecting its entire legacy suite
+# a second time through this subclass or its imported module-level name.
+for _name in dir(LaneTests):
+ if _name.startswith('test_') and _name not in IdempotentLaneTests.__dict__:
+  setattr(IdempotentLaneTests, _name, None)
+del LaneTests
+
 if __name__=='__main__':unittest.main()
