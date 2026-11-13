@@ -94,9 +94,24 @@ class FleetTests(unittest.TestCase):
             (directory / "status.json").write_text(json.dumps({"state": state}))
         with mock.patch.dict(os.environ, {"OPENSWARM_FLEET_CAPACITY_ONLY": "1"}), \
                 mock.patch.object(xs, "RUNS", str(runs)), \
-                mock.patch.object(xs, "run_digest", side_effect=lambda rid: {"id": rid, "state": "running"}) as digest:
+                mock.patch.object(xs, "run_digest", side_effect=lambda rid, parse_events=True: {"id": rid, "state": "running"}) as digest:
             snapshot = xs.fleet_snapshot()
-        digest.assert_called_once_with("active")
+        digest.assert_called_once_with("active", parse_events=False)
+        self.assertEqual([row["id"] for row in snapshot["active_runs"]], ["active"])
+
+    def test_full_snapshot_never_parses_event_logs(self):
+        # Parsing every run's event log made `fleet status` time out (host shown unreachable, runs hidden).
+        runs = self.root / "runs"
+        events = self.root / "events.jsonl"
+        events.write_text("{}\n")
+        for name, state in (("done", "finished"), ("active", "running")):
+            directory = runs / name
+            directory.mkdir(parents=True)
+            (directory / "status.json").write_text(json.dumps({"state": state, "events": str(events)}))
+        with mock.patch.object(xs, "RUNS", str(runs)), \
+                mock.patch.object(xs.WatchMessages, "feed", return_value=[]) as feed:
+            snapshot = xs.fleet_snapshot()
+        feed.assert_not_called()
         self.assertEqual([row["id"] for row in snapshot["active_runs"]], ["active"])
 
     def test_text_status_shows_config_invalid_with_reason(self):
