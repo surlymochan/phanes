@@ -1,6 +1,7 @@
 usage: swrm lane assign [-h] (--task-file TASK_FILE | --prompt PROMPT)
                         [--title TITLE] [--verify VERIFY] [--verify-baseline]
                         [--budget-minutes BUDGET_MINUTES] [--base BASE]
+                        [--idempotency-key IDEMPOTENCY_KEY]
                         [--scope {repo,host}] [--card-type CARD_TYPE]
                         [--rework-of REWORK_OF] [--paths PATHS [PATHS ...]]
                         [--read-only]
@@ -19,6 +20,8 @@ options:
   --verify-baseline
   --budget-minutes BUDGET_MINUTES
   --base BASE
+  --idempotency-key IDEMPOTENCY_KEY
+                        stable assignment key
   --scope {repo,host}   task scope (repo by default; host for authorized host
                         operations)
   --card-type CARD_TYPE

@@ -9401,6 +9401,63 @@ def lane_record_event(path, event):
                     break
 
 
+def assignment_fingerprint(request, lane_name):
+    data = {k: v for k, v in request.items() if k not in ("op", "run_id", "idempotency_key")}
+    data["lane"] = lane_name
+    return hashlib.sha256(json.dumps(data, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode()).hexdigest()
+
+
+def assignment_key_db():
+    os.makedirs(DATA, exist_ok=True)
+    db = sqlite3.connect(os.path.join(DATA, "lane-assignment-keys.sqlite3"), timeout=30)
+    db.execute("PRAGMA synchronous=FULL")
+    # Serialize creation/migration across supervisors that share this DATA directory.
+    db.execute("BEGIN IMMEDIATE")
+    db.execute("CREATE TABLE IF NOT EXISTS assignments (key TEXT PRIMARY KEY, fingerprint TEXT NOT NULL, lane TEXT NOT NULL, run_id TEXT NOT NULL, created REAL NOT NULL, phase TEXT NOT NULL)")
+    columns = {row[1] for row in db.execute("PRAGMA table_info(assignments)")}
+    if "phase" not in columns:
+        db.execute("ALTER TABLE assignments ADD COLUMN phase TEXT NOT NULL DEFAULT 'reserved'")
+    db.commit()
+    return db
+def assignment_key_lookup(key, fingerprint, lane_name):
+    with contextlib.closing(assignment_key_db()) as db:
+        row = db.execute("SELECT fingerprint,lane,run_id,phase FROM assignments WHERE key=?", (key,)).fetchone()
+    if row and (row[0] != fingerprint or row[1] != lane_name):
+        return {"ok": False, "error": "idempotency key conflicts with prior assignment"}
+    if row:
+        rid = row[2]
+        status = jload(os.path.join(RUNS, rid, "status.json"), {}) or {}
+        accepted = row[3] == "accepted" and bool(status)
+        return {"ok": accepted, "id": rid, "reused": True, "state": status.get("state", "uncertain") if accepted else "uncertain",
+                "assigned": accepted, "idempotency_key": key,
+                **({} if accepted else {"error": "assignment outcome uncertain; reconcile original run"})}
+    return None
+
+
+def assignment_key_reserve(key, fingerprint, lane_name, run_id):
+    with contextlib.closing(assignment_key_db()) as db:
+        db.execute("BEGIN IMMEDIATE")
+        row = db.execute("SELECT fingerprint,lane,run_id,phase FROM assignments WHERE key=?", (key,)).fetchone()
+        if row:
+            db.rollback()
+            return assignment_key_lookup(key, fingerprint, lane_name)
+        db.execute("INSERT INTO assignments VALUES (?,?,?,?,?,?)", (key, fingerprint, lane_name, run_id, NOW(), "reserved"))
+        db.commit()
+    return None
+
+
+def assignment_key_accepted(key, run_id):
+    with contextlib.closing(assignment_key_db()) as db:
+        db.execute("UPDATE assignments SET phase = 'accepted' WHERE key = ? AND run_id = ?", (key, run_id))
+        db.commit()
+
+
+def assignment_key_reject(key, run_id):
+    with contextlib.closing(assignment_key_db()) as db:
+        db.execute("DELETE FROM assignments WHERE key = ? AND run_id = ? AND phase = 'reserved'", (key, run_id))
+        db.commit()
+
+
 def lane_control_messages(server, lane, current, child, turn, pending):
     """Handle currently queued local control-socket requests; return whether shutdown was requested."""
     down = False
@@ -9423,9 +9480,28 @@ def lane_control_messages(server, lane, current, child, turn, pending):
             answer = {"ok": True}
             if op == "ping":
                 answer["state"] = jload(lane_state_path(lane["name"]), {})
-            elif op == "assign":
+                answer["capabilities"] = {"durable_assignment_keys": 1,
+                                          "requires_idempotency_key": os.environ.get("OPENSWARM_LANE_REQUIRE_IDEMPOTENCY") == "1"}
+            elif op == "assignment_lookup":
+                lookup_req = req.get("assignment")
+                key = lookup_req.get("idempotency_key") if isinstance(lookup_req, dict) else None
+                if not isinstance(key, str) or not key.strip() or len(key) > 200 or any(ord(ch) < 32 for ch in key):
+                    answer = {"ok": False, "error": "invalid idempotency key"}
+                else:
+                    previous = assignment_key_lookup(key, assignment_fingerprint(lookup_req, lane["name"]), lane["name"])
+                    answer = dict(previous, found=True) if previous else {"ok": True, "found": False}
+            elif op in ("assign", "assign_keyed"):
                 state = jload(lane_state_path(lane["name"]), {}) or {}
-                if (state.get("state") != "idle" or current.get("run_id")
+                key = req.get("idempotency_key")
+                if op == "assign" and key:
+                    answer = {"ok": False, "error": "keyed assignment requires assign_keyed operation"}
+                elif (op == "assign_keyed" or os.environ.get("OPENSWARM_LANE_REQUIRE_IDEMPOTENCY") == "1") and not key:
+                    answer = {"ok": False, "error": "idempotency key required"}
+                elif key is not None and (not isinstance(key, str) or not key.strip() or len(key) > 200 or any(ord(ch) < 32 for ch in key)):
+                    answer = {"ok": False, "error": "invalid idempotency key"}
+                elif key and (previous := assignment_key_lookup(key, assignment_fingerprint(req, lane["name"]), lane["name"])):
+                    answer = previous
+                elif (state.get("state") != "idle" or current.get("run_id")
                         or (child and isinstance(getattr(child, "health_restart_reason", None), str))):
                     answer = {"ok": False, "error": f"lane {lane['name']} is busy ({state.get('state')})"}
                 else:
@@ -9438,8 +9514,17 @@ def lane_control_messages(server, lane, current, child, turn, pending):
                         if budget is None:
                             budget = load_policy()["run"]["timeout_seconds"] / 60
                         validate_card_type(load_policy(), req.get("card_type"))
-                        admit_budget(load_policy(), lane["backend"], float(budget), rdir, id=rid,
-                                     state="queued", started=NOW(), runner_pid=os.getpid(), lane=lane["name"])
+                        if key:
+                            previous = assignment_key_reserve(key, assignment_fingerprint(req, lane["name"]), lane["name"], rid)
+                            if previous:
+                                conn.sendall((json.dumps(previous, ensure_ascii=False) + "\n").encode())
+                                continue
+                        try:
+                            admit_budget(load_policy(), lane["backend"], float(budget), rdir, id=rid,
+                                         state="queued", started=NOW(), runner_pid=os.getpid(), lane=lane["name"])
+                        except BudgetExceeded:
+                            if key: assignment_key_reject(key, rid)
+                            raise
                         os.makedirs(rdir, exist_ok=True)
                         task = str(req.get("task") or "")
                         with open(os.path.join(rdir, "task.md"), "w") as f:
@@ -9469,7 +9554,11 @@ def lane_control_messages(server, lane, current, child, turn, pending):
                                    provider=provider, concurrency_keys=concurrency_keys(lane["backend"], provider),
                                    started=spec["started"], budget_minutes=spec.get("budget_minutes"), scope=spec["scope"],
                                    cwd=lane["repo"], runner_pid=os.getpid(), events=spec["_event_file"])
+                        if key:
+                            assignment_key_accepted(key, rid)
                         answer = {"ok": True, "id": rid, "state": "queued"}
+                        if key:
+                            answer.update({"idempotency_key": key, "assigned": True, "reused": False})
             elif op in ("steer", "abort", "down"):
                 active = bool(current.get("run_id"))
                 if op == "steer":
@@ -11057,11 +11146,7 @@ def cmd_lane_assign(args):
     if not math.isfinite(budget) or budget < 0:
         print(json.dumps({"ok": False, "error": "budget-minutes must be non-negative"}))
         sys.exit(1)
-    try:
-        check_budget(load_policy(), [(lane["backend"], budget)])
-    except BudgetExceeded as error:
-        budget_error(error)
-    response = lane_call(lane["name"], {"op": "assign", "run_id": rid, "task": task, "title": title,
+    request = {"op": "assign", "run_id": rid, "task": task, "title": title,
                                          "verify": args.verify, "verify_baseline": args.verify_baseline,
                                          "budget_minutes": budget, "base": args.base,
                                          "card_type": getattr(args, "card_type", None),
@@ -11075,8 +11160,34 @@ def cmd_lane_assign(args):
                                          "artifact_sink": args.artifact_sink if role_info else None,
                                          "evalid_output": args.evalid_output if role_info else None,
                                          "evalid_repair_round": args.evalid_repair_round if role_info else None,
-                                         "scope": getattr(args, "scope", "repo")})
+                                         "scope": getattr(args, "scope", "repo"),
+                                         "idempotency_key": getattr(args, "idempotency_key", None)}
+    if request["idempotency_key"]:
+        request["op"] = "assign_keyed"
+        ping = lane_call(lane["name"], {"op": "ping"})
+        if not ping.get("ok") or (ping.get("capabilities") or {}).get("durable_assignment_keys") != 1:
+            print(json.dumps({"ok": False, "assigned": False, "error": "live supervisor lacks durable idempotency capability"}))
+            sys.exit(1)
+        lookup = lane_call(lane["name"], {"op": "assignment_lookup", "assignment": request})
+        if lookup.get("found"):
+            previous_id = lookup.get("id")
+            if previous_id:
+                lookup.update({"lane": lane["name"], "watch": f"swrm watch {previous_id}",
+                               "result": os.path.join(RUNS, previous_id, "result.json")})
+            print(json.dumps(lookup, indent=2, ensure_ascii=False))
+            if not lookup.get("ok"):
+                sys.exit(1)
+            return
+        if not lookup.get("ok"):
+            print(json.dumps(lookup, ensure_ascii=False))
+            sys.exit(1)
+    try:
+        check_budget(load_policy(), [(lane["backend"], budget)])
+    except BudgetExceeded as error:
+        budget_error(error)
+    response = lane_call(lane["name"], request)
     if response.get("ok"):
+        rid = response.get("id") or rid
         response.update({"lane": lane["name"], "watch": f"swrm watch {rid}",
                          "result": os.path.join(RUNS, rid, "result.json")})
         print(json.dumps(response, indent=2, ensure_ascii=False))
@@ -15453,6 +15564,7 @@ def main():
     add_dispatch_arguments(lp, "task-source", "title", "verify", "verify-baseline", "budget",
                            task_source_required=True)
     lp.add_argument("--base")
+    lp.add_argument("--idempotency-key", help="stable assignment key")
     lp.add_argument("--scope", choices=("repo", "host"), default="repo", help="task scope (repo by default; host for authorized host operations)")
     add_dispatch_arguments(lp, "card-type", "rework-of", "paths", "read-only",
                            card_type_help="optional task card type from knowledge/card-types.yaml",
@@ -15470,6 +15582,8 @@ def main():
     lp.add_argument("--evalid-output", help=argparse.SUPPRESS)
     lp.add_argument("--evalid-repair-round", type=int, help=argparse.SUPPRESS)
     lp.add_argument("--artifact-sink", help=argparse.SUPPRESS)
+    lp = lane_sub.add_parser("capabilities", help="inspect live supervisor assignment capabilities")
+    lp.add_argument("name")
     lp = lane_sub.add_parser("steer", help="steer the active turn")
     lp.add_argument("name")
     lp.add_argument("--text", required=True)
@@ -15659,6 +15773,11 @@ def main():
                 cmd_lane_status()
             elif a.lane_cmd == "assign":
                 cmd_lane_assign(a)
+            elif a.lane_cmd == "capabilities":
+                result = lane_call(a.name, {"op": "ping"})
+                print(json.dumps(result, ensure_ascii=False))
+                if not result.get("ok"):
+                    sys.exit(1)
             elif a.lane_cmd in ("steer", "abort"):
                 cmd_lane_simple(a)
             elif a.lane_cmd == "launchd-plist":
